@@ -127,6 +127,7 @@ enum CanonicalParam: String, Codable, CaseIterable, Sendable, Hashable, CodingKe
     case minP
     case maxTokens
     case repeatPenalty
+    case presencePenalty
     case seed
     case contextLength
     case systemPrompt

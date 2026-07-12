@@ -115,6 +115,46 @@ final class InstanceRegistry {
         controllers.first(where: { $0.id == id })
     }
 
+    // MARK: Adopt as new instance
+
+    /// Called when the user clicks "Adopt" on a port-conflict error.
+    /// Creates a fresh persistent instance to track the external server and
+    /// reverts the errored controller to .stopped — preserving the user's
+    /// original config (name, model selection, params) completely untouched.
+    func adoptExternalAsNewInstance(from erroredController: ServerInstanceController) async {
+        guard case .error(let err) = erroredController.phase,
+              case .portConflict(let port, _) = err.kind else { return }
+
+        let base = erroredController.config
+        var adoptConfig = ServerInstanceConfig(
+            name: "External @ \(port)",
+            type: base.type,
+            port: base.port,
+            executablePath: base.executablePath
+        )
+        adoptConfig.host = base.host
+        adoptConfig.modelSearchPaths = base.modelSearchPaths
+
+        let adoptController = makeController(config: adoptConfig)
+        controllers.append(adoptController)
+
+        // Connect the new controller to the already-running server.
+        await adoptController.adoptIfRunning()
+
+        // Persist the detected model key so the instance can be restarted later
+        // without losing the model selection.
+        if let detectedKey = adoptController.currentModel?.key {
+            var updated = adoptController.config
+            updated.selectedModelKey = detectedKey
+            adoptController.updateConfig(updated)
+        }
+
+        // Leave the original controller in .stopped — the user's config is intact.
+        erroredController.revertToStopped()
+
+        persistInstances()
+    }
+
     // MARK: App lifecycle
 
     /// Called from applicationWillTerminate — stops all managed servers.
@@ -128,12 +168,19 @@ final class InstanceRegistry {
 
     // MARK: Adopt already-running servers
 
-    /// Check every stopped instance to see if a server is already running on
-    /// its port (e.g. started by launchd, a shell script, or a previous
-    /// LocalBar session). Runs concurrently across all instances.
+    /// At app launch, reconnect to servers that are already healthy on their
+    /// configured port — but ONLY for instances the user has marked
+    /// `startOnAppLaunch`. Those instances represent servers the user wants
+    /// LocalBar to manage automatically; reconnecting to them after a crash
+    /// or restart is the expected behaviour.
+    ///
+    /// Instances without `startOnAppLaunch` are left stopped. If something
+    /// external happens to be on their port, the user will see a portConflict
+    /// error when they explicitly click Start — giving them the choice to Adopt
+    /// or change the port.
     func adoptRunningServers() async {
         await withTaskGroup(of: Void.self) { group in
-            for controller in controllers {
+            for controller in controllers where controller.config.startOnAppLaunch {
                 group.addTask { await controller.adoptIfRunning() }
             }
         }

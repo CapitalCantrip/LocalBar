@@ -21,14 +21,15 @@ struct OllamaDriver: ServerDriver {
     /// an advisory badge ("External tools may override this per request").
     var paramSchema: [ParamDescriptor] {
         [
-            ParamDescriptor(param: .temperature,   serverFlagName: "options.temperature",     application: .serverSideDefault, valueType: .double(range: 0.0...2.0),   defaultValue: .double(0.8),  note: "Set via Modelfile DEFAULT parameter"),
-            ParamDescriptor(param: .topP,          serverFlagName: "options.top_p",           application: .serverSideDefault, valueType: .double(range: 0.0...1.0),   defaultValue: .double(0.9),  note: "Set via Modelfile DEFAULT parameter"),
-            ParamDescriptor(param: .topK,          serverFlagName: "options.top_k",           application: .serverSideDefault, valueType: .int(range: 0...100),         defaultValue: .int(40),      note: "Set via Modelfile DEFAULT parameter"),
-            ParamDescriptor(param: .minP,          serverFlagName: "options.min_p",           application: .serverSideDefault, valueType: .double(range: 0.0...1.0),   defaultValue: nil,           note: "Set via Modelfile DEFAULT parameter"),
-            ParamDescriptor(param: .maxTokens,     serverFlagName: "options.num_predict",     application: .serverSideDefault, valueType: .int(range: -1...128_000),    defaultValue: .int(-1),      note: "Set via Modelfile DEFAULT parameter"),
-            ParamDescriptor(param: .repeatPenalty, serverFlagName: "options.repeat_penalty",  application: .serverSideDefault, valueType: .double(range: 0.5...2.0),   defaultValue: .double(1.1),  note: "Set via Modelfile DEFAULT parameter"),
-            ParamDescriptor(param: .seed,          serverFlagName: "options.seed",            application: .serverSideDefault, valueType: .int(range: 0...Int.max),     defaultValue: nil,           note: "Set via Modelfile DEFAULT parameter"),
-            ParamDescriptor(param: .contextLength, serverFlagName: "options.num_ctx",         application: .serverSideDefault, valueType: .int(range: 512...128_000),   defaultValue: .int(2048),    note: "Set via Modelfile PARAMETER"),
+            ParamDescriptor(param: .contextLength,   serverFlagName: "options.num_ctx",           application: .serverSideDefault, valueType: .int(range: 512...128_000),  defaultValue: .int(2048),    note: "Context window size — set via Modelfile PARAMETER"),
+            ParamDescriptor(param: .temperature,     serverFlagName: "options.temperature",        application: .serverSideDefault, valueType: .double(range: 0.0...2.0),   defaultValue: .double(0.8),  note: "Set via Modelfile DEFAULT parameter"),
+            ParamDescriptor(param: .maxTokens,       serverFlagName: "options.num_predict",        application: .serverSideDefault, valueType: .int(range: -1...128_000),   defaultValue: .int(-1),      note: "Limits response length (-1 = unlimited)"),
+            ParamDescriptor(param: .topK,            serverFlagName: "options.top_k",              application: .serverSideDefault, valueType: .int(range: 0...200),         defaultValue: .int(40),      note: "Set via Modelfile DEFAULT parameter"),
+            ParamDescriptor(param: .repeatPenalty,   serverFlagName: "options.repeat_penalty",     application: .serverSideDefault, valueType: .double(range: 0.5...2.0),   defaultValue: .double(1.1),  note: "Set via Modelfile DEFAULT parameter"),
+            ParamDescriptor(param: .presencePenalty, serverFlagName: "options.presence_penalty",   application: .serverSideDefault, valueType: .double(range: 0.0...1.0),   defaultValue: nil,           note: "Set via Modelfile DEFAULT parameter"),
+            ParamDescriptor(param: .topP,            serverFlagName: "options.top_p",              application: .serverSideDefault, valueType: .double(range: 0.0...1.0),   defaultValue: .double(0.9),  note: "Set via Modelfile DEFAULT parameter"),
+            ParamDescriptor(param: .minP,            serverFlagName: "options.min_p",              application: .serverSideDefault, valueType: .double(range: 0.0...1.0),   defaultValue: nil,           note: "Set via Modelfile DEFAULT parameter"),
+            ParamDescriptor(param: .seed,            serverFlagName: "options.seed",               application: .serverSideDefault, valueType: .int(range: 0...Int.max),     defaultValue: nil,           note: "Set via Modelfile DEFAULT parameter"),
         ]
     }
 
@@ -237,14 +238,15 @@ struct OllamaDriver: ServerDriver {
 
         // Sampling PARAMETER directives (Milestone B fills these in).
         let paramMap: [(CanonicalParam, String)] = [
-            (.temperature,   "temperature"),
-            (.topP,          "top_p"),
-            (.topK,          "top_k"),
-            (.minP,          "min_p"),
-            (.maxTokens,     "num_predict"),
-            (.repeatPenalty, "repeat_penalty"),
-            (.seed,          "seed"),
-            (.contextLength, "num_ctx"),
+            (.contextLength,   "num_ctx"),
+            (.temperature,     "temperature"),
+            (.maxTokens,       "num_predict"),
+            (.topK,            "top_k"),
+            (.repeatPenalty,   "repeat_penalty"),
+            (.presencePenalty, "presence_penalty"),
+            (.topP,            "top_p"),
+            (.minP,            "min_p"),
+            (.seed,            "seed"),
         ]
         for (param, ollamaName) in paramMap {
             guard let value = params[param] else { continue }

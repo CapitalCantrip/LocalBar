@@ -56,6 +56,10 @@ struct ServerInstanceConfig: Codable, Identifiable, Equatable, Sendable {
     /// first selected on an Ollama instance.
     var managedModelTag: String?
 
+    /// Per-instance canonical param overrides set by the user.
+    /// Resolution order: driver defaults ← instanceParams ← active profile (future).
+    var instanceParams: ParamValues = ParamValues()
+
     var startOnAppLaunch: Bool = false
 
     init(name: String, type: ServerType, port: Int, executablePath: String) {

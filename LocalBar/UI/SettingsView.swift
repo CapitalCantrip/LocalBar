@@ -276,9 +276,6 @@ private struct ServersTab: View {
         }
         .task {
             restoreColumnCustomization()
-            // Adopt any externally-started servers (launchd, scripts, etc.)
-            // each time the Settings screen opens, not just at app launch.
-            await registry.adoptRunningServers()
             for controller in registry.controllers {
                 await controller.refreshModels()
             }
@@ -352,7 +349,13 @@ private struct InstanceDetailPanel: View {
     @State private var portOverride: String = ""
     @State private var showingConcurrentWarning = false
 
+    // Param panel state — string drafts for TextField controls, bool for toggles.
+    @State private var paramDrafts: [CanonicalParam: String] = [:]
+    @State private var boolDrafts: [CanonicalParam: Bool] = [:]
+    @State private var systemPromptDraft: String = ""
+
     private var models: [ModelRef] { controller.availableModels }
+    private var driver: any ServerDriver { DriverRegistry.driver(for: controller.config.type) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -373,86 +376,13 @@ private struct InstanceDetailPanel: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-
-                // Controls
-                GroupBox("Controls") {
-                    HStack(spacing: 12) {
-                        controlButtons
-                        Spacer()
-                    }
-                    // Error message + rollback (D4)
-                    if case .error(let err) = controller.phase {
-                        Divider()
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(err.message)
-                                .font(.callout)
-                                .foregroundStyle(.red)
-                            if err.previousModelKey != nil {
-                                Button("Restart with previous model") {
-                                    Task { await controller.rollbackToPreviousModel() }
-                                }
-                            }
-                        }
-                    }
-                    // Context usage when running
-                    if let usage = controller.contextUsage {
-                        Divider()
-                        LabeledContent("Context") {
-                            Text("\(usage.usedTokens) / \(usage.maxTokens) tokens")
-                        }
-                    }
+                    controlsSection
+                    configSection
+                    modelSection
+                    parametersSection
                 }
-
-                // Editable config
-                GroupBox("Configuration") {
-                    LabeledContent("Name") {
-                        TextField("Instance name", text: $editedName)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(maxWidth: 220)
-                    }
-                    LabeledContent("Type") { Text(controller.config.type.rawValue) }
-                    LabeledContent("Host") {
-                        Text("\(controller.config.host):\(controller.config.port)")
-                            .monospacedDigit()
-                    }
-                    LabeledContent("Executable") {
-                        Text(controller.config.executablePath)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .font(.callout)
-                    }
-                }
-
-                // Model picker (only when models have been scanned)
-                if !models.isEmpty {
-                    GroupBox("Model") {
-                        Picker("", selection: $editedModelKey) {
-                            Text("None").tag("")
-                            ForEach(models) { model in
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(model.displayName)
-                                    if let meta = model.metadata {
-                                        Text(meta.summary)
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                }
-                                .tag(model.key)
-                            }
-                        }
-                        .labelsHidden()
-                        .pickerStyle(.radioGroup)
-                    }
-                } else {
-                    GroupBox("Model") {
-                        Button("Scan for models") {
-                            Task { await controller.refreshModels() }
-                        }
-                    }
-                }
-            } // end inner VStack
-            .padding(12)
-        } // end ScrollView
+                .padding(12)
+            }
         } // end outer VStack
         .alert("Another server is running", isPresented: $showingConcurrentWarning) {
             Button("Start Anyway") {
@@ -478,6 +408,7 @@ private struct InstanceDetailPanel: View {
             editedName = controller.config.name
             editedModelKey = controller.config.selectedModelKey ?? ""
             portOverride = String(controller.config.port)
+            initParamDrafts()
         }
         .onChange(of: editedName) { _, newValue in
             let trimmed = newValue.trimmingCharacters(in: .whitespaces)
@@ -493,6 +424,400 @@ private struct InstanceDetailPanel: View {
             updated.selectedModelKey = key
             controller.updateConfig(updated)
         }
+    }
+
+    // MARK: Body sections (split out to keep body type-checkable)
+
+    @ViewBuilder private var controlsSection: some View {
+        GroupBox("Controls") {
+            HStack(spacing: 12) {
+                controlButtons
+                Spacer()
+            }
+            if case .error(let err) = controller.phase {
+                Divider()
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(err.message)
+                        .font(.callout)
+                        .foregroundStyle(.red)
+                    if err.previousModelKey != nil {
+                        Button("Restart with previous model") {
+                            Task { await controller.rollbackToPreviousModel() }
+                        }
+                    }
+                }
+            }
+            if let usage = controller.contextUsage {
+                Divider()
+                LabeledContent("Context") {
+                    Text("\(usage.usedTokens) / \(usage.maxTokens) tokens")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var configSection: some View {
+        GroupBox("Configuration") {
+            LabeledContent("Name") {
+                TextField("Instance name", text: $editedName)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 220)
+            }
+            LabeledContent("Type") { Text(controller.config.type.rawValue) }
+            LabeledContent("Host") { Text(controller.config.host).monospacedDigit() }
+            LabeledContent("Port") {
+                if controller.phase.isTransitioning || controller.phase.isRunning {
+                    Text(String(controller.config.port))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                } else {
+                    TextField("", text: $portOverride)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                        .monospacedDigit()
+                        .onSubmit { commitPortOverride() }
+                }
+            }
+            LabeledContent("Executable") {
+                Text(controller.config.executablePath)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .font(.callout)
+            }
+        }
+    }
+
+    @ViewBuilder private var modelSection: some View {
+        if !models.isEmpty {
+            GroupBox("Model") {
+                Picker("", selection: $editedModelKey) {
+                    Text("None").tag("")
+                    ForEach(models) { model in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(model.displayName)
+                            if let meta = model.metadata {
+                                Text(meta.summary)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .tag(model.key)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.radioGroup)
+            }
+        } else {
+            GroupBox("Model") {
+                Button("Scan for models") {
+                    Task { await controller.refreshModels() }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var parametersSection: some View {
+        GroupBox("Parameters") {
+            let schema = driver.paramSchema
+            if schema.isEmpty {
+                Text("No configurable parameters for this server type.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(schema) { descriptor in
+                    paramRow(for: descriptor)
+                    if descriptor.id != schema.last?.id { Divider() }
+                }
+            }
+            if controller.config.type == .ollama {
+                Divider()
+                systemPromptSection
+            }
+        }
+    }
+
+    @ViewBuilder private var systemPromptSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("System Prompt")
+                    .font(.callout)
+                Spacer()
+                Text("Baked into Modelfile")
+                    .font(.caption2)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(.orange.opacity(0.15))
+                    .foregroundStyle(.orange)
+                    .clipShape(Capsule())
+            }
+            TextEditor(text: $systemPromptDraft)
+                .font(.callout)
+                .frame(minHeight: 80, maxHeight: 160)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
+                )
+            HStack {
+                if systemPromptDraft.isEmpty {
+                    Text("Leave blank to use the model's built-in default.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer()
+                let stored = controller.config.instanceParams.systemPrompt ?? ""
+                if systemPromptDraft != stored {
+                    Button("Save") { commitSystemPrompt() }
+                        .font(.caption)
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+        }
+        .padding(.top, 4)
+    }
+
+    // MARK: Param panel helpers
+
+    /// Build a single row for a CanonicalParam descriptor.
+    @ViewBuilder
+    private func paramRow(for descriptor: ParamDescriptor) -> some View {
+        let isServerSide = descriptor.application == .serverSideDefault
+        HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(humanName(descriptor.param))
+                        .font(.callout)
+                    if isServerSide {
+                        Text("Modelfile")
+                            .font(.caption2)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(.orange.opacity(0.15))
+                            .foregroundStyle(.orange)
+                            .clipShape(Capsule())
+                    }
+                }
+                if let note = descriptor.note {
+                    Text(note)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+            Spacer()
+            paramControl(for: descriptor)
+        }
+        .padding(.vertical, 2)
+    }
+
+    @ViewBuilder
+    private func paramControl(for descriptor: ParamDescriptor) -> some View {
+        let defaultText = descriptor.defaultValue.map { paramValueString($0) }
+
+        switch descriptor.valueType {
+        case .bool:
+            Toggle("", isOn: Binding(
+                get: { boolDrafts[descriptor.param] ?? false },
+                set: { newVal in
+                    boolDrafts[descriptor.param] = newVal
+                    commitBool(descriptor.param, value: newVal)
+                }
+            ))
+            .labelsHidden()
+            .frame(width: 44)
+
+        case .double(let range):
+            if let range {
+                VStack(alignment: .trailing, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Slider(
+                            value: Binding(
+                                get: { Double(paramDrafts[descriptor.param] ?? "") ?? range.lowerBound },
+                                set: { paramDrafts[descriptor.param] = String(format: "%.3g", $0) }
+                            ),
+                            in: range,
+                            onEditingChanged: { editing in
+                                if !editing { commitText(descriptor) }
+                            }
+                        )
+                        .frame(width: 100)
+                        TextField(defaultText ?? "default", text: paramBinding(descriptor))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 60)
+                            .multilineTextAlignment(.trailing)
+                            .onSubmit { commitText(descriptor) }
+                    }
+                    clearButton(for: descriptor)
+                }
+            } else {
+                VStack(alignment: .trailing, spacing: 2) {
+                    TextField(defaultText ?? "default", text: paramBinding(descriptor))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                        .multilineTextAlignment(.trailing)
+                        .onSubmit { commitText(descriptor) }
+                    clearButton(for: descriptor)
+                }
+            }
+
+        case .int(let range):
+            // Use Stepper only for small ranges (≤ 100 values). Avoid .count on large
+            // ranges like 0...Int.max which overflows.
+            if let range, range.upperBound - range.lowerBound <= 100 {
+                VStack(alignment: .trailing, spacing: 2) {
+                    Stepper(
+                        value: Binding(
+                            get: { Int(paramDrafts[descriptor.param] ?? "") ?? defaultIntValue(descriptor, fallback: range.lowerBound) },
+                            set: { newVal in
+                                paramDrafts[descriptor.param] = String(newVal)
+                                commitText(descriptor)
+                            }
+                        ),
+                        in: range
+                    ) {
+                        Text(paramDrafts[descriptor.param] ?? defaultText ?? "default")
+                            .frame(width: 50, alignment: .trailing)
+                            .monospacedDigit()
+                    }
+                    clearButton(for: descriptor)
+                }
+            } else {
+                VStack(alignment: .trailing, spacing: 2) {
+                    TextField(defaultText ?? "default", text: paramBinding(descriptor))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                        .multilineTextAlignment(.trailing)
+                        .monospacedDigit()
+                        .onSubmit { commitText(descriptor) }
+                    clearButton(for: descriptor)
+                }
+            }
+
+        case .string:
+            VStack(alignment: .trailing, spacing: 2) {
+                TextField(defaultText ?? "default", text: paramBinding(descriptor))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 100)
+                    .onSubmit { commitText(descriptor) }
+                clearButton(for: descriptor)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func clearButton(for descriptor: ParamDescriptor) -> some View {
+        if paramDrafts[descriptor.param] != nil {
+            Button("Reset") {
+                paramDrafts.removeValue(forKey: descriptor.param)
+                var updated = controller.config
+                updated.instanceParams.values.removeValue(forKey: descriptor.param)
+                controller.updateConfig(updated)
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private func defaultIntValue(_ descriptor: ParamDescriptor, fallback: Int) -> Int {
+        if case .int(let i) = descriptor.defaultValue { return i }
+        return fallback
+    }
+
+    private func paramBinding(_ descriptor: ParamDescriptor) -> Binding<String> {
+        Binding(
+            get: { paramDrafts[descriptor.param] ?? "" },
+            set: { newVal in
+                paramDrafts[descriptor.param] = newVal.isEmpty ? nil : newVal
+                commitText(descriptor)   // save on every change; commitText skips unparseable partials
+            }
+        )
+    }
+
+    private func commitText(_ descriptor: ParamDescriptor) {
+        guard let raw = paramDrafts[descriptor.param], !raw.isEmpty else {
+            var updated = controller.config
+            updated.instanceParams.values.removeValue(forKey: descriptor.param)
+            controller.updateConfig(updated)
+            return
+        }
+        var value: ParamValue?
+        switch descriptor.valueType {
+        case .double:   if let d = Double(raw) { value = .double(d) }
+        case .int:      if let i = Int(raw)    { value = .int(i)    }
+        case .string:   value = .string(raw)
+        case .bool:     break
+        }
+        guard let value else { return }
+        var updated = controller.config
+        updated.instanceParams.values[descriptor.param] = value
+        controller.updateConfig(updated)
+    }
+
+    private func commitBool(_ param: CanonicalParam, value: Bool) {
+        var updated = controller.config
+        updated.instanceParams.values[param] = .bool(value)
+        controller.updateConfig(updated)
+    }
+
+    private func commitSystemPrompt() {
+        var updated = controller.config
+        updated.instanceParams.systemPrompt = systemPromptDraft.isEmpty ? nil : systemPromptDraft
+        controller.updateConfig(updated)
+    }
+
+    private func initParamDrafts() {
+        paramDrafts = [:]
+        boolDrafts = [:]
+        for descriptor in driver.paramSchema {
+            if let val = controller.config.instanceParams.values[descriptor.param] {
+                switch val {
+                case .double(let d): paramDrafts[descriptor.param] = String(format: "%.3g", d)
+                case .int(let i):    paramDrafts[descriptor.param] = String(i)
+                case .string(let s): paramDrafts[descriptor.param] = s
+                case .bool(let b):   boolDrafts[descriptor.param] = b
+                }
+            } else if case .bool(let b) = descriptor.defaultValue {
+                boolDrafts[descriptor.param] = b
+            }
+        }
+        systemPromptDraft = controller.config.instanceParams.systemPrompt ?? ""
+    }
+
+    private func humanName(_ param: CanonicalParam) -> String {
+        switch param {
+        case .contextLength:  return "Context Length"
+        case .temperature:    return "Temperature"
+        case .maxTokens:      return "Max Tokens"
+        case .topK:           return "Top K"
+        case .repeatPenalty:  return "Repeat Penalty"
+        case .presencePenalty: return "Presence Penalty"
+        case .topP:           return "Top P"
+        case .minP:           return "Min P"
+        case .seed:           return "Seed"
+        case .systemPrompt:   return "System Prompt"
+        }
+    }
+
+    private func paramValueString(_ value: ParamValue) -> String {
+        switch value {
+        case .double(let d): return String(format: "%.3g", d)
+        case .int(let i):    return String(i)
+        case .string(let s): return s
+        case .bool(let b):   return b ? "On" : "Off"
+        }
+    }
+
+    /// Commit a port edit made while the server is stopped. Called on submit/blur.
+    private func commitPortOverride() {
+        guard let port = Int(portOverride),
+              (1...65_535).contains(port),
+              port != controller.config.port else {
+            portOverride = String(controller.config.port) // revert invalid
+            return
+        }
+        var updated = controller.config
+        updated.port = port
+        controller.updateConfig(updated)
     }
 
     private func applyPortOverrideAndRetry() {
@@ -539,7 +864,7 @@ private struct InstanceDetailPanel: View {
             ProgressView().controlSize(.small)
         case .error(let err):
             if case .portConflict = err.kind {
-                Button("Adopt") { Task { await controller.adoptExternal() } }
+                Button("Adopt") { Task { await registry.adoptExternalAsNewInstance(from: controller) } }
                     .buttonStyle(.borderedProminent)
                 HStack(spacing: 4) {
                     Text("or port")
@@ -589,7 +914,10 @@ private struct AddInstanceSheet: View {
 
     private var portValue: Int? { Int(port) }
 
-    private var portConflict: Bool {
+    /// True when another instance is already configured on this port.
+    /// Advisory only — not a blocker. Multiple instances may share a port
+    /// as long as only one runs at a time.
+    private var portAlreadyConfigured: Bool {
         guard let p = portValue else { return false }
         return registry.controllers.contains { $0.config.port == p }
     }
@@ -601,8 +929,7 @@ private struct AddInstanceSheet: View {
     private var canAdd: Bool {
         guard !name.trimmingCharacters(in: .whitespaces).isEmpty,
               !executablePath.isEmpty,
-              let p = portValue, (1...65_535).contains(p),
-              !portConflict else { return false }
+              let p = portValue, (1...65_535).contains(p) else { return false }
         // mlx-lm cannot launch without a model.
         if serverType == .mlxLM && selectedModelKey == nil { return false }
         return true
@@ -684,10 +1011,10 @@ private struct AddInstanceSheet: View {
                             .labelsHidden()
                             .frame(width: 80)
                             .multilineTextAlignment(.trailing)
-                        if portConflict {
-                            Text("Port \(port) is used by another instance (try \(suggestFreePort(startingAt: portValue ?? defaultPort)))")
+                        if portAlreadyConfigured {
+                            Text("Another instance uses port \(port) — only one can run at a time")
                                 .font(.caption)
-                                .foregroundStyle(.red)
+                                .foregroundStyle(.orange)
                         } else if portValue == nil {
                             Text("Enter a valid port number")
                                 .font(.caption)

@@ -93,17 +93,19 @@ final class ServerInstanceController: Identifiable {
 
     /// Explicitly adopt an external server after the user has acknowledged the
     /// port conflict. Only valid when phase is .error(.portConflict).
+    /// The user's own config (name, selectedModelKey) is preserved — only
+    /// currentModel reflects what is actually running on the port.
     func adoptExternal() async {
         guard case .error(let err) = phase,
               case .portConflict = err.kind else { return }
         adoptedPID = await findListeningPID(port: config.port)
         await refreshModels()
         let detected = await detectRunningModel()
-        currentModel = detected != nil ? detected : await resolvedModel()
-        // Sync config so the picker and name reflect what was actually adopted.
+        // Show what's actually running without mutating the user's config.
         if let detected {
-            config.selectedModelKey = detected.key
-            config.name = detected.displayName
+            currentModel = detected
+        } else {
+            currentModel = await resolvedModel()
         }
         transition(to: .running)
         beginHealthPoll()
@@ -215,6 +217,15 @@ final class ServerInstanceController: Identifiable {
         await driver.removeManagedModel(tag: tag, executablePath: config.executablePath)
         config.managedModelTag = nil
         onConfigChanged?(config)
+    }
+
+    /// Called by the registry when the user chooses "Adopt" on a port-conflict error
+    /// and we create a new instance instead. Resets this controller back to .stopped
+    /// so the user's configured instance (name, model key, params) is untouched.
+    func revertToStopped() {
+        cancelPolling()
+        adoptedPID = nil
+        transition(to: .stopped(.neverStarted))
     }
 
     /// Pre-populate the model list from an already-completed scan (e.g. at add-time),
@@ -573,10 +584,20 @@ final class ServerInstanceController: Identifiable {
     }
 
     private func resolvedParams() -> ParamValues {
-        // Param resolution order: active profile → model memory → driver defaults.
-        // PersistenceService provides profile and memory; this is a placeholder.
-        ParamValues.resolve(profile: nil, memory: nil, driverDefaults: driver.paramSchema)
+        // Resolution order: driver defaults ← instance overrides ← active profile (future).
+        var resolved = ParamValues.resolve(profile: nil, memory: nil, driverDefaults: driver.paramSchema)
+        for (param, value) in config.instanceParams.values {
+            resolved.values[param] = value
+        }
+        if let prompt = config.instanceParams.systemPrompt {
+            resolved.systemPrompt = prompt
+        }
+        return resolved
     }
+
+    /// The fully-resolved effective params — useful for read-only display in UI
+    /// (shows what will actually be sent at launch/switch, including defaults).
+    func effectiveParams() -> ParamValues { resolvedParams() }
 
     private func resolvedModel() async -> ModelRef? {
         guard let key = config.selectedModelKey else { return nil }

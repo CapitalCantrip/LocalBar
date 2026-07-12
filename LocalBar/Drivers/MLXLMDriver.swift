@@ -18,13 +18,15 @@ struct MLXLMDriver: ServerDriver {
 
     var paramSchema: [ParamDescriptor] {
         [
-            ParamDescriptor(param: .temperature,  serverFlagName: "--temp",           application: .launchArgument, valueType: .double(range: 0.0...2.0),   defaultValue: .double(0.0)),
-            ParamDescriptor(param: .topP,         serverFlagName: "--top-p",          application: .launchArgument, valueType: .double(range: 0.0...1.0),   defaultValue: nil),
-            ParamDescriptor(param: .minP,         serverFlagName: "--min-p",          application: .launchArgument, valueType: .double(range: 0.0...1.0),   defaultValue: nil),
-            ParamDescriptor(param: .maxTokens,    serverFlagName: "--max-tokens",     application: .launchArgument, valueType: .int(range: 1...128_000),     defaultValue: nil),
-            ParamDescriptor(param: .repeatPenalty, serverFlagName: "--repetition-penalty", application: .launchArgument, valueType: .double(range: 1.0...2.0), defaultValue: nil),
-            ParamDescriptor(param: .seed,         serverFlagName: "--seed",           application: .launchArgument, valueType: .int(range: 0...Int.max),     defaultValue: nil),
-            ParamDescriptor(param: .contextLength, serverFlagName: "--max-kv-size",   application: .launchArgument, valueType: .int(range: 512...128_000),   defaultValue: nil),
+            ParamDescriptor(param: .contextLength,  serverFlagName: "--max-kv-size",         application: .launchArgument, valueType: .int(range: 512...128_000),    defaultValue: nil,           note: "Restart required to apply"),
+            ParamDescriptor(param: .temperature,    serverFlagName: "--temp",                application: .launchArgument, valueType: .double(range: 0.0...2.0),     defaultValue: .double(0.0),  note: "Restart required to apply"),
+            ParamDescriptor(param: .maxTokens,      serverFlagName: "--max-tokens",          application: .launchArgument, valueType: .int(range: 1...128_000),       defaultValue: nil,           note: "Limits response length. Restart required"),
+            ParamDescriptor(param: .topK,           serverFlagName: "--top-k",               application: .launchArgument, valueType: .int(range: 0...200),           defaultValue: nil,           note: "Restart required to apply"),
+            ParamDescriptor(param: .repeatPenalty,  serverFlagName: "--repetition-penalty",  application: .launchArgument, valueType: .double(range: 1.0...2.0),     defaultValue: nil,           note: "Restart required to apply"),
+            ParamDescriptor(param: .presencePenalty, serverFlagName: "--presence-penalty",   application: .launchArgument, valueType: .double(range: 0.0...2.0),     defaultValue: nil,           note: "Restart required to apply"),
+            ParamDescriptor(param: .topP,           serverFlagName: "--top-p",               application: .launchArgument, valueType: .double(range: 0.0...1.0),     defaultValue: nil,           note: "Restart required to apply"),
+            ParamDescriptor(param: .minP,           serverFlagName: "--min-p",               application: .launchArgument, valueType: .double(range: 0.0...1.0),     defaultValue: nil,           note: "Restart required to apply"),
+            ParamDescriptor(param: .seed,           serverFlagName: "--seed",                application: .launchArgument, valueType: .int(range: 0...Int.max),       defaultValue: nil,           note: "Restart required to apply"),
         ]
     }
 
