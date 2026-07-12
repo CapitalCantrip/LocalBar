@@ -1,0 +1,98 @@
+name: LocalBar
+
+options:
+  bundleIdPrefix: com.localbar
+  deploymentTarget:
+    macOS: "14.0"
+  xcodeVersion: "15"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "5.10"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    ENABLE_HARDENED_RUNTIME: YES
+    DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
+
+targets:
+  LocalBar:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: LocalBar
+        excludes:
+          - "**/.gitkeep"
+          - Resources/Info.plist
+    resources:
+      - path: LocalBar/Resources
+        excludes:
+          - "Info.plist"
+    info:
+      path: LocalBar/Resources/Info.plist
+      properties:
+        CFBundleName: LocalBar
+        CFBundleDisplayName: LocalBar
+        CFBundleIdentifier: com.localbar.app
+        CFBundleVersion: "1"
+        CFBundleShortVersionString: "0.1.0"
+        LSUIElement: YES
+        NSPrincipalClass: NSApplication
+        NSHumanReadableCopyright: ""
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.localbar.app
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+      configs:
+        Debug:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+        Release:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: ""
+
+  LocalBarTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: LocalBarTests
+        excludes:
+          - "**/.gitkeep"
+    dependencies:
+      - target: LocalBar
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.localbar.tests
+
+  LocalBarUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: LocalBarUITests
+        excludes:
+          - "**/.gitkeep"
+    dependencies:
+      - target: LocalBar
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.localbar.uitests
+
+schemes:
+  LocalBar:
+    build:
+      targets:
+        LocalBar: all
+        LocalBarTests: [test]
+        LocalBarUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - LocalBarTests
+        - LocalBarUITests
+    profile:
+      config: Release
+    archive:
+      config: Release
