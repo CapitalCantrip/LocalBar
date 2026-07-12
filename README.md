@@ -146,27 +146,49 @@ localbar/
 
 ## Status
 
-🚧 **Active development — MVP functional, persistence and polish in progress.**
+🚧 **Active development — MVP functional. Test coverage is minimal; feedback welcome.**
 
 **Working:**
 - mlx-lm and Ollama server lifecycle (start, stop, restart, model switch)
-- External server adoption with port conflict detection and explicit Adopt flow
+- External server adoption with port conflict detection and explicit Adopt/Retry flow
+- Auto-reconnect on restart: servers left running after quit are silently re-adopted on next launch
 - Model scan and metadata parsing (parameter count, quantization, format, capabilities)
+- Executable auto-detection via login shell and common install paths
 - Concurrent-start warning covering both managed and unmanaged servers
+- Memory footprint warning before start (>70% RAM threshold, weights + KV cache estimate)
+- Parameter panel: all canonical params, save-on-change, Ollama Modelfile badge, system prompt
+- Persistence across restarts (instances, params, settings)
 - Settings: resizable HSplitView panel, instance detail, model picker, error panel with rollback
 - Dynamic Cmd+Tab presence when Settings is open
-- macOS system notifications
+- macOS system notifications (respects in-app toggle)
 
 **Next up:**
-- Persistence (`PersistenceService` schema ready, wiring `// TODO`)
-- Parameter panel UI and named profiles
+- Named profiles (save and switch named parameter presets)
 - Context window display (mlx-lm doesn't expose fill level yet — tracking upstream)
 - Comprehensive launcher detection (D7b)
 
 **Post-MVP:**
 - llama.cpp and LM Studio drivers
-- Memory-aware start warnings (model size vs available unified memory)
 - App Store distribution
+
+---
+
+## Licensing
+
+LocalBar is dual-licensed.
+
+**Open-source use — [GPL v3](LICENSE)**
+Free for individuals, hobbyists, and open-source projects. If you distribute a modified version, your derivative must also be released under GPL v3.
+
+**Commercial use — [Commercial Licence](LICENSE-COMMERCIAL)**
+A commercial licence is required if you:
+- Deploy LocalBar within a for-profit organisation to serve more than 5 users
+- Embed LocalBar in a product you distribute commercially
+- Want to distribute a modified version without the GPL v3 share-alike obligation
+
+[Contact us](mailto:capitalcantrip@gmail.com) to discuss commercial licensing.
+
+Contributions are welcome. No formal CLA is required at this time.
 
 ---
 
