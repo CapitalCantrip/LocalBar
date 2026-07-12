@@ -1186,11 +1186,48 @@ private struct AddInstanceSheet: View {
 // MARK: - General tab
 
 private struct GeneralTab: View {
-    @State private var notificationsEnabled = true
+    @AppStorage("localbar.notificationsEnabled") private var notificationsEnabled = true
+
+    private var appVersion: String {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
+        let build   = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "—"
+        return "\(version) (\(build))"
+    }
 
     var body: some View {
         Form {
-            Toggle("System notifications", isOn: $notificationsEnabled)
+            Section("Notifications") {
+                Toggle("System notifications", isOn: $notificationsEnabled)
+            }
+
+            Section("About") {
+                LabeledContent("Version", value: appVersion)
+
+                LabeledContent("Licence") {
+                    VStack(alignment: .trailing, spacing: 4) {
+                        Text("LocalBar is dual-licensed.")
+                            .fontWeight(.medium)
+                        Text("Free for personal and open-source use under the GNU General Public Licence v3.0. A commercial licence is required for for-profit organisational deployment or commercial distribution.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.trailing)
+                        HStack(spacing: 12) {
+                            Link("Full licence terms",
+                                 destination: URL(string: "https://github.com/CapitalCantrip/localbar/blob/main/LICENSE")!)
+                                .font(.caption)
+                            Link("Commercial licensing",
+                                 destination: URL(string: "mailto:capitalcantrip@gmail.com")!)
+                                .font(.caption)
+                        }
+                    }
+                }
+
+                LabeledContent("Copyright") {
+                    Text("© 2026 CapitalCantrip. All rights reserved.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
         .formStyle(.grouped)
         .padding()

@@ -38,7 +38,7 @@ struct OllamaDriver: ServerDriver {
             FlagDescriptor(flagName: "OLLAMA_KEEP_ALIVE",     displayName: "Keep Alive",         help: "How long models stay loaded in memory after last request. e.g. '5m', '1h', '-1' (forever).",    valueType: .string, isEnvironmentVariable: true,  defaultValue: .string("5m")),
             FlagDescriptor(flagName: "OLLAMA_MAX_LOADED_MODELS", displayName: "Max Loaded Models", help: "Maximum number of models loaded concurrently.",                                                 valueType: .int(range: 1...10), isEnvironmentVariable: true, defaultValue: nil),
             FlagDescriptor(flagName: "OLLAMA_NUM_PARALLEL",   displayName: "Parallel Requests",  help: "Maximum number of parallel requests processed.",                                                  valueType: .int(range: 1...32), isEnvironmentVariable: true, defaultValue: nil),
-            FlagDescriptor(flagName: "startupTimeoutSeconds", displayName: "Startup Timeout (s)", help: "How long to wait for the server to become healthy before declaring an error. Default: 120 s.", valueType: .int(range: 30...600), isEnvironmentVariable: false, defaultValue: .int(120)),
+            FlagDescriptor(flagName: "startupTimeoutSeconds", displayName: "Startup Timeout (s)", help: "How long to wait for the server to become healthy before declaring an error. Default: 120 s.", valueType: .int(range: 30...600), isEnvironmentVariable: false, isLocalOnly: true, defaultValue: .int(120)),
         ]
     }
 
@@ -114,7 +114,7 @@ struct OllamaDriver: ServerDriver {
 
     func listModels(config: ServerInstanceConfig) async throws -> [ModelRef] {
         let url = URL(string: "http://\(config.host):\(config.port)/api/tags")!
-        let (data, _) = try await URLSession.shared.data(from: url)
+        let (data, _) = try await URLSession(configuration: .ephemeral).data(from: url)
 
         struct TagsResponse: Decodable {
             struct Model: Decodable {
@@ -146,7 +146,7 @@ struct OllamaDriver: ServerDriver {
             "stream": false,
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (_, response) = try await URLSession.shared.data(for: request)
+        let (_, response) = try await URLSession(configuration: .ephemeral).data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else {
             throw OllamaDriverError.modelLoadFailed(model: tag)
         }

@@ -29,6 +29,9 @@ final class ServerInstanceController: Identifiable {
     /// Called by InstanceRegistry after any config mutation so the registry can
     /// persist the updated config list. Set once at creation time.
     var onConfigChanged: ((ServerInstanceConfig) -> Void)?
+    /// Called after a successful restart-required model switch with the model key
+    /// and measured duration. Registry uses this to persist EWMA timing samples.
+    var onModelSwitchTiming: ((String, TimeInterval) -> Void)?
     /// PID of an externally-managed server that LocalBar adopted rather than spawned.
     /// Used to send shutdown signals when `process` is nil.
     private var adoptedPID: pid_t?
@@ -91,28 +94,6 @@ final class ServerInstanceController: Identifiable {
         await performStart()
     }
 
-    /// Explicitly adopt an external server after the user has acknowledged the
-    /// port conflict. Only valid when phase is .error(.portConflict).
-    /// The user's own config (name, selectedModelKey) is preserved — only
-    /// currentModel reflects what is actually running on the port.
-    func adoptExternal() async {
-        guard case .error(let err) = phase,
-              case .portConflict = err.kind else { return }
-        adoptedPID = await findListeningPID(port: config.port)
-        await refreshModels()
-        let detected = await detectRunningModel()
-        // Show what's actually running without mutating the user's config.
-        if let detected {
-            currentModel = detected
-        } else {
-            currentModel = await resolvedModel()
-        }
-        transition(to: .running)
-        beginHealthPoll()
-        beginContextPoll()
-        await notify(title: "LocalBar", body: "Connected to \(config.name)")
-    }
-
     /// D4: one-click rollback shown in error state after a failed restart-required switch.
     func rollbackToPreviousModel() async {
         guard case .error(let err) = phase,
@@ -125,12 +106,37 @@ final class ServerInstanceController: Identifiable {
     /// Check whether a server is already running on this instance's port
     /// and, if so, adopt it without spawning a new process. Called at app
     /// launch so externally-started servers (launchd, scripts, etc.) are
-    /// surfaced in LocalBar automatically.
+    /// surfaced in LocalBar automatically, and by adoptExternalAsNewInstance
+    /// when the user explicitly clicks Adopt on a port-conflict error.
+    ///
+    /// Falls back to lsof when the health endpoint is unreachable — this
+    /// handles servers that were orphaned mid-startup or that don't expose
+    /// the exact health path the driver probes (e.g. an mlx-lm server still
+    /// loading its model weights). beginHealthPoll() will confirm health on
+    /// the next cycle regardless.
     func adoptIfRunning() async {
         guard case .stopped = phase else { return }
+
         let health = await driver.healthCheck(config: config)
-        guard health == .healthy else { return }
-        adoptedPID = await findListeningPID(port: config.port)
+        let pid: pid_t?
+
+        if health == .healthy {
+            pid = await findListeningPID(port: config.port)
+        } else {
+            // Health endpoint unresponsive — confirm something is actually
+            // listening via lsof before proceeding.
+            guard let found = await findListeningPID(port: config.port), found > 0 else {
+                // Nothing on the port — clear stale wasRunningWhenQuit flag.
+                if config.wasRunningWhenQuit {
+                    config.wasRunningWhenQuit = false
+                    onConfigChanged?(config)
+                }
+                return
+            }
+            pid = found
+        }
+
+        adoptedPID = pid
         await refreshModels()
         // Try to identify what model is actually loaded by querying /v1/models.
         // This matters for externally-started servers where the loaded model
@@ -262,9 +268,16 @@ final class ServerInstanceController: Identifiable {
             return
         }
 
-        // Port availability check.
-        if let occupant = portOccupant(port: config.port) {
-            transition(to: .error(InstanceError(kind: .portConflict(port: config.port, occupiedBy: occupant), message: "Port \(config.port) is in use by \(occupant).")))
+        // Port availability check via lsof — catches orphaned/unresponsive servers
+        // that don't respond to health probes (e.g. server left running after quit).
+        // The health check above already handles the healthy-server case; this catches
+        // everything else (still-starting, crashed mid-init, refusing connections).
+        if let pid = await findListeningPID(port: config.port), pid > 0 {
+            let occupantName = await detectOccupantModelName() ?? "PID \(pid)"
+            transition(to: .error(InstanceError(
+                kind: .portConflict(port: config.port, occupiedBy: occupantName),
+                message: "Port \(config.port) is already in use by \(occupantName). Adopt the running server or change the port."
+            )))
             return
         }
 
@@ -335,6 +348,11 @@ final class ServerInstanceController: Identifiable {
         while true {
             guard phase == .starting else { return }
             let status = await driver.healthCheck(config: config)
+            // Re-check phase: the startup timeout task may have fired while the
+            // health check was in-flight, killing the process and transitioning
+            // to .error. Without this guard we'd incorrectly override .error with
+            // .running using a stale result from the now-dead process.
+            guard phase == .starting else { return }
             if status == .healthy {
                 startupTimeoutTask?.cancel()
                 startupTimeoutTask = nil
@@ -388,7 +406,7 @@ final class ServerInstanceController: Identifiable {
                 let url = URL(string: "http://\(config.host):\(config.port)\(path)")!
                 var req = URLRequest(url: url)
                 req.httpMethod = method
-                _ = try? await URLSession.shared.data(for: req)
+                _ = try? await URLSession(configuration: .ephemeral).data(for: req)
             }
         }
 
@@ -475,14 +493,9 @@ final class ServerInstanceController: Identifiable {
         await performStart()
 
         if phase.isRunning {
-            // Record timing sample in ModelMemory (handled by PersistenceService).
             if let start = switchStartedAt {
                 let duration = Date().timeIntervalSince(start)
-                NotificationCenter.default.post(
-                    name: .modelSwitchCompleted,
-                    object: nil,
-                    userInfo: ["modelKey": model.key, "duration": duration]
-                )
+                onModelSwitchTiming?(model.key, duration)
             }
             switchStartedAt = nil
         } else if case .error(var err) = phase {
@@ -581,6 +594,21 @@ final class ServerInstanceController: Identifiable {
     private func transition(to newPhase: InstancePhase) {
         phase = newPhase
         if case .error(let err) = newPhase { lastError = err }
+
+        // Keep wasRunningWhenQuit in sync so a restart can reconnect orphans.
+        switch newPhase {
+        case .running:
+            if !config.wasRunningWhenQuit {
+                config.wasRunningWhenQuit = true
+                onConfigChanged?(config)
+            }
+        case .stopped, .error:
+            if config.wasRunningWhenQuit {
+                config.wasRunningWhenQuit = false
+                onConfigChanged?(config)
+            }
+        default: break
+        }
     }
 
     private func resolvedParams() -> ParamValues {
@@ -676,14 +704,8 @@ final class ServerInstanceController: Identifiable {
         kill(pid, 0) == 0
     }
 
-    private func portOccupant(port: Int) -> String? {
-        // A lightweight check: attempt to bind the port; if it fails, something is there.
-        // Full lsof integration deferred post-MVP.
-        return nil
-    }
-
     private func notify(title: String, body: String) async {
-        // Respect the global notification toggle (read from AppSettings via PersistenceService).
+        guard UserDefaults.standard.object(forKey: "localbar.notificationsEnabled") as? Bool ?? true else { return }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
@@ -692,8 +714,3 @@ final class ServerInstanceController: Identifiable {
     }
 }
 
-// MARK: - Notification names
-
-extension Notification.Name {
-    static let modelSwitchCompleted = Notification.Name("com.localbar.modelSwitchCompleted")
-}

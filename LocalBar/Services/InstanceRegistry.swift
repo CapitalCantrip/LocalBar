@@ -29,10 +29,17 @@ final class InstanceRegistry {
         let commonPorts = [8080, 8081, 11434]
         for port in commonPorts {
             guard port != excludingPort, !managedPorts.contains(port) else { continue }
-            guard let url = URL(string: "http://127.0.0.1:\(port)/health") else { continue }
-            if let (_, resp) = try? await URLSession(configuration: .ephemeral).data(from: url),
-               (resp as? HTTPURLResponse)?.statusCode == 200 {
-                return true
+            // Try both /health (mlx-lm) and / (Ollama) so either server type is detected.
+            let probes = [
+                "http://127.0.0.1:\(port)/health",
+                "http://127.0.0.1:\(port)/",
+            ]
+            for urlString in probes {
+                guard let url = URL(string: urlString) else { continue }
+                if let (_, resp) = try? await URLSession(configuration: .ephemeral).data(from: url),
+                   (resp as? HTTPURLResponse)?.statusCode == 200 {
+                    return true
+                }
             }
         }
         return false
@@ -50,7 +57,11 @@ final class InstanceRegistry {
             for config in configs {
                 let controller = makeController(config: config)
                 controllers.append(controller)
-                if config.startOnAppLaunch {
+                // Only fire-and-forget start() when wasRunningWhenQuit is false.
+                // If wasRunningWhenQuit is true, adoptRunningServers() (called right
+                // after bootstrap) will reconnect silently instead — avoids a race
+                // between start() and adoptIfRunning() on the same controller.
+                if config.startOnAppLaunch && !config.wasRunningWhenQuit {
                     Task { await controller.start() }
                 }
             }
@@ -100,7 +111,24 @@ final class InstanceRegistry {
         controller.onConfigChanged = { [weak self] _ in
             self?.persistInstances()
         }
+        controller.onModelSwitchTiming = { [weak self] modelKey, duration in
+            self?.recordModelSwitchTiming(modelKey: modelKey, duration: duration)
+        }
         return controller
+    }
+
+    /// Persist a restart-duration sample for EWMA adaptive timing estimates.
+    private func recordModelSwitchTiming(modelKey: String, duration: TimeInterval) {
+        Task {
+            var store = (try? await persistence.loadModelMemory()) ?? [:]
+            var entry = store[modelKey] ?? ModelMemory(
+                modelKey: modelKey,
+                lastUsedParams: ParamValues(),
+                lastUsedAt: Date()
+            )
+            entry.recordRestartDuration(duration)
+            try? await persistence.upsertModelMemory(entry, into: &store)
+        }
     }
 
     /// Fire-and-forget save. Errors are silently dropped — UI never shows a
@@ -157,7 +185,7 @@ final class InstanceRegistry {
 
     // MARK: App lifecycle
 
-    /// Called from applicationWillTerminate — stops all managed servers.
+    /// Stops all managed servers. Called by the "Stop All" button in the menu bar.
     func stopAll() async {
         await withTaskGroup(of: Void.self) { group in
             for controller in controllers {
@@ -169,28 +197,21 @@ final class InstanceRegistry {
     // MARK: Adopt already-running servers
 
     /// At app launch, reconnect to servers that are already healthy on their
-    /// configured port — but ONLY for instances the user has marked
-    /// `startOnAppLaunch`. Those instances represent servers the user wants
-    /// LocalBar to manage automatically; reconnecting to them after a crash
-    /// or restart is the expected behaviour.
+    /// configured port for two categories of instance:
+    ///   • `startOnAppLaunch` — the user wants LocalBar to manage these automatically.
+    ///   • `wasRunningWhenQuit` — the server was running when LocalBar last quit
+    ///     (quit-without-stop), so reconnecting silently is the right default.
     ///
-    /// Instances without `startOnAppLaunch` are left stopped. If something
-    /// external happens to be on their port, the user will see a portConflict
-    /// error when they explicitly click Start — giving them the choice to Adopt
-    /// or change the port.
+    /// All other instances are left stopped. If something external happens to be
+    /// on their port, the user will see a portConflict error when they explicitly
+    /// click Start — giving them the choice to Adopt or change the port.
     func adoptRunningServers() async {
         await withTaskGroup(of: Void.self) { group in
-            for controller in controllers where controller.config.startOnAppLaunch {
+            for controller in controllers
+                where controller.config.startOnAppLaunch || controller.config.wasRunningWhenQuit {
                 group.addTask { await controller.adoptIfRunning() }
             }
         }
     }
 
-    // MARK: Auto-start
-
-    func startAutoLaunchInstances() async {
-        for controller in controllers where controller.config.startOnAppLaunch {
-            await controller.start()
-        }
-    }
 }
