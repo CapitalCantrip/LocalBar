@@ -62,6 +62,11 @@ struct ServerInstanceConfig: Codable, Identifiable, Equatable, Sendable {
 
     var startOnAppLaunch: Bool = false
 
+    /// Set to true whenever the instance transitions to .running; cleared on
+    /// .stopped or .error. Persisted so a restart can reconnect servers that
+    /// were left running after a quit-without-stop.
+    var wasRunningWhenQuit: Bool = false
+
     init(name: String, type: ServerType, port: Int, executablePath: String) {
         self.id = UUID()
         self.name = name
@@ -115,10 +120,12 @@ struct ModelMemory: Codable, Identifiable, Equatable, Sendable {
 
     var estimatedRestartDuration: TimeInterval? {
         guard !restartDurationSamples.isEmpty else { return nil }
-        // EWMA with α = 0.3, most-recent sample first.
-        var ewma = restartDurationSamples[0]
-        for sample in restartDurationSamples.dropFirst() {
-            ewma = 0.3 * sample + 0.7 * ewma
+        // EWMA with α = 0.3. Samples are stored newest-first, so we seed
+        // with the oldest and iterate toward the newest so the most recent
+        // observation receives the highest weight.
+        var ewma = restartDurationSamples[restartDurationSamples.count - 1]
+        for i in stride(from: restartDurationSamples.count - 2, through: 0, by: -1) {
+            ewma = 0.3 * restartDurationSamples[i] + 0.7 * ewma
         }
         return ewma
     }

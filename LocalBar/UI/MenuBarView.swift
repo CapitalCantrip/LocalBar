@@ -18,11 +18,22 @@ struct MenuBarView: View {
 
             Divider().padding(.vertical, 4)
 
+            if registry.hasAnyRunning {
+                Button("Stop All") {
+                    Task { await registry.stopAll() }
+                }
+                .foregroundStyle(.red)
+
+                Divider().padding(.vertical, 2)
+            }
+
             Button("Settings…") {
                 NSApp.activate(ignoringOtherApps: true)
                 openSettings()
             }
             .keyboardShortcut(",", modifiers: .command)
+
+            Divider().padding(.vertical, 2)
 
             Button("Quit LocalBar") {
                 NSApp.terminate(nil)
@@ -260,14 +271,16 @@ struct MenuBarIconView: View {
 
     private var iconName: String {
         switch registry.aggregateIconState {
-        case .on:            return "cpu.fill"
-        case .off:           return "cpu"
+        case .on:            return "brain.head.profile.fill"
+        case .off:           return "brain.head.profile"
         case .error:         return "exclamationmark.triangle.fill"
         case .transitioning: return "arrow.trianglehead.2.clockwise.rotate.90"
         }
     }
 
     private var symbolVariant: SymbolVariants {
-        registry.aggregateIconState == .on ? .fill : .none
+        // brain.head.profile already has an explicit .fill variant above;
+        // the .fill SymbolVariant would double-apply and may not resolve.
+        .none
     }
 }

@@ -35,7 +35,7 @@ struct MLXLMDriver: ServerDriver {
             FlagDescriptor(flagName: "--kv-cache-bits",     displayName: "KV Cache Quantization", help: "Reduce KV cache memory usage: 8 = ~half, 4 = ~quarter of bf16. Omit to use bf16 (default).", valueType: .int(range: 4...8), isEnvironmentVariable: false, defaultValue: nil),
             FlagDescriptor(flagName: "--trust-remote-code", displayName: "Trust Remote Code",      help: "Allow execution of remote model code (use only with trusted models).",                        valueType: .bool, isEnvironmentVariable: false, defaultValue: .bool(false)),
             FlagDescriptor(flagName: "--log-level",         displayName: "Log Level",              help: "Logging verbosity: DEBUG, INFO, WARNING, ERROR.",                                             valueType: .string, isEnvironmentVariable: false, defaultValue: .string("INFO")),
-            FlagDescriptor(flagName: "startupTimeoutSeconds", displayName: "Startup Timeout (s)",  help: "How long to wait for the server to become healthy before declaring an error. Default: 120 s.", valueType: .int(range: 30...600), isEnvironmentVariable: false, defaultValue: .int(120)),
+            FlagDescriptor(flagName: "startupTimeoutSeconds", displayName: "Startup Timeout (s)",  help: "How long to wait for the server to become healthy before declaring an error. Default: 120 s.", valueType: .int(range: 30...600), isEnvironmentVariable: false, isLocalOnly: true, defaultValue: .int(120)),
         ]
     }
 
@@ -99,8 +99,8 @@ struct MLXLMDriver: ServerDriver {
             }
         }
 
-        // Advanced flags.
-        for descriptor in flagSchema where !descriptor.isEnvironmentVariable {
+        // Advanced flags — skip LocalBar-internal config keys (isLocalOnly).
+        for descriptor in flagSchema where !descriptor.isEnvironmentVariable && !descriptor.isLocalOnly {
             if let value = config.advancedFlags[descriptor.flagName] {
                 args.append(descriptor.flagName)
                 switch value {

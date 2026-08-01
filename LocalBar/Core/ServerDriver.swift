@@ -171,6 +171,9 @@ struct FlagDescriptor: Sendable, Identifiable {
     var help: String
     var valueType: ParamValueType
     var isEnvironmentVariable: Bool
+    /// True for flags that are LocalBar-internal config (e.g. startupTimeoutSeconds)
+    /// and must NOT be forwarded to the server process as CLI arguments or env vars.
+    var isLocalOnly: Bool = false
     var defaultValue: ParamValue?
 }
 
