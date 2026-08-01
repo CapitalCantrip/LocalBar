@@ -20,6 +20,9 @@ struct SettingsView: View {
             ServersTab()
                 .tabItem { Label("Servers", systemImage: "server.rack") }
 
+            ProfilesTab()
+                .tabItem { Label("Profiles", systemImage: "slider.horizontal.3") }
+
             GeneralTab()
                 .tabItem { Label("General", systemImage: "gearshape") }
         }
@@ -346,6 +349,7 @@ private struct InstanceDetailPanel: View {
 
     @State private var editedName = ""
     @State private var editedModelKey: String = ""  // "" = nil sentinel
+    @State private var editedProfileID: UUID? = nil
     @State private var portOverride: String = ""
     @State private var showingConcurrentWarning = false
 
@@ -356,6 +360,16 @@ private struct InstanceDetailPanel: View {
 
     private var models: [ModelRef] { controller.availableModels }
     private var driver: any ServerDriver { DriverRegistry.driver(for: controller.config.type) }
+
+    /// Profiles compatible with this instance's server type.
+    private var compatibleProfiles: [NamedProfile] {
+        registry.profiles.filter { $0.serverType == nil || $0.serverType == controller.config.type }
+    }
+
+    /// The active profile, if any.
+    private var activeProfile: NamedProfile? {
+        registry.profile(for: controller.config.activeProfileID)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -379,6 +393,7 @@ private struct InstanceDetailPanel: View {
                     controlsSection
                     configSection
                     modelSection
+                    profileSection
                     parametersSection
                 }
                 .padding(12)
@@ -407,8 +422,12 @@ private struct InstanceDetailPanel: View {
         .onAppear {
             editedName = controller.config.name
             editedModelKey = controller.config.selectedModelKey ?? ""
+            editedProfileID = controller.config.activeProfileID
             portOverride = String(controller.config.port)
             initParamDrafts()
+        }
+        .onChange(of: controller.config.activeProfileID) { _, newID in
+            editedProfileID = newID
         }
         .onChange(of: editedName) { _, newValue in
             let trimmed = newValue.trimmingCharacters(in: .whitespaces)
@@ -422,6 +441,12 @@ private struct InstanceDetailPanel: View {
             guard key != controller.config.selectedModelKey else { return }
             var updated = controller.config
             updated.selectedModelKey = key
+            controller.updateConfig(updated)
+        }
+        .onChange(of: editedProfileID) { _, newID in
+            guard newID != controller.config.activeProfileID else { return }
+            var updated = controller.config
+            updated.activeProfileID = newID
             controller.updateConfig(updated)
         }
     }
@@ -516,6 +541,30 @@ private struct InstanceDetailPanel: View {
         }
     }
 
+    @ViewBuilder private var profileSection: some View {
+        GroupBox("Profile") {
+            Picker("Active Profile", selection: $editedProfileID) {
+                Text("None (auto-memory)").tag(Optional<UUID>.none)
+                if !compatibleProfiles.isEmpty {
+                    Divider()
+                    ForEach(compatibleProfiles) { profile in
+                        Text(profile.name).tag(Optional(profile.id))
+                    }
+                }
+            }
+            .labelsHidden()
+            if activeProfile != nil {
+                Text("Parameters from the active profile override instance settings.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else if compatibleProfiles.isEmpty {
+                Text("No profiles yet — create one in the Profiles tab.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
     @ViewBuilder private var parametersSection: some View {
         GroupBox("Parameters") {
             let schema = driver.paramSchema
@@ -537,39 +586,60 @@ private struct InstanceDetailPanel: View {
     }
 
     @ViewBuilder private var systemPromptSection: some View {
+        let profilePrompt = activeProfile?.params.systemPrompt
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text("System Prompt")
                     .font(.callout)
                 Spacer()
-                Text("Baked into Modelfile")
-                    .font(.caption2)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 2)
-                    .background(.orange.opacity(0.15))
-                    .foregroundStyle(.orange)
-                    .clipShape(Capsule())
-            }
-            TextEditor(text: $systemPromptDraft)
-                .font(.callout)
-                .frame(minHeight: 80, maxHeight: 160)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
-                )
-            HStack {
-                if systemPromptDraft.isEmpty {
-                    Text("Leave blank to use the model's built-in default.")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
+                if profilePrompt != nil {
+                    Text("Profile")
+                        .font(.caption2)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(.purple.opacity(0.12))
+                        .foregroundStyle(.purple)
+                        .clipShape(Capsule())
+                } else {
+                    Text("Baked into Modelfile")
+                        .font(.caption2)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(.orange.opacity(0.15))
+                        .foregroundStyle(.orange)
+                        .clipShape(Capsule())
                 }
-                Spacer()
-                let stored = controller.config.instanceParams.systemPrompt ?? ""
-                if systemPromptDraft != stored {
-                    Button("Save") { commitSystemPrompt() }
-                        .font(.caption)
-                        .buttonStyle(.borderless)
-                        .foregroundStyle(Color.accentColor)
+            }
+            if let locked = profilePrompt {
+                Text(locked.isEmpty ? "(empty)" : locked)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(6)
+                    .background(Color.secondary.opacity(0.07))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            } else {
+                TextEditor(text: $systemPromptDraft)
+                    .font(.callout)
+                    .frame(minHeight: 80, maxHeight: 160)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
+                    )
+                HStack {
+                    if systemPromptDraft.isEmpty {
+                        Text("Leave blank to use the model's built-in default.")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                    Spacer()
+                    let stored = controller.config.instanceParams.systemPrompt ?? ""
+                    if systemPromptDraft != stored {
+                        Button("Save") { commitSystemPrompt() }
+                            .font(.caption)
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(Color.accentColor)
+                    }
                 }
             }
         }
@@ -582,6 +652,7 @@ private struct InstanceDetailPanel: View {
     @ViewBuilder
     private func paramRow(for descriptor: ParamDescriptor) -> some View {
         let isServerSide = descriptor.application == .serverSideDefault
+        let profileValue = activeProfile?.params.values[descriptor.param]
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
@@ -596,6 +667,15 @@ private struct InstanceDetailPanel: View {
                             .foregroundStyle(.orange)
                             .clipShape(Capsule())
                     }
+                    if profileValue != nil {
+                        Text("Profile")
+                            .font(.caption2)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(.purple.opacity(0.12))
+                            .foregroundStyle(.purple)
+                            .clipShape(Capsule())
+                    }
                 }
                 if let note = descriptor.note {
                     Text(note)
@@ -605,7 +685,16 @@ private struct InstanceDetailPanel: View {
                 }
             }
             Spacer()
-            paramControl(for: descriptor)
+            if let profileValue {
+                // Profile is overriding this param — show locked value.
+                Text(paramValueString(profileValue))
+                    .font(.callout)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 60, alignment: .trailing)
+            } else {
+                paramControl(for: descriptor)
+            }
         }
         .padding(.vertical, 2)
     }
@@ -1231,5 +1320,441 @@ private struct GeneralTab: View {
         }
         .formStyle(.grouped)
         .padding()
+    }
+}
+
+// MARK: - Profiles tab
+
+private struct ProfilesTab: View {
+    @Environment(InstanceRegistry.self) private var registry
+    @State private var selectedID: UUID?
+
+    private var selectedProfile: NamedProfile? {
+        selectedID.flatMap { id in registry.profiles.first { $0.id == id } }
+    }
+
+    var body: some View {
+        HSplitView {
+            // ── Left: profile list ──────────────────────────
+            VStack(spacing: 0) {
+                List(registry.profiles, id: \.id, selection: $selectedID) { profile in
+                    ProfileRowView(profile: profile)
+                }
+                Divider()
+                HStack {
+                    Button {
+                        let profile = NamedProfile(name: "New Profile", params: ParamValues())
+                        registry.addProfile(profile)
+                        selectedID = profile.id
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .buttonStyle(.borderless)
+                    .padding(6)
+                    Spacer()
+                }
+            }
+            .frame(minWidth: 180, idealWidth: 200)
+
+            // ── Right: detail ───────────────────────────────
+            if let profile = selectedProfile {
+                ProfileDetailPanel(profile: profile)
+                    .id(profile.id)
+            } else {
+                VStack(spacing: 8) {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.largeTitle)
+                        .foregroundStyle(.tertiary)
+                    Text("No profile selected")
+                        .foregroundStyle(.secondary)
+                    Text("Create a profile to save named parameter presets\nyou can apply to any server instance.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .onChange(of: registry.profiles) { _, newProfiles in
+            // If the selected profile was deleted, clear selection.
+            if let id = selectedID, !newProfiles.contains(where: { $0.id == id }) {
+                selectedID = nil
+            }
+        }
+    }
+}
+
+private struct ProfileRowView: View {
+    let profile: NamedProfile
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(profile.name)
+                .lineLimit(1)
+            HStack(spacing: 6) {
+                if let type = profile.serverType {
+                    Text(type.rawValue)
+                        .font(.caption2)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Color.secondary.opacity(0.15))
+                        .clipShape(Capsule())
+                } else {
+                    Text("Any")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                Text(profile.modifiedAt.formatted(date: .abbreviated, time: .omitted))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+// MARK: - Profile detail panel
+
+private struct ProfileDetailPanel: View {
+    let profile: NamedProfile
+    @Environment(InstanceRegistry.self) private var registry
+
+    @State private var editedName: String = ""
+    @State private var editedServerType: ServerType? = nil
+    @State private var paramDrafts: [CanonicalParam: String] = [:]
+    @State private var boolDrafts: [CanonicalParam: Bool] = [:]
+    @State private var systemPromptDraft: String = ""
+
+    private var paramSchema: [ParamDescriptor] {
+        if let type = editedServerType {
+            return DriverRegistry.driver(for: type).paramSchema
+        }
+        // Union of all drivers, deduplicated, sorted by raw value for stable order.
+        var seen = Set<CanonicalParam>()
+        var result: [ParamDescriptor] = []
+        for type in ServerType.allCases {
+            for d in DriverRegistry.driver(for: type).paramSchema where seen.insert(d.param).inserted {
+                result.append(d)
+            }
+        }
+        return result.sorted { $0.param.rawValue < $1.param.rawValue }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Text(profile.name)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+                Spacer()
+                Button("Delete", role: .destructive) {
+                    registry.removeProfile(id: profile.id)
+                }
+                .foregroundStyle(.red)
+                .buttonStyle(.borderless)
+                .font(.caption)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    GroupBox("Profile") {
+                        LabeledContent("Name") {
+                            TextField("Profile name", text: $editedName)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(maxWidth: 220)
+                        }
+                        LabeledContent("Compatible with") {
+                            Picker("", selection: $editedServerType) {
+                                Text("Any server").tag(Optional<ServerType>.none)
+                                ForEach(ServerType.allCases, id: \.self) { type in
+                                    Text(type.rawValue).tag(Optional(type))
+                                }
+                            }
+                            .frame(width: 160)
+                            .labelsHidden()
+                        }
+                    }
+
+                    GroupBox("Parameters") {
+                        if paramSchema.isEmpty {
+                            Text("No configurable parameters.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(paramSchema) { descriptor in
+                                profileParamRow(for: descriptor)
+                                if descriptor.id != paramSchema.last?.id { Divider() }
+                            }
+                        }
+                        Divider()
+                        profileSystemPromptSection
+                    }
+                }
+                .padding(12)
+            }
+        }
+        .onAppear { initDrafts() }
+        .onChange(of: profile.id) { initDrafts() }
+        .onChange(of: editedName) { _, newName in
+            let trimmed = newName.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty, trimmed != profile.name else { return }
+            var updated = profile; updated.name = trimmed; updated.modifiedAt = Date()
+            registry.updateProfile(updated)
+        }
+        .onChange(of: editedServerType) { _, newType in
+            guard newType != profile.serverType else { return }
+            var updated = profile; updated.serverType = newType; updated.modifiedAt = Date()
+            registry.updateProfile(updated)
+        }
+    }
+
+    // MARK: Param row
+
+    @ViewBuilder
+    private func profileParamRow(for descriptor: ParamDescriptor) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(profileHumanName(descriptor.param))
+                    .font(.callout)
+                if let note = descriptor.note {
+                    Text(note)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+            Spacer()
+            profileParamControl(for: descriptor)
+        }
+        .padding(.vertical, 2)
+    }
+
+    @ViewBuilder
+    private func profileParamControl(for descriptor: ParamDescriptor) -> some View {
+        let defaultText = descriptor.defaultValue.map { profileValueString($0) }
+
+        switch descriptor.valueType {
+        case .bool:
+            Toggle("", isOn: Binding(
+                get: { boolDrafts[descriptor.param] ?? false },
+                set: { newVal in
+                    boolDrafts[descriptor.param] = newVal
+                    profileCommitBool(descriptor.param, value: newVal)
+                }
+            ))
+            .labelsHidden()
+            .frame(width: 44)
+
+        case .double(let range):
+            if let range {
+                VStack(alignment: .trailing, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Slider(
+                            value: Binding(
+                                get: { Double(paramDrafts[descriptor.param] ?? "") ?? range.lowerBound },
+                                set: { paramDrafts[descriptor.param] = String(format: "%.3g", $0) }
+                            ),
+                            in: range,
+                            onEditingChanged: { editing in if !editing { profileCommitText(descriptor) } }
+                        )
+                        .frame(width: 100)
+                        TextField(defaultText ?? "default", text: profileParamBinding(descriptor))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 60)
+                            .multilineTextAlignment(.trailing)
+                            .onSubmit { profileCommitText(descriptor) }
+                    }
+                    profileClearButton(for: descriptor)
+                }
+            } else {
+                VStack(alignment: .trailing, spacing: 2) {
+                    TextField(defaultText ?? "default", text: profileParamBinding(descriptor))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                        .multilineTextAlignment(.trailing)
+                        .onSubmit { profileCommitText(descriptor) }
+                    profileClearButton(for: descriptor)
+                }
+            }
+
+        case .int(let range):
+            if let range, range.upperBound - range.lowerBound <= 100 {
+                VStack(alignment: .trailing, spacing: 2) {
+                    Stepper(
+                        value: Binding(
+                            get: { Int(paramDrafts[descriptor.param] ?? "") ?? range.lowerBound },
+                            set: { newVal in
+                                paramDrafts[descriptor.param] = String(newVal)
+                                profileCommitText(descriptor)
+                            }
+                        ),
+                        in: range
+                    ) {
+                        Text(paramDrafts[descriptor.param] ?? defaultText ?? "default")
+                            .frame(width: 50, alignment: .trailing)
+                            .monospacedDigit()
+                    }
+                    profileClearButton(for: descriptor)
+                }
+            } else {
+                VStack(alignment: .trailing, spacing: 2) {
+                    TextField(defaultText ?? "default", text: profileParamBinding(descriptor))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                        .multilineTextAlignment(.trailing)
+                        .monospacedDigit()
+                        .onSubmit { profileCommitText(descriptor) }
+                    profileClearButton(for: descriptor)
+                }
+            }
+
+        case .string:
+            VStack(alignment: .trailing, spacing: 2) {
+                TextField(defaultText ?? "default", text: profileParamBinding(descriptor))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 100)
+                    .onSubmit { profileCommitText(descriptor) }
+                profileClearButton(for: descriptor)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func profileClearButton(for descriptor: ParamDescriptor) -> some View {
+        if paramDrafts[descriptor.param] != nil {
+            Button("Reset") {
+                paramDrafts.removeValue(forKey: descriptor.param)
+                var updated = profile
+                updated.params.values.removeValue(forKey: descriptor.param)
+                updated.modifiedAt = Date()
+                registry.updateProfile(updated)
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var profileSystemPromptSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("System Prompt")
+                .font(.callout)
+            TextEditor(text: $systemPromptDraft)
+                .font(.callout)
+                .frame(minHeight: 80, maxHeight: 160)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
+                )
+            HStack {
+                Text("Applied by Ollama via Modelfile; stored for other server types.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                let stored = profile.params.systemPrompt ?? ""
+                if systemPromptDraft != stored {
+                    Button("Save") { profileCommitSystemPrompt() }
+                        .font(.caption)
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+        }
+        .padding(.top, 4)
+    }
+
+    // MARK: Helpers
+
+    private func profileParamBinding(_ descriptor: ParamDescriptor) -> Binding<String> {
+        Binding(
+            get: { paramDrafts[descriptor.param] ?? "" },
+            set: { newVal in
+                paramDrafts[descriptor.param] = newVal.isEmpty ? nil : newVal
+                profileCommitText(descriptor)
+            }
+        )
+    }
+
+    private func profileCommitText(_ descriptor: ParamDescriptor) {
+        guard let raw = paramDrafts[descriptor.param], !raw.isEmpty else {
+            var updated = profile
+            updated.params.values.removeValue(forKey: descriptor.param)
+            updated.modifiedAt = Date()
+            registry.updateProfile(updated)
+            return
+        }
+        var value: ParamValue?
+        switch descriptor.valueType {
+        case .double:   if let d = Double(raw) { value = .double(d) }
+        case .int:      if let i = Int(raw)    { value = .int(i) }
+        case .string:   value = .string(raw)
+        case .bool:     break
+        }
+        guard let value else { return }
+        var updated = profile
+        updated.params.values[descriptor.param] = value
+        updated.modifiedAt = Date()
+        registry.updateProfile(updated)
+    }
+
+    private func profileCommitBool(_ param: CanonicalParam, value: Bool) {
+        var updated = profile
+        updated.params.values[param] = .bool(value)
+        updated.modifiedAt = Date()
+        registry.updateProfile(updated)
+    }
+
+    private func profileCommitSystemPrompt() {
+        var updated = profile
+        updated.params.systemPrompt = systemPromptDraft.isEmpty ? nil : systemPromptDraft
+        updated.modifiedAt = Date()
+        registry.updateProfile(updated)
+    }
+
+    private func initDrafts() {
+        editedName = profile.name
+        editedServerType = profile.serverType
+        paramDrafts = [:]
+        boolDrafts = [:]
+        for descriptor in paramSchema {
+            if let val = profile.params.values[descriptor.param] {
+                switch val {
+                case .double(let d): paramDrafts[descriptor.param] = String(format: "%.3g", d)
+                case .int(let i):    paramDrafts[descriptor.param] = String(i)
+                case .string(let s): paramDrafts[descriptor.param] = s
+                case .bool(let b):   boolDrafts[descriptor.param] = b
+                }
+            } else if case .bool(let b) = descriptor.defaultValue {
+                boolDrafts[descriptor.param] = b
+            }
+        }
+        systemPromptDraft = profile.params.systemPrompt ?? ""
+    }
+
+    private func profileHumanName(_ param: CanonicalParam) -> String {
+        switch param {
+        case .contextLength:   return "Context Length"
+        case .temperature:     return "Temperature"
+        case .maxTokens:       return "Max Tokens"
+        case .topK:            return "Top K"
+        case .repeatPenalty:   return "Repeat Penalty"
+        case .presencePenalty: return "Presence Penalty"
+        case .topP:            return "Top P"
+        case .minP:            return "Min P"
+        case .seed:            return "Seed"
+        case .systemPrompt:    return "System Prompt"
+        }
+    }
+
+    private func profileValueString(_ value: ParamValue) -> String {
+        switch value {
+        case .double(let d): return String(format: "%.3g", d)
+        case .int(let i):    return String(i)
+        case .string(let s): return s
+        case .bool(let b):   return b ? "On" : "Off"
+        }
     }
 }

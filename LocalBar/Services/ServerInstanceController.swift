@@ -32,6 +32,9 @@ final class ServerInstanceController: Identifiable {
     /// Called after a successful restart-required model switch with the model key
     /// and measured duration. Registry uses this to persist EWMA timing samples.
     var onModelSwitchTiming: ((String, TimeInterval) -> Void)?
+    /// Returns the active NamedProfile for this instance, or nil if none is set.
+    /// Set by InstanceRegistry at controller creation time.
+    var activeProfileProvider: (() -> NamedProfile?)? = nil
     /// PID of an externally-managed server that LocalBar adopted rather than spawned.
     /// Used to send shutdown signals when `process` is nil.
     private var adoptedPID: pid_t?
@@ -614,13 +617,16 @@ final class ServerInstanceController: Identifiable {
     }
 
     private func resolvedParams() -> ParamValues {
-        // Resolution order: driver defaults ← instance overrides ← active profile (future).
-        var resolved = ParamValues.resolve(profile: nil, memory: nil, driverDefaults: driver.paramSchema)
-        for (param, value) in config.instanceParams.values {
-            resolved.values[param] = value
+        // Resolution order: driver defaults < instance overrides < active profile (highest).
+        var resolved = ParamValues()
+        for descriptor in driver.paramSchema {
+            if let def = descriptor.defaultValue { resolved.values[descriptor.param] = def }
         }
-        if let prompt = config.instanceParams.systemPrompt {
-            resolved.systemPrompt = prompt
+        for (param, value) in config.instanceParams.values { resolved.values[param] = value }
+        if let prompt = config.instanceParams.systemPrompt { resolved.systemPrompt = prompt }
+        if let profile = activeProfileProvider?() {
+            for (param, value) in profile.params.values { resolved.values[param] = value }
+            if let prompt = profile.params.systemPrompt { resolved.systemPrompt = prompt }
         }
         return resolved
     }

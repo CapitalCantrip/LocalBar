@@ -7,6 +7,7 @@ import Observation
 final class InstanceRegistry {
 
     private(set) var controllers: [ServerInstanceController] = []
+    private(set) var profiles: [NamedProfile] = []
     private let persistence = PersistenceService()
 
     // MARK: Derived state
@@ -53,6 +54,7 @@ final class InstanceRegistry {
     func bootstrap() async {
         do {
             try await persistence.ensureDirectoryExists()
+            profiles = (try? await persistence.loadProfiles()) ?? []
             let configs = try await persistence.loadInstances()
             for config in configs {
                 let controller = makeController(config: config)
@@ -92,6 +94,40 @@ final class InstanceRegistry {
         }
     }
 
+    // MARK: Managing profiles
+
+    func addProfile(_ profile: NamedProfile) {
+        profiles.append(profile)
+        persistProfiles()
+    }
+
+    func updateProfile(_ profile: NamedProfile) {
+        guard let idx = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
+        profiles[idx] = profile
+        persistProfiles()
+    }
+
+    func removeProfile(id: UUID) {
+        profiles.removeAll { $0.id == id }
+        // Clear the profile from any instances that had it active.
+        for controller in controllers where controller.config.activeProfileID == id {
+            var cfg = controller.config
+            cfg.activeProfileID = nil
+            controller.updateConfig(cfg)
+        }
+        persistProfiles()
+    }
+
+    func profile(for id: UUID?) -> NamedProfile? {
+        guard let id else { return nil }
+        return profiles.first { $0.id == id }
+    }
+
+    private func persistProfiles() {
+        let p = profiles
+        Task { try? await persistence.saveProfiles(p) }
+    }
+
     func removeInstance(id: UUID) {
         guard let controller = controllers.first(where: { $0.id == id }) else { return }
         Task { @MainActor in
@@ -113,6 +149,9 @@ final class InstanceRegistry {
         }
         controller.onModelSwitchTiming = { [weak self] modelKey, duration in
             self?.recordModelSwitchTiming(modelKey: modelKey, duration: duration)
+        }
+        controller.activeProfileProvider = { [weak self, weak controller] in
+            self?.profile(for: controller?.config.activeProfileID)
         }
         return controller
     }
