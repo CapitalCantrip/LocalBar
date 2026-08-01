@@ -71,16 +71,9 @@ struct InstanceRowView: View {
     @State private var startTrigger: UUID? = nil
     @State private var showConcurrentWarning = false
     @State private var concurrentWarningNames: [String] = []
-    @State private var memoryWarning: MemoryWarningInfo? = nil
+    @State private var memoryWarning: MemoryFootprintWarning? = nil
 
-    /// Captured footprint shown in the E1 modal. Separate from MemoryFootprintEstimate
-    /// so the alert can be driven by a single optional.
-    struct MemoryWarningInfo {
-        var weightBytes: Int64?
-        var kvCacheBytes: Int64?
-        var totalBytes: Int64
-        var totalRAM: Int64
-    }
+    // MemoryWarningInfo is defined at module scope (below) so SettingsView can share it.
 
     var body: some View {
         HStack {
@@ -135,7 +128,7 @@ struct InstanceRowView: View {
                 if estimate.totalBytes > 0 {
                     let threshold = Int64(Double(totalRAM) * 0.70)
                     if estimate.totalBytes > threshold {
-                        memoryWarning = MemoryWarningInfo(
+                        memoryWarning = MemoryFootprintWarning(
                             weightBytes:  estimate.weightBytes,
                             kvCacheBytes: estimate.kvCacheBytes,
                             totalBytes:   estimate.totalBytes,
@@ -175,24 +168,12 @@ struct InstanceRowView: View {
         }
     }
 
-    private func memoryWarningMessage(_ w: MemoryWarningInfo) -> String {
-        var lines: [String] = []
-        if let wb = w.weightBytes {
-            lines.append("Model weights:   \(formatGB(wb))")
-        }
-        if let kv = w.kvCacheBytes {
-            lines.append("KV cache:        \(formatGB(kv))")
-        }
-        let pct = Int((Double(w.totalBytes) / Double(w.totalRAM)) * 100)
-        lines.append("Estimated total: \(formatGB(w.totalBytes)) (\(pct)% of \(formatGB(w.totalRAM)) RAM)")
-        lines.append("")
-        lines.append("This may cause system instability or swapping.")
-        return lines.joined(separator: "\n")
+    private func memoryWarningMessage(_ w: MemoryFootprintWarning) -> String {
+        w.message(formatGB: formatGB)
     }
 
     private func formatGB(_ bytes: Int64) -> String {
-        let gb = Double(bytes) / 1_073_741_824.0
-        return String(format: "%.1f GB", gb)
+        String(format: "%.1f GB", Double(bytes) / 1_073_741_824.0)
     }
 
     private func errorSummary(_ error: InstanceError) -> String {
@@ -256,6 +237,31 @@ struct PhaseIndicatorView: View {
         case .error:         return .red
         case .transitioning: return .yellow
         }
+    }
+}
+
+// MARK: - Shared memory warning model
+
+/// Breakdown used by both the menu bar and the Settings panel Start alerts.
+struct MemoryFootprintWarning {
+    var weightBytes: Int64?
+    var kvCacheBytes: Int64?
+    var totalBytes: Int64
+    var totalRAM: Int64
+
+    func message(formatGB: (Int64) -> String) -> String {
+        var lines: [String] = []
+        if let wb = weightBytes { lines.append("Model weights:   \(formatGB(wb))") }
+        if let kv = kvCacheBytes {
+            lines.append("KV cache:        \(formatGB(kv))")
+        } else {
+            lines.append("KV cache:        unknown (architecture data unavailable)")
+        }
+        let pct = Int((Double(totalBytes) / Double(totalRAM)) * 100)
+        lines.append("Estimated total: \(formatGB(totalBytes)) (\(pct)% of \(formatGB(totalRAM)) RAM)")
+        lines.append("")
+        lines.append("This may cause system instability or swapping.")
+        return lines.joined(separator: "\n")
     }
 }
 

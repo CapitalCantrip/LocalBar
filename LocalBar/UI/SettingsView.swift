@@ -352,6 +352,7 @@ private struct InstanceDetailPanel: View {
     @State private var editedProfileID: UUID? = nil
     @State private var portOverride: String = ""
     @State private var showingConcurrentWarning = false
+    @State private var memoryWarning: MemoryFootprintWarning? = nil
 
     // Param panel state — string drafts for TextField controls, bool for toggles.
     @State private var paramDrafts: [CanonicalParam: String] = [:]
@@ -418,6 +419,20 @@ private struct InstanceDetailPanel: View {
                 .map(\.config.name)
             let description = managedNames.isEmpty ? "an external server" : managedNames.joined(separator: ", ")
             Text("Starting \"\(controller.config.name)\" while \(description) is running may exhaust unified memory. Continue?")
+        }
+        .alert("High memory usage estimated", isPresented: Binding(
+            get: { memoryWarning != nil },
+            set: { if !$0 { memoryWarning = nil } }
+        )) {
+            Button("Start Anyway", role: .destructive) {
+                memoryWarning = nil
+                Task { await controller.start() }
+            }
+            Button("Cancel", role: .cancel) { memoryWarning = nil }
+        } message: {
+            if let w = memoryWarning {
+                Text(w.message(formatGB: formatGB))
+            }
         }
         .onAppear {
             editedName = controller.config.name
@@ -934,10 +949,27 @@ private struct InstanceDetailPanel: View {
         Task {
             if await registry.hasAnyRunningIncludingExternal(excludingPort: controller.config.port) {
                 showingConcurrentWarning = true
-            } else {
-                await controller.start()
+                return
             }
+            let totalRAM = systemTotalMemoryBytes()
+            if totalRAM > 0 {
+                let estimate = await controller.estimatedMemoryFootprint()
+                if estimate.totalBytes > 0, estimate.totalBytes > Int64(Double(totalRAM) * 0.70) {
+                    memoryWarning = MemoryFootprintWarning(
+                        weightBytes:  estimate.weightBytes,
+                        kvCacheBytes: estimate.kvCacheBytes,
+                        totalBytes:   estimate.totalBytes,
+                        totalRAM:     totalRAM
+                    )
+                    return
+                }
+            }
+            await controller.start()
         }
+    }
+
+    private func formatGB(_ bytes: Int64) -> String {
+        String(format: "%.1f GB", Double(bytes) / 1_073_741_824.0)
     }
 
     @ViewBuilder
