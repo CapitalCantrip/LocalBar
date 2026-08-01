@@ -22,3 +22,6 @@ xcuserdata/
 # CocoaPods (not used, but guard against accidental add)
 Pods/
 Podfile.lock
+
+# Distribution artifacts — built locally and uploaded to Releases; never committed
+*.dmg
