@@ -205,12 +205,14 @@ final class ServerInstanceController: Identifiable {
 
     func updateConfig(_ newConfig: ServerInstanceConfig) {
         let modelKeyChanged = newConfig.selectedModelKey != config.selectedModelKey
+        let ollamaParamsChanged = newConfig.type == .ollama
+            && newConfig.instanceParams != config.instanceParams
         config = newConfig
         onConfigChanged?(config)
 
-        // For Ollama: when the model selection changes, create/update the managed
-        // Modelfile immediately so it's ready before the next Start.
-        if modelKeyChanged {
+        // For Ollama: regenerate the managed Modelfile when the model selection
+        // or any sampling param changes, so params are baked in before next use.
+        if modelKeyChanged || ollamaParamsChanged {
             Task { await ensureManagedModelIfNeeded() }
         }
     }
