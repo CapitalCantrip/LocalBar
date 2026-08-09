@@ -353,6 +353,7 @@ private struct InstanceDetailPanel: View {
     @State private var portOverride: String = ""
     @State private var showingConcurrentWarning = false
     @State private var memoryWarning: MemoryFootprintWarning? = nil
+    @State private var showingSaveAsProfile = false
 
     // Param panel state — string drafts for TextField controls, bool for toggles.
     @State private var paramDrafts: [CanonicalParam: String] = [:]
@@ -370,6 +371,25 @@ private struct InstanceDetailPanel: View {
     /// The active profile, if any.
     private var activeProfile: NamedProfile? {
         registry.profile(for: controller.config.activeProfileID)
+    }
+
+    /// Params currently in effect for this instance, excluding driver defaults:
+    /// instance overrides with the active profile layered on top (same precedence
+    /// as ServerInstanceController.resolvedParams). This is what "Save as
+    /// Profile…" captures, so the new profile reproduces what the user sees.
+    private var explicitParams: ParamValues {
+        var params = controller.config.instanceParams
+        if let profile = activeProfile {
+            for (param, value) in profile.params.values { params.values[param] = value }
+            if let prompt = profile.params.systemPrompt { params.systemPrompt = prompt }
+        }
+        return params
+    }
+
+    /// Nothing to capture when neither the instance nor the profile sets anything.
+    private var hasParamsToSave: Bool {
+        let params = explicitParams
+        return !params.values.isEmpty || !(params.systemPrompt ?? "").isEmpty
     }
 
     var body: some View {
@@ -433,6 +453,19 @@ private struct InstanceDetailPanel: View {
             if let w = memoryWarning {
                 Text(w.message(formatGB: formatGB))
             }
+        }
+        .sheet(isPresented: $showingSaveAsProfile) {
+            SaveAsProfileSheet(
+                suggestedName: suggestedProfileName,
+                serverType: controller.config.type,
+                summary: capturedParamSummary,
+                capturesSystemPrompt: !(explicitParams.systemPrompt ?? "").isEmpty,
+                onCreate: { name, serverType, applyToInstance in
+                    let profile = NamedProfile(name: name, params: explicitParams, serverType: serverType)
+                    registry.addProfile(profile)
+                    if applyToInstance { editedProfileID = profile.id }
+                }
+            )
         }
         .onAppear {
             editedName = controller.config.name
@@ -558,22 +591,29 @@ private struct InstanceDetailPanel: View {
 
     @ViewBuilder private var profileSection: some View {
         GroupBox("Profile") {
-            Picker("Active Profile", selection: $editedProfileID) {
-                Text("None (auto-memory)").tag(Optional<UUID>.none)
-                if !compatibleProfiles.isEmpty {
-                    Divider()
-                    ForEach(compatibleProfiles) { profile in
-                        Text(profile.name).tag(Optional(profile.id))
+            HStack(spacing: 8) {
+                Picker("Active Profile", selection: $editedProfileID) {
+                    Text("None (auto-memory)").tag(Optional<UUID>.none)
+                    if !compatibleProfiles.isEmpty {
+                        Divider()
+                        ForEach(compatibleProfiles) { profile in
+                            Text(profile.name).tag(Optional(profile.id))
+                        }
                     }
                 }
+                .labelsHidden()
+                Button("Save as Profile…") { showingSaveAsProfile = true }
+                    .disabled(!hasParamsToSave)
+                    .help(hasParamsToSave
+                          ? "Create a new profile from this instance's current parameters."
+                          : "Set at least one parameter before saving a profile.")
             }
-            .labelsHidden()
             if activeProfile != nil {
                 Text("Parameters from the active profile override instance settings.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             } else if compatibleProfiles.isEmpty {
-                Text("No profiles yet — create one in the Profiles tab.")
+                Text("No profiles yet — tune the parameters below, then Save as Profile.")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
@@ -972,6 +1012,26 @@ private struct InstanceDetailPanel: View {
         String(format: "%.1f GB", Double(bytes) / 1_073_741_824.0)
     }
 
+    /// Label/value pairs for the params the new profile would capture, ordered
+    /// by the driver schema so the sheet reads like the panel above it.
+    private var capturedParamSummary: [(label: String, value: String)] {
+        let params = explicitParams
+        return driver.paramSchema.compactMap { descriptor in
+            guard let value = params.values[descriptor.param] else { return nil }
+            return (humanName(descriptor.param), paramValueString(value))
+        }
+    }
+
+    /// Instance name, suffixed with a counter if a profile already claims it.
+    private var suggestedProfileName: String {
+        let base = controller.config.name.trimmingCharacters(in: .whitespaces)
+        let taken = Set(registry.profiles.map(\.name))
+        guard taken.contains(base) else { return base }
+        var n = 2
+        while taken.contains("\(base) \(n)") { n += 1 }
+        return "\(base) \(n)"
+    }
+
     @ViewBuilder
     private var controlButtons: some View {
         switch controller.phase {
@@ -1352,6 +1412,116 @@ private struct GeneralTab: View {
         }
         .formStyle(.grouped)
         .padding()
+    }
+}
+
+// MARK: - Save as profile sheet
+
+/// Captures an instance's current parameters into a new named profile.
+/// The caller owns the params themselves and renders the summary rows, so this
+/// sheet only collects the name, compatibility scope, and whether to apply.
+private struct SaveAsProfileSheet: View {
+    let suggestedName: String
+    let serverType: ServerType
+    let summary: [(label: String, value: String)]
+    let capturesSystemPrompt: Bool
+    /// (name, serverType, applyToInstance)
+    let onCreate: (String, ServerType?, Bool) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var name: String = ""
+    @State private var anyServerType = false
+    @State private var applyToInstance = true
+
+    private var trimmedName: String { name.trimmingCharacters(in: .whitespaces) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Save as Profile")
+                .font(.headline)
+
+            LabeledContent("Name") {
+                TextField("Profile name", text: $name)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 220)
+                    .onSubmit { create() }
+            }
+
+            Toggle("Usable with any server type", isOn: $anyServerType)
+            Text(anyServerType
+                 ? "The profile will appear for every instance."
+                 : "The profile will only appear for \(serverType.rawValue) instances.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            Divider()
+
+            Text("Captured parameters")
+                .font(.callout)
+                .fontWeight(.medium)
+            if summary.isEmpty && !capturesSystemPrompt {
+                Text("No parameters set.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(summary, id: \.label) { row in
+                            HStack {
+                                Text(row.label)
+                                    .font(.caption)
+                                Spacer()
+                                Text(row.value)
+                                    .font(.caption)
+                                    .monospacedDigit()
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        if capturesSystemPrompt {
+                            HStack {
+                                Text("System Prompt")
+                                    .font(.caption)
+                                Spacer()
+                                Text("included")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .padding(.trailing, 4)
+                }
+                .frame(maxHeight: 140)
+            }
+
+            Divider()
+
+            Toggle("Apply to this instance now", isOn: $applyToInstance)
+            if applyToInstance {
+                Text("Captured parameters become read-only here while the profile is active.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Create") { create() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(trimmedName.isEmpty)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(16)
+        .frame(width: 400)
+        .onAppear { if name.isEmpty { name = suggestedName } }
+    }
+
+    private func create() {
+        guard !trimmedName.isEmpty else { return }
+        onCreate(trimmedName, anyServerType ? nil : serverType, applyToInstance)
+        dismiss()
     }
 }
 
