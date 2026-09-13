@@ -213,9 +213,11 @@ final class ServerInstanceController: Identifiable {
         config = newConfig
         onConfigChanged?(config)
 
-        // For Ollama: regenerate the managed Modelfile when the model selection
-        // or any sampling param changes, so params are baked in before next use.
-        if modelKeyChanged || ollamaParamsChanged {
+        // For Ollama: regenerate the managed Modelfile when the model selection,
+        // any sampling param, or the active profile changes (profile changes alter
+        // the resolved params even when instanceParams hasn't changed).
+        let profileChanged = newConfig.activeProfileID != config.activeProfileID
+        if modelKeyChanged || ollamaParamsChanged || (newConfig.type == .ollama && profileChanged) {
             Task { await ensureManagedModelIfNeeded() }
         }
     }
@@ -469,14 +471,15 @@ final class ServerInstanceController: Identifiable {
     // MARK: Private — model switch
 
     private func performAPIModelSwitch(to model: ModelRef) async {
-        // For Ollama: ensure the managed Modelfile is up to date before warm-loading.
+        // Set the key first so ensureManagedModelIfNeeded builds the Modelfile
+        // for the *new* model, not the one that was previously selected.
+        config.selectedModelKey = model.key
         await ensureManagedModelIfNeeded()
 
         let params = resolvedParams()
         do {
             try await driver.switchModel(to: model, params: params, config: config)
             currentModel = model
-            config.selectedModelKey = model.key
             onConfigChanged?(config)
         } catch {
             // Stay in .running, surface a non-fatal error banner (handled by UI observing lastError).

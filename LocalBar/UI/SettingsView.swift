@@ -871,8 +871,9 @@ private struct InstanceDetailPanel: View {
         Binding(
             get: { paramDrafts[descriptor.param] ?? "" },
             set: { newVal in
+                // Only update the draft; commit happens on onSubmit / onEditingChanged
+                // so that typing "0.75" doesn't spawn four `ollama create` processes.
                 paramDrafts[descriptor.param] = newVal.isEmpty ? nil : newVal
-                commitText(descriptor)   // save on every change; commitText skips unparseable partials
             }
         )
     }
