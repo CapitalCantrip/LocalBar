@@ -252,49 +252,14 @@ final class ServerInstanceController: Identifiable {
     private func performStart() async {
         transition(to: .starting)
 
-        // If a server is already healthy on this port, surface the conflict
-        // explicitly rather than silently adopting. The user clicked Start
-        // expecting a new process; connecting to an unknown existing process
-        // without acknowledgement is confusing. Show the port-conflict error
-        // with an "Adopt" button so the user makes an explicit choice.
-        let preRunning = await driver.healthCheck(config: config)
-        if preRunning == .healthy {
-            let occupantName = await detectOccupantModelName() ?? "an external server"
-            transition(to: .error(InstanceError(
-                kind: .portConflict(port: config.port, occupiedBy: occupantName),
-                message: "Port \(config.port) is already in use by \(occupantName). Adopt the running server or stop it and retry."
-            )))
+        if let err = await preFlightChecks() {
+            transition(to: .error(err))
             return
         }
 
-        // Pre-flight validation.
-        let issues = await driver.validate(config: config)
-        if issues.contains(where: { $0.severity == .blocker }) {
-            let msg = issues.first(where: { $0.severity == .blocker })?.message ?? "Validation failed."
-            transition(to: .error(InstanceError(kind: .launchFailed, message: msg)))
-            return
-        }
-
-        // Port availability check via lsof — catches orphaned/unresponsive servers
-        // that don't respond to health probes (e.g. server left running after quit).
-        // The health check above already handles the healthy-server case; this catches
-        // everything else (still-starting, crashed mid-init, refusing connections).
-        if let pid = await findListeningPID(port: config.port), pid > 0 {
-            let occupantName = await detectOccupantModelName() ?? "PID \(pid)"
-            transition(to: .error(InstanceError(
-                kind: .portConflict(port: config.port, occupiedBy: occupantName),
-                message: "Port \(config.port) is already in use by \(occupantName). Adopt the running server or change the port."
-            )))
-            return
-        }
-
-        // Resolve params.
         let params = resolvedParams()
-
-        // Resolve model.
         let model: ModelRef? = await resolvedModel()
 
-        // Build launch plan.
         let plan: LaunchPlan
         do {
             plan = try driver.makeLaunchPlan(config: config, model: model, params: params)
@@ -303,16 +268,62 @@ final class ServerInstanceController: Identifiable {
             return
         }
 
-        // Spawn.
+        do {
+            process = try spawnProcess(plan: plan)
+        } catch {
+            transition(to: .error(InstanceError(kind: .launchFailed, message: "Failed to spawn process: \(error.localizedDescription)")))
+            return
+        }
+
+        currentModel = model
+        let timeout = startupTimeout
+        startupTimeoutTask = Task {
+            try? await Task.sleep(for: .seconds(timeout))
+            guard !Task.isCancelled else { return }
+            await self.handleStartupTimeout()
+        }
+        await awaitHealthy()
+    }
+
+    /// Run pre-flight checks before spawning: port-conflict detection and config validation.
+    /// Returns a ready-to-use InstanceError on failure, nil on success.
+    private func preFlightChecks() async -> InstanceError? {
+        // If a server is already healthy on this port, surface the conflict
+        // explicitly so the user can choose to Adopt rather than spawn blindly.
+        if await driver.healthCheck(config: config) == .healthy {
+            let occupant = await detectOccupantModelName() ?? "an external server"
+            return InstanceError(kind: .portConflict(port: config.port, occupiedBy: occupant),
+                message: "Port \(config.port) is already in use by \(occupant). Adopt the running server or stop it and retry.")
+        }
+
+        // Config validation — abort on any blocker.
+        let issues = await driver.validate(config: config)
+        if let blocker = issues.first(where: { $0.severity == .blocker }) {
+            return InstanceError(kind: .launchFailed, message: blocker.message ?? "Validation failed.")
+        }
+
+        // lsof check — catches orphaned / still-starting / unresponsive servers
+        // that failed the health probe above but are still holding the port.
+        if let pid = await findListeningPID(port: config.port), pid > 0 {
+            let occupant = await detectOccupantModelName() ?? "PID \(pid)"
+            return InstanceError(kind: .portConflict(port: config.port, occupiedBy: occupant),
+                message: "Port \(config.port) is already in use by \(occupant). Adopt the running server or change the port.")
+        }
+
+        return nil
+    }
+
+    /// Configure and launch the server process for `plan`. Sets up stderr capture
+    /// and the termination handler. Clears any prior adoption state.
+    private func spawnProcess(plan: LaunchPlan) throws -> Process {
         let proc = Process()
         proc.executableURL = plan.executableURL
         proc.arguments = plan.arguments
         proc.environment = mergedEnvironment(plan.environment)
         if let cwd = plan.workingDirectory { proc.currentDirectoryURL = cwd }
 
-        // Fresh spawn — clear any previous adoption state.
+        // Fresh spawn — clear any previous adoption state and stderr buffer.
         adoptedPID = nil
-        // Capture stderr for diagnostic error messages.
         capturedStderr = ""
         let stderrPipe = Pipe()
         proc.standardError = stderrPipe
@@ -322,33 +333,13 @@ final class ServerInstanceController: Identifiable {
             // Keep the last 800 chars so we don't OOM on chatty servers.
             self?.capturedStderr = text.count > 800 ? String(text.suffix(800)) : text
         }
-
         proc.terminationHandler = { [weak self] process in
             Task { @MainActor [weak self] in
                 self?.handleUnexpectedTermination(exitCode: process.terminationStatus)
             }
         }
-
-        do {
-            try proc.run()
-        } catch {
-            transition(to: .error(InstanceError(kind: .launchFailed, message: "Failed to spawn process: \(error.localizedDescription)")))
-            return
-        }
-
-        process = proc
-        currentModel = model
-
-        // Start startup timeout.
-        let timeout = startupTimeout
-        startupTimeoutTask = Task {
-            try? await Task.sleep(for: .seconds(timeout))
-            guard !Task.isCancelled else { return }
-            await self.handleStartupTimeout()
-        }
-
-        // Poll until healthy.
-        await awaitHealthy()
+        try proc.run()
+        return proc
     }
 
     private func awaitHealthy() async {
@@ -382,48 +373,47 @@ final class ServerInstanceController: Identifiable {
 
         guard let proc = process else {
             // No spawned process — server was adopted from external management.
-            // Find its PID and signal it gracefully.
-            let pid: pid_t? = adoptedPID != nil ? adoptedPID : await findListeningPID(port: config.port)
-            if let pid, pid > 0 {
-                let plan = driver.makeShutdownPlan(config: config)
-                if let graceful = plan.gracefulRequest, case .signal(let sig) = graceful {
-                    kill(pid, sig)
-                }
-                let deadline = Date().addingTimeInterval(plan.gracePeriod)
-                while isExternalProcessRunning(pid: pid), Date() < deadline {
-                    try? await Task.sleep(for: .milliseconds(200))
-                }
-                if isExternalProcessRunning(pid: pid) { kill(pid, SIGTERM) }
-                try? await Task.sleep(for: .milliseconds(500))
-                if isExternalProcessRunning(pid: pid) { kill(pid, SIGKILL) }
-            }
+            await stopAdoptedProcess()
             adoptedPID = nil
             transition(to: .stopped(reason))
             return
         }
 
         let plan = driver.makeShutdownPlan(config: config)
-
-        // Graceful step.
-        if let graceful = plan.gracefulRequest {
-            switch graceful {
-            case .signal(let sig):
-                kill(proc.processIdentifier, sig)
-            case .httpRequest(let path, let method):
-                let url = URL(string: "http://\(config.host):\(config.port)\(path)")!
-                var req = URLRequest(url: url)
-                req.httpMethod = method
-                _ = try? await URLSession(configuration: .ephemeral).data(for: req)
+        await sendGracefulShutdown(plan.gracefulRequest, to: proc)
+        if await waitForProcessExit(proc: proc, gracePeriod: plan.gracePeriod) {
+            process = nil
+            transition(to: .stopped(reason))
+            if reason == .userStopped {
+                await notify(title: "LocalBar", body: "\(config.name) stopped")
             }
+        } else {
+            process = nil
+            transition(to: .error(InstanceError(kind: .shutdownTimedOut, message: "Server did not stop after SIGKILL. PID: \(proc.processIdentifier)")))
         }
+    }
 
-        // Wait grace period, then SIGTERM, then SIGKILL.
-        let gracePeriod = plan.gracePeriod
+    /// Signal or HTTP-request graceful shutdown to a spawned process.
+    private func sendGracefulShutdown(_ graceful: ShutdownPlan.GracefulShutdown?, to proc: Process) async {
+        switch graceful {
+        case .none: break
+        case .signal(let sig):
+            kill(proc.processIdentifier, sig)
+        case .httpRequest(let path, let method):
+            let url = URL(string: "http://\(config.host):\(config.port)\(path)")!
+            var req = URLRequest(url: url)
+            req.httpMethod = method
+            _ = try? await URLSession(configuration: .ephemeral).data(for: req)
+        }
+    }
+
+    /// Wait grace period, escalate to SIGTERM, then SIGKILL.
+    /// Returns true if the process exited, false if SIGKILL also timed out.
+    private func waitForProcessExit(proc: Process, gracePeriod: TimeInterval) async -> Bool {
         let deadline = Date().addingTimeInterval(gracePeriod)
         while proc.isRunning, Date() < deadline {
             try? await Task.sleep(for: .milliseconds(200))
         }
-
         if proc.isRunning {
             proc.terminate()
             let sigtermDeadline = Date().addingTimeInterval(gracePeriod * 2)
@@ -431,21 +421,27 @@ final class ServerInstanceController: Identifiable {
                 try? await Task.sleep(for: .milliseconds(200))
             }
         }
-
         if proc.isRunning {
             kill(proc.processIdentifier, SIGKILL)
             try? await Task.sleep(for: .seconds(1))
-            if proc.isRunning {
-                transition(to: .error(InstanceError(kind: .shutdownTimedOut, message: "Server did not stop after SIGKILL. PID: \(proc.processIdentifier)")))
-                return
-            }
         }
+        return !proc.isRunning
+    }
 
-        process = nil
-        transition(to: .stopped(reason))
-        if reason == .userStopped {
-            await notify(title: "LocalBar", body: "\(config.name) stopped")
+    /// Stop an externally-adopted server by PID (no spawned Process handle).
+    private func stopAdoptedProcess() async {
+        let pid: pid_t?
+        if let known = adoptedPID { pid = known } else { pid = await findListeningPID(port: config.port) }
+        guard let pid, pid > 0 else { return }
+        let plan = driver.makeShutdownPlan(config: config)
+        if case .signal(let sig) = plan.gracefulRequest { kill(pid, sig) }
+        let deadline = Date().addingTimeInterval(plan.gracePeriod)
+        while isExternalProcessRunning(pid: pid), Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(200))
         }
+        if isExternalProcessRunning(pid: pid) { kill(pid, SIGTERM) }
+        try? await Task.sleep(for: .milliseconds(500))
+        if isExternalProcessRunning(pid: pid) { kill(pid, SIGKILL) }
     }
 
     // MARK: Private — managed model
@@ -625,12 +621,8 @@ final class ServerInstanceController: Identifiable {
         for descriptor in driver.paramSchema {
             if let def = descriptor.defaultValue { resolved.values[descriptor.param] = def }
         }
-        for (param, value) in config.instanceParams.values { resolved.values[param] = value }
-        if let prompt = config.instanceParams.systemPrompt { resolved.systemPrompt = prompt }
-        if let profile = activeProfileProvider?() {
-            for (param, value) in profile.params.values { resolved.values[param] = value }
-            if let prompt = profile.params.systemPrompt { resolved.systemPrompt = prompt }
-        }
+        resolved.merge(from: config.instanceParams)
+        if let profile = activeProfileProvider?() { resolved.merge(from: profile.params) }
         return resolved
     }
 

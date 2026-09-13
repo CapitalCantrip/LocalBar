@@ -66,22 +66,13 @@ struct OllamaDriver: ServerDriver {
         model: ModelRef?,
         params: ParamValues
     ) throws -> LaunchPlan {
-        var env: [String: String] = [
-            "OLLAMA_HOST": "\(config.host):\(config.port)",
-        ]
-
+        var env: [String: String] = ["OLLAMA_HOST": "\(config.host):\(config.port)"]
         // Environment-variable flags from advanced config.
         for descriptor in flagSchema where descriptor.isEnvironmentVariable {
             if let value = config.advancedFlags[descriptor.flagName] {
-                switch value {
-                case .string(let s): env[descriptor.flagName] = s
-                case .int(let i):    env[descriptor.flagName] = String(i)
-                case .double(let d): env[descriptor.flagName] = String(d)
-                case .bool(let b):   env[descriptor.flagName] = b ? "1" : "0"
-                }
+                env[descriptor.flagName] = value.cliString
             }
         }
-
         return LaunchPlan(
             executableURL: URL(fileURLWithPath: config.executablePath),
             arguments: ["serve"],
@@ -236,7 +227,7 @@ struct OllamaDriver: ServerDriver {
     func generateModelfile(baseTag: String, params: ParamValues) -> String {
         var lines = ["FROM \(baseTag)"]
 
-        // Sampling PARAMETER directives (Milestone B fills these in).
+        // Sampling PARAMETER directives. Ollama has no bool params — skip them.
         let paramMap: [(CanonicalParam, String)] = [
             (.contextLength,   "num_ctx"),
             (.temperature,     "temperature"),
@@ -250,12 +241,8 @@ struct OllamaDriver: ServerDriver {
         ]
         for (param, ollamaName) in paramMap {
             guard let value = params[param] else { continue }
-            switch value {
-            case .double(let d): lines.append("PARAMETER \(ollamaName) \(d)")
-            case .int(let i):    lines.append("PARAMETER \(ollamaName) \(i)")
-            case .string(let s): lines.append("PARAMETER \(ollamaName) \(s)")
-            case .bool:          break
-            }
+            if case .bool = value { continue }
+            lines.append("PARAMETER \(ollamaName) \(value.displayString)")
         }
 
         // System prompt.

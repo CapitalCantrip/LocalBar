@@ -18,6 +18,13 @@ enum ParamValue: Codable, Equatable, Sendable, Hashable {
         case .bool(let b):   return b ? "On" : "Off"
         }
     }
+
+    /// String for CLI arguments and environment variables.
+    /// Booleans use "1"/"0" (not "On"/"Off" as in displayString).
+    var cliString: String {
+        if case .bool(let b) = self { return b ? "1" : "0" }
+        return displayString
+    }
 }
 
 /// A bag of canonical param values.
@@ -180,10 +187,15 @@ extension ParamValues {
         return resolved
     }
 
+    /// Merge all values and system prompt from `source` into this `ParamValues`.
+    mutating func merge(from source: ParamValues) {
+        for (param, value) in source.values { values[param] = value }
+        if let prompt = source.systemPrompt { systemPrompt = prompt }
+    }
+
     /// Merge all values and the system prompt from `source` into `resolved`.
     private static func apply(_ source: ParamValues, to resolved: inout ParamValues) {
-        for (param, value) in source.values { resolved.values[param] = value }
-        if let prompt = source.systemPrompt { resolved.systemPrompt = prompt }
+        resolved.merge(from: source)
     }
 
     /// Filter to only params supported by the given driver schema,
