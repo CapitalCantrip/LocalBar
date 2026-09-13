@@ -219,4 +219,110 @@ final class ServerInstanceControllerTests: XCTestCase {
         let controller = ServerInstanceController(config: makeOllamaConfig())
         XCTAssertNil(controller.lastError)
     }
+
+    // MARK: - resolvedContextLength
+
+    func test_resolvedContextLength_explicitParam_usesIt() {
+        var config = makeMLXConfig()
+        config.instanceParams.values[.contextLength] = .int(8192)
+        let controller = ServerInstanceController(config: config)
+        let params = controller.effectiveParams()
+        XCTAssertEqual(controller.resolvedContextLength(params: params), 8192)
+    }
+
+    func test_resolvedContextLength_noParam_ollama_defaults2048() {
+        let controller = ServerInstanceController(config: makeOllamaConfig())
+        XCTAssertEqual(controller.resolvedContextLength(params: ParamValues()), 2048)
+    }
+
+    func test_resolvedContextLength_noParam_mlx_defaults4096() {
+        let controller = ServerInstanceController(config: makeMLXConfig())
+        XCTAssertEqual(controller.resolvedContextLength(params: ParamValues()), 4096)
+    }
+
+    // MARK: - resolvedKVCacheBits
+
+    func test_resolvedKVCacheBits_mlx_withFlag_usesFlag() {
+        var config = makeMLXConfig()
+        config.advancedFlags["--kv-cache-bits"] = .int(4)
+        let controller = ServerInstanceController(config: config)
+        XCTAssertEqual(controller.resolvedKVCacheBits(), 4)
+    }
+
+    func test_resolvedKVCacheBits_mlx_noFlag_returns16() {
+        let controller = ServerInstanceController(config: makeMLXConfig())
+        XCTAssertEqual(controller.resolvedKVCacheBits(), 16)
+    }
+
+    func test_resolvedKVCacheBits_ollama_alwaysReturns16() {
+        var config = makeOllamaConfig()
+        // Ollama doesn't have a kv-cache-bits flag; always bf16.
+        config.advancedFlags["--kv-cache-bits"] = .int(8) // would be ignored for Ollama
+        let controller = ServerInstanceController(config: config)
+        XCTAssertEqual(controller.resolvedKVCacheBits(), 16)
+    }
+
+    // MARK: - estimatedMemoryFootprint
+
+    func test_estimatedMemoryFootprint_noModel_returnsZeroEstimate() async {
+        var config = makeMLXConfig()
+        config.selectedModelKey = nil
+        let controller = ServerInstanceController(config: config)
+        let estimate = await controller.estimatedMemoryFootprint()
+        XCTAssertNil(estimate.weightBytes)
+        XCTAssertNil(estimate.kvCacheBytes)
+        XCTAssertEqual(estimate.totalBytes, 0)
+    }
+
+    func test_estimatedMemoryFootprint_seededModel_usesDirectSize() async {
+        var config = makeMLXConfig()
+        config.selectedModelKey = "test-model"
+        let controller = ServerInstanceController(config: config)
+        let model = ModelRef(
+            key: "test-model", displayName: "Test Model",
+            sizeBytes: 4_000_000_000, location: .filesystem(path: "/models/test")
+        )
+        controller.seedModels([model])
+        let estimate = await controller.estimatedMemoryFootprint()
+        XCTAssertEqual(estimate.weightBytes, 4_000_000_000)
+    }
+
+    func test_estimatedMemoryFootprint_seededModelWithArchitecture_computesKVCache() async {
+        var config = makeMLXConfig()
+        config.selectedModelKey = "arch-model"
+        let controller = ServerInstanceController(config: config)
+        var meta = ModelMetadata()
+        meta.numHiddenLayers = 32
+        meta.numKVHeads = 8
+        meta.headDim = 128
+        let model = ModelRef(
+            key: "arch-model", displayName: "Arch Model",
+            sizeBytes: nil, location: .filesystem(path: "/models/arch"), metadata: meta
+        )
+        controller.seedModels([model])
+        let estimate = await controller.estimatedMemoryFootprint()
+        // kvCacheBytes = 2 × 32 × 8 × 128 × 4096 × 2 bytes (bf16)
+        let expected = Int64(2 * 32 * 8 * 128 * 4096) * 2
+        XCTAssertEqual(estimate.kvCacheBytes, expected)
+    }
+
+    func test_estimatedMemoryFootprint_contextLengthParam_affectsKVCache() async {
+        var config = makeMLXConfig()
+        config.selectedModelKey = "ctx-model"
+        config.instanceParams.values[.contextLength] = .int(2048)
+        let controller = ServerInstanceController(config: config)
+        var meta = ModelMetadata()
+        meta.numHiddenLayers = 32
+        meta.numKVHeads = 8
+        meta.headDim = 128
+        let model = ModelRef(
+            key: "ctx-model", displayName: "Ctx Model",
+            sizeBytes: nil, location: .filesystem(path: "/m"), metadata: meta
+        )
+        controller.seedModels([model])
+        let estimate = await controller.estimatedMemoryFootprint()
+        // At ctx=2048 instead of default 4096, KV cache is halved.
+        let expected = Int64(2 * 32 * 8 * 128 * 2048) * 2
+        XCTAssertEqual(estimate.kvCacheBytes, expected)
+    }
 }

@@ -163,33 +163,38 @@ struct MLXLMDriver: ServerDriver {
         for root in searchPaths {
             guard let enumerator = fm.enumerator(atPath: root) else { continue }
             while let path = enumerator.nextObject() as? String {
-                // mlx model directories contain config.json and typically tokenizer.json.
-                let fullPath = (root as NSString).appendingPathComponent(path)
-                var isDir: ObjCBool = false
-                fm.fileExists(atPath: fullPath, isDirectory: &isDir)
-                guard isDir.boolValue else { continue }
-                let configPath = (fullPath as NSString).appendingPathComponent("config.json")
-                guard fm.fileExists(atPath: configPath) else { continue }
-                let key = path.hasPrefix("models--")
-                    ? path.replacingOccurrences(of: "models--", with: "").replacingOccurrences(of: "--", with: "/")
-                    : (fullPath as NSString).lastPathComponent
-                var metadata = ModelMetadataParser.parse(directoryPath: fullPath, modelKey: key)
-                // mlx-lm only serves MLX-compatible models. Safetensors is
-                // the weight container MLX adopted — don't let it shadow the
-                // real format. Only keep GGUF if .gguf files are present.
-                if metadata.modelFormat != .gguf {
-                    metadata.modelFormat = .mlx
+                if let ref = MLXLMDriver.modelRef(forRelativePath: path, root: root, fm: fm) {
+                    models.append(ref)
                 }
-                models.append(ModelRef(
-                    key: key,
-                    displayName: (fullPath as NSString).lastPathComponent,
-                    sizeBytes: nil,
-                    location: .filesystem(path: fullPath),
-                    metadata: metadata
-                ))
             }
         }
         return models
+    }
+
+    /// Build a ModelRef for one filesystem path found during enumeration.
+    /// Returns nil if the path is not a directory or lacks config.json.
+    static func modelRef(forRelativePath path: String, root: String, fm: FileManager) -> ModelRef? {
+        let fullPath = (root as NSString).appendingPathComponent(path)
+        var isDir: ObjCBool = false
+        fm.fileExists(atPath: fullPath, isDirectory: &isDir)
+        guard isDir.boolValue else { return nil }
+        guard fm.fileExists(atPath: (fullPath as NSString).appendingPathComponent("config.json")) else { return nil }
+        // Decode HF cache layout: "models--org--repo" → "org/repo"
+        let key = path.hasPrefix("models--")
+            ? path.replacingOccurrences(of: "models--", with: "").replacingOccurrences(of: "--", with: "/")
+            : (fullPath as NSString).lastPathComponent
+        var metadata = ModelMetadataParser.parse(directoryPath: fullPath, modelKey: key)
+        // mlx-lm only serves MLX-compatible models. Safetensors is
+        // the weight container MLX adopted — don't let it shadow the
+        // real format. Only keep GGUF if .gguf files are present.
+        if metadata.modelFormat != .gguf { metadata.modelFormat = .mlx }
+        return ModelRef(
+            key: key,
+            displayName: (fullPath as NSString).lastPathComponent,
+            sizeBytes: nil,
+            location: .filesystem(path: fullPath),
+            metadata: metadata
+        )
     }
 
     func switchModel(to model: ModelRef, params: ParamValues, config: ServerInstanceConfig) async throws {

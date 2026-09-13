@@ -191,4 +191,99 @@ final class MLXLMDriverTests: XCTestCase {
     func test_modelListRequiresRunningServer_false() {
         XCTAssertFalse(driver.modelListRequiresRunningServer)
     }
+
+    // MARK: - modelRef(forRelativePath:root:fm:)
+
+    func test_modelRef_nonDirectory_returnsNil() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        // Create a plain file (not a directory).
+        let filePath = (root as NSString).appendingPathComponent("weights.safetensors")
+        FileManager.default.createFile(atPath: filePath, contents: nil)
+        XCTAssertNil(MLXLMDriver.modelRef(forRelativePath: "weights.safetensors", root: root, fm: .default))
+    }
+
+    func test_modelRef_directoryWithoutConfigJson_returnsNil() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        let modelDir = (root as NSString).appendingPathComponent("my-model")
+        try FileManager.default.createDirectory(atPath: modelDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        XCTAssertNil(MLXLMDriver.modelRef(forRelativePath: "my-model", root: root, fm: .default))
+    }
+
+    func test_modelRef_validModelDir_returnsRef() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        let modelDir = (root as NSString).appendingPathComponent("llama-3-8b")
+        try FileManager.default.createDirectory(atPath: modelDir, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: (modelDir as NSString).appendingPathComponent("config.json"), contents: "{}".data(using: .utf8))
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let ref = try XCTUnwrap(MLXLMDriver.modelRef(forRelativePath: "llama-3-8b", root: root, fm: .default))
+        XCTAssertEqual(ref.key, "llama-3-8b")
+        XCTAssertEqual(ref.displayName, "llama-3-8b")
+        if case .filesystem(let path) = ref.location {
+            XCTAssertEqual(path, modelDir)
+        } else {
+            XCTFail("Expected filesystem location")
+        }
+        XCTAssertEqual(ref.metadata?.modelFormat, .mlx)
+    }
+
+    func test_modelRef_hfCacheLayout_decodesKey() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        // HF cache uses "models--org--repo" directory names.
+        let hfDir = (root as NSString).appendingPathComponent("models--mlx-community--llama3-8b")
+        try FileManager.default.createDirectory(atPath: hfDir, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: (hfDir as NSString).appendingPathComponent("config.json"), contents: "{}".data(using: .utf8))
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let ref = try XCTUnwrap(MLXLMDriver.modelRef(forRelativePath: "models--mlx-community--llama3-8b", root: root, fm: .default))
+        XCTAssertEqual(ref.key, "mlx-community/llama3-8b")
+    }
+
+    func test_modelRef_ggufFile_keepsGgufFormat() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        let modelDir = (root as NSString).appendingPathComponent("gguf-model")
+        try FileManager.default.createDirectory(atPath: modelDir, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: (modelDir as NSString).appendingPathComponent("config.json"), contents: "{}".data(using: .utf8))
+        FileManager.default.createFile(atPath: (modelDir as NSString).appendingPathComponent("model.gguf"), contents: nil)
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let ref = try XCTUnwrap(MLXLMDriver.modelRef(forRelativePath: "gguf-model", root: root, fm: .default))
+        XCTAssertEqual(ref.metadata?.modelFormat, .gguf)
+    }
+
+    // MARK: - listModels
+
+    func test_listModels_findsModelInSearchPath() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        let modelDir = (root as NSString).appendingPathComponent("my-model")
+        try FileManager.default.createDirectory(atPath: modelDir, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: (modelDir as NSString).appendingPathComponent("config.json"), contents: "{}".data(using: .utf8))
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        var config = makeConfig()
+        config.modelSearchPaths = [root]
+        let models = try await driver.listModels(config: config)
+        XCTAssertTrue(models.contains(where: { $0.key == "my-model" }))
+    }
+
+    func test_listModels_skipsNonModelDirs() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        // A dir without config.json should not appear in results.
+        let emptyDir = (root as NSString).appendingPathComponent("not-a-model")
+        try FileManager.default.createDirectory(atPath: emptyDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        var config = makeConfig()
+        config.modelSearchPaths = [root]
+        let models = try await driver.listModels(config: config)
+        XCTAssertTrue(models.isEmpty)
+    }
+
+    func test_listModels_emptyWhenSearchPathAbsent() async throws {
+        var config = makeConfig()
+        config.modelSearchPaths = ["/nonexistent/path/\(UUID().uuidString)"]
+        let models = try await driver.listModels(config: config)
+        // Should silently return empty — no crash.
+        XCTAssertTrue(models.isEmpty)
+    }
 }

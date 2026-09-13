@@ -166,9 +166,7 @@ final class ServerInstanceController: Identifiable {
         guard let model = currentModel ?? availableModels.first(where: { $0.key == config.selectedModelKey }) else {
             return MemoryFootprintEstimate()
         }
-
         var metadata = model.metadata ?? ModelMetadata()
-
         // For Ollama: fetch architecture fields from /api/show if missing.
         if config.type == .ollama,
            metadata.numHiddenLayers == nil,
@@ -179,31 +177,28 @@ final class ServerInstanceController: Identifiable {
                 metadata.headDim         = fetched.headDim
             }
         }
-
         let params = resolvedParams()
-
-        // Context length: active param value, or driver default (2048 for Ollama, nil for mlx-lm).
-        let contextLength: Int
-        if let v = params[.contextLength], case .int(let n) = v {
-            contextLength = n
-        } else {
-            contextLength = config.type == .ollama ? 2048 : 4096
-        }
-
-        // KV cache bits: mlx-lm --kv-cache-bits flag; Ollama always bf16.
-        let kvCacheBits: Int
-        if config.type == .mlxLM,
-           let v = config.advancedFlags["--kv-cache-bits"],
-           case .int(let bits) = v {
-            kvCacheBits = bits
-        } else {
-            kvCacheBits = 16
-        }
-
         return MemoryFootprintEstimate(
             weightBytes:  metadata.estimatedWeightBytes(directSizeBytes: model.sizeBytes),
-            kvCacheBytes: metadata.estimatedKVCacheBytes(contextLength: contextLength, kvCacheBits: kvCacheBits)
+            kvCacheBytes: metadata.estimatedKVCacheBytes(
+                contextLength: resolvedContextLength(params: params),
+                kvCacheBits:   resolvedKVCacheBits()
+            )
         )
+    }
+
+    /// Active context length: explicit param value, or server-type default.
+    func resolvedContextLength(params: ParamValues) -> Int {
+        if let v = params[.contextLength], case .int(let n) = v { return n }
+        return config.type == .ollama ? 2048 : 4096
+    }
+
+    /// KV-cache element width in bits: mlx-lm `--kv-cache-bits` flag value, or 16 (bf16).
+    func resolvedKVCacheBits() -> Int {
+        if config.type == .mlxLM,
+           let v = config.advancedFlags["--kv-cache-bits"],
+           case .int(let bits) = v { return bits }
+        return 16
     }
 
     func updateConfig(_ newConfig: ServerInstanceConfig) {
