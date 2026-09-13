@@ -325,15 +325,20 @@ enum ModelMetadataParser {
         guard let config else { return [] }
         var caps: Set<ModelMetadata.Capability> = []
         if config["vision_config"] != nil { caps.insert(.vision) }
+        // Keyword table: if model_type contains the keyword, grant the capability.
+        // "bert" is caught by contains (bert, bert-base, roberta all contain "bert").
         let modelType = (config["model_type"] as? String)?.lowercased() ?? ""
-        if modelType.contains("code") { caps.insert(.code) }
-        if modelType == "bert" || modelType.contains("embed") { caps.insert(.embedding) }
+        let typeKeywords: [(String, ModelMetadata.Capability)] = [
+            ("code", .code), ("embed", .embedding), ("bert", .embedding)
+        ]
+        for (keyword, cap) in typeKeywords where modelType.contains(keyword) { caps.insert(cap) }
         return caps
     }
 
     private static func capabilitiesFromModelKey(_ lowerKey: String) -> Set<ModelMetadata.Capability> {
+        // "coder" contains "code" so a single substring check is sufficient.
         var caps: Set<ModelMetadata.Capability> = []
-        if lowerKey.contains("code") || lowerKey.contains("coder") { caps.insert(.code) }
+        if lowerKey.contains("code")  { caps.insert(.code) }
         if lowerKey.contains("embed") { caps.insert(.embedding) }
         return caps
     }

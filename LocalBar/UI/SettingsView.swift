@@ -879,22 +879,13 @@ private struct InstanceDetailPanel: View {
     }
 
     private func commitText(_ descriptor: ParamDescriptor) {
-        guard let raw = paramDrafts[descriptor.param], !raw.isEmpty else {
-            var updated = controller.config
-            updated.instanceParams.values.removeValue(forKey: descriptor.param)
-            controller.updateConfig(updated)
-            return
-        }
-        var value: ParamValue?
-        switch descriptor.valueType {
-        case .double:   if let d = Double(raw) { value = .double(d) }
-        case .int:      if let i = Int(raw)    { value = .int(i)    }
-        case .string:   value = .string(raw)
-        case .bool:     break
-        }
-        guard let value else { return }
         var updated = controller.config
-        updated.instanceParams.values[descriptor.param] = value
+        if let raw = paramDrafts[descriptor.param], !raw.isEmpty,
+           let value = ParamValue(rawString: raw, valueType: descriptor.valueType) {
+            updated.instanceParams.values[descriptor.param] = value
+        } else {
+            updated.instanceParams.values.removeValue(forKey: descriptor.param)
+        }
         controller.updateConfig(updated)
     }
 
@@ -915,11 +906,10 @@ private struct InstanceDetailPanel: View {
         boolDrafts = [:]
         for descriptor in driver.paramSchema {
             if let val = controller.config.instanceParams.values[descriptor.param] {
-                switch val {
-                case .double(let d): paramDrafts[descriptor.param] = String(format: "%.3g", d)
-                case .int(let i):    paramDrafts[descriptor.param] = String(i)
-                case .string(let s): paramDrafts[descriptor.param] = s
-                case .bool(let b):   boolDrafts[descriptor.param] = b
+                if case .bool(let b) = val {
+                    boolDrafts[descriptor.param] = b
+                } else {
+                    paramDrafts[descriptor.param] = val.displayString
                 }
             } else if case .bool(let b) = descriptor.defaultValue {
                 boolDrafts[descriptor.param] = b
@@ -1862,23 +1852,13 @@ private struct ProfileDetailPanel: View {
     }
 
     private func profileCommitText(_ descriptor: ParamDescriptor) {
-        guard let raw = paramDrafts[descriptor.param], !raw.isEmpty else {
-            var updated = profile
-            updated.params.values.removeValue(forKey: descriptor.param)
-            updated.modifiedAt = Date()
-            registry.updateProfile(updated)
-            return
-        }
-        var value: ParamValue?
-        switch descriptor.valueType {
-        case .double:   if let d = Double(raw) { value = .double(d) }
-        case .int:      if let i = Int(raw)    { value = .int(i) }
-        case .string:   value = .string(raw)
-        case .bool:     break
-        }
-        guard let value else { return }
         var updated = profile
-        updated.params.values[descriptor.param] = value
+        if let raw = paramDrafts[descriptor.param], !raw.isEmpty,
+           let value = ParamValue(rawString: raw, valueType: descriptor.valueType) {
+            updated.params.values[descriptor.param] = value
+        } else {
+            updated.params.values.removeValue(forKey: descriptor.param)
+        }
         updated.modifiedAt = Date()
         registry.updateProfile(updated)
     }
@@ -1904,11 +1884,10 @@ private struct ProfileDetailPanel: View {
         boolDrafts = [:]
         for descriptor in paramSchema {
             if let val = profile.params.values[descriptor.param] {
-                switch val {
-                case .double(let d): paramDrafts[descriptor.param] = String(format: "%.3g", d)
-                case .int(let i):    paramDrafts[descriptor.param] = String(i)
-                case .string(let s): paramDrafts[descriptor.param] = s
-                case .bool(let b):   boolDrafts[descriptor.param] = b
+                if case .bool(let b) = val {
+                    boolDrafts[descriptor.param] = b
+                } else {
+                    paramDrafts[descriptor.param] = val.displayString
                 }
             } else if case .bool(let b) = descriptor.defaultValue {
                 boolDrafts[descriptor.param] = b

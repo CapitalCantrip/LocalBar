@@ -25,6 +25,18 @@ enum ParamValue: Codable, Equatable, Sendable, Hashable {
         if case .bool(let b) = self { return b ? "1" : "0" }
         return displayString
     }
+
+    /// Parse a raw text-field string into a typed ParamValue.
+    /// Returns nil when the string cannot be parsed for the given type,
+    /// or when the type is .bool (bools are controlled by Toggle, not text fields).
+    init?(rawString: String, valueType: ParamValueType) {
+        switch valueType {
+        case .double:  guard let d = Double(rawString) else { return nil }; self = .double(d)
+        case .int:     guard let i = Int(rawString)    else { return nil }; self = .int(i)
+        case .string:  self = .string(rawString)
+        case .bool:    return nil
+        }
+    }
 }
 
 /// A bag of canonical param values.

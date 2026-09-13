@@ -158,4 +158,77 @@ final class DataModelTests: XCTestCase {
         XCTAssertEqual(mem.restartDurationSamples.count, 10)
         XCTAssertEqual(mem.restartDurationSamples.first, 12.0) // newest at front
     }
+
+    // MARK: - ParamValue.init?(rawString:valueType:)
+
+    func test_paramValueInit_double_valid() {
+        XCTAssertEqual(ParamValue(rawString: "0.75", valueType: .double(range: nil)), .double(0.75))
+    }
+
+    func test_paramValueInit_double_invalid() {
+        XCTAssertNil(ParamValue(rawString: "abc", valueType: .double(range: nil)))
+    }
+
+    func test_paramValueInit_int_valid() {
+        XCTAssertEqual(ParamValue(rawString: "42", valueType: .int(range: nil)), .int(42))
+    }
+
+    func test_paramValueInit_int_invalid() {
+        XCTAssertNil(ParamValue(rawString: "3.14", valueType: .int(range: nil)))
+    }
+
+    func test_paramValueInit_string() {
+        XCTAssertEqual(ParamValue(rawString: "hello", valueType: .string), .string("hello"))
+    }
+
+    func test_paramValueInit_bool_returnsNil() {
+        // Booleans are controlled by Toggle, not text fields.
+        XCTAssertNil(ParamValue(rawString: "true", valueType: .bool))
+    }
+
+    // MARK: - ParamValue.cliString
+
+    func test_cliString_double() { XCTAssertEqual(ParamValue.double(0.5).cliString, "0.5") }
+    func test_cliString_int()    { XCTAssertEqual(ParamValue.int(7).cliString, "7") }
+    func test_cliString_string() { XCTAssertEqual(ParamValue.string("q4").cliString, "q4") }
+    func test_cliString_boolTrue()  { XCTAssertEqual(ParamValue.bool(true).cliString, "1") }
+    func test_cliString_boolFalse() { XCTAssertEqual(ParamValue.bool(false).cliString, "0") }
+
+    // MARK: - ParamValues.merge(from:)
+
+    func test_merge_addsNewValues() {
+        var dest = ParamValues()
+        dest.values[.temperature] = .double(0.7)
+        var src = ParamValues()
+        src.values[.topP] = .double(0.9)
+        dest.merge(from: src)
+        XCTAssertEqual(dest[.temperature], .double(0.7))
+        XCTAssertEqual(dest[.topP], .double(0.9))
+    }
+
+    func test_merge_overwritesExistingValues() {
+        var dest = ParamValues()
+        dest.values[.temperature] = .double(0.7)
+        var src = ParamValues()
+        src.values[.temperature] = .double(0.5)
+        dest.merge(from: src)
+        XCTAssertEqual(dest[.temperature], .double(0.5))
+    }
+
+    func test_merge_systemPrompt_overrides() {
+        var dest = ParamValues()
+        dest.systemPrompt = "old"
+        var src = ParamValues()
+        src.systemPrompt = "new"
+        dest.merge(from: src)
+        XCTAssertEqual(dest.systemPrompt, "new")
+    }
+
+    func test_merge_systemPrompt_nil_doesNotOverride() {
+        var dest = ParamValues()
+        dest.systemPrompt = "original"
+        let src = ParamValues() // systemPrompt is nil
+        dest.merge(from: src)
+        XCTAssertEqual(dest.systemPrompt, "original")
+    }
 }
