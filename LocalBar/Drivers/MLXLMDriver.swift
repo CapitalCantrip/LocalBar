@@ -73,51 +73,60 @@ struct MLXLMDriver: ServerDriver {
         guard case .filesystem(let path) = model.location else {
             throw DriverError.unexpectedModelLocation(model: model)
         }
-
-        // Support two invocation modes:
-        //  · uvx    → `uvx --from mlx-lm mlx_lm.server --model <path> ...`
-        //  · python → `python3 -m mlx_lm.server --model <path> ...`
         let isUvx = config.executablePath.hasSuffix("/uvx") || config.executablePath == "uvx"
-        var args: [String] = isUvx
-            ? ["--from", "mlx-lm", "mlx_lm.server"]
-            : ["-m", "mlx_lm.server"]
-        args += [
-            "--model", path,
-            "--host", config.host,
-            "--port", String(config.port),
-        ]
-
-        // Translate supported canonical params to CLI flags.
-        for descriptor in paramSchema {
-            guard let value = params[descriptor.param] else { continue }
-            args.append(descriptor.serverFlagName)
-            switch value {
-            case .double(let d): args.append(String(d))
-            case .int(let i):    args.append(String(i))
-            case .string(let s): args.append(s)
-            case .bool(let b):   if b { /* flag-only, already appended */ } else { args.removeLast() }
-            }
-        }
-
-        // Advanced flags — skip LocalBar-internal config keys (isLocalOnly).
-        for descriptor in flagSchema where !descriptor.isEnvironmentVariable && !descriptor.isLocalOnly {
-            if let value = config.advancedFlags[descriptor.flagName] {
-                args.append(descriptor.flagName)
-                switch value {
-                case .double(let d): args.append(String(d))
-                case .int(let i):    args.append(String(i))
-                case .string(let s): args.append(s)
-                case .bool(let b):   if !b { args.removeLast() }
-                }
-            }
-        }
-
+        var args = baseArgs(isUvx: isUvx, path: path, config: config)
+        args += paramArgs(schema: paramSchema, params: params)
+        args += flagArgs(schema: flagSchema, config: config)
         return LaunchPlan(
             executableURL: URL(fileURLWithPath: config.executablePath),
             arguments: args,
             environment: [:],
             workingDirectory: nil
         )
+    }
+
+    /// Build the fixed prefix args for the mlx_lm.server command.
+    private func baseArgs(isUvx: Bool, path: String, config: ServerInstanceConfig) -> [String] {
+        // Support two invocation modes:
+        //  · uvx    → `uvx --from mlx-lm mlx_lm.server --model <path> ...`
+        //  · python → `python3 -m mlx_lm.server --model <path> ...`
+        var args: [String] = isUvx
+            ? ["--from", "mlx-lm", "mlx_lm.server"]
+            : ["-m", "mlx_lm.server"]
+        args += ["--model", path, "--host", config.host, "--port", String(config.port)]
+        return args
+    }
+
+    /// Translate canonical params to CLI flag pairs.
+    private func paramArgs(schema: [ParamDescriptor], params: ParamValues) -> [String] {
+        var args: [String] = []
+        for descriptor in schema {
+            guard let value = params[descriptor.param] else { continue }
+            appendFlag(value, name: descriptor.serverFlagName, to: &args)
+        }
+        return args
+    }
+
+    /// Translate advanced flags to CLI flag pairs, skipping local-only and env-var entries.
+    private func flagArgs(schema: [FlagDescriptor], config: ServerInstanceConfig) -> [String] {
+        var args: [String] = []
+        for descriptor in schema where !descriptor.isEnvironmentVariable && !descriptor.isLocalOnly {
+            guard let value = config.advancedFlags[descriptor.flagName] else { continue }
+            appendFlag(value, name: descriptor.flagName, to: &args)
+        }
+        return args
+    }
+
+    /// Append `name` and the string form of `value` to `args`.
+    /// For bool values, the flag is omitted entirely when false.
+    private func appendFlag(_ value: ParamValue, name: String, to args: inout [String]) {
+        args.append(name)
+        switch value {
+        case .double(let d): args.append(String(d))
+        case .int(let i):    args.append(String(i))
+        case .string(let s): args.append(s)
+        case .bool(let b):   if !b { args.removeLast() }
+        }
     }
 
     func makeShutdownPlan(config: ServerInstanceConfig) -> ShutdownPlan {
@@ -306,40 +315,35 @@ enum ModelMetadataParser {
     // MARK: Capability detection (best-effort, silent on error)
 
     static func detectCapabilities(directoryPath: String, modelKey: String, configJSON: [String: Any]? = nil) -> Set<ModelMetadata.Capability> {
-        var capabilities: Set<ModelMetadata.Capability> = []
-        let lowerKey = modelKey.lowercased()
-
         let config = configJSON ?? readJSON(at: (directoryPath as NSString).appendingPathComponent("config.json"))
-        if let config {
-            if config["vision_config"] != nil {
-                capabilities.insert(.vision)
-            }
-            let modelType = (config["model_type"] as? String)?.lowercased() ?? ""
-            if modelType.contains("code") {
-                capabilities.insert(.code)
-            }
-            if modelType == "bert" || modelType.contains("embed") {
-                capabilities.insert(.embedding)
-            }
-        }
+        return capabilitiesFromConfig(config)
+            .union(capabilitiesFromModelKey(modelKey.lowercased()))
+            .union(capabilitiesFromTokenizerConfig(at: directoryPath))
+    }
 
-        // Repo/dir name heuristics.
-        if lowerKey.contains("code") || lowerKey.contains("coder") {
-            capabilities.insert(.code)
-        }
-        if lowerKey.contains("embed") {
-            capabilities.insert(.embedding)
-        }
+    private static func capabilitiesFromConfig(_ config: [String: Any]?) -> Set<ModelMetadata.Capability> {
+        guard let config else { return [] }
+        var caps: Set<ModelMetadata.Capability> = []
+        if config["vision_config"] != nil { caps.insert(.vision) }
+        let modelType = (config["model_type"] as? String)?.lowercased() ?? ""
+        if modelType.contains("code") { caps.insert(.code) }
+        if modelType == "bert" || modelType.contains("embed") { caps.insert(.embedding) }
+        return caps
+    }
 
-        // Tool use: look for "tool" in the chat template.
-        let tokenizerConfigPath = (directoryPath as NSString).appendingPathComponent("tokenizer_config.json")
-        if let tokenizerConfig = readJSON(at: tokenizerConfigPath),
-           let template = tokenizerConfig["chat_template"] as? String,
-           template.lowercased().contains("tool") {
-            capabilities.insert(.toolUse)
-        }
+    private static func capabilitiesFromModelKey(_ lowerKey: String) -> Set<ModelMetadata.Capability> {
+        var caps: Set<ModelMetadata.Capability> = []
+        if lowerKey.contains("code") || lowerKey.contains("coder") { caps.insert(.code) }
+        if lowerKey.contains("embed") { caps.insert(.embedding) }
+        return caps
+    }
 
-        return capabilities
+    private static func capabilitiesFromTokenizerConfig(at directoryPath: String) -> Set<ModelMetadata.Capability> {
+        let path = (directoryPath as NSString).appendingPathComponent("tokenizer_config.json")
+        guard let config = readJSON(at: path),
+              let template = config["chat_template"] as? String,
+              template.lowercased().contains("tool") else { return [] }
+        return [.toolUse]
     }
 
     // MARK: Helpers

@@ -8,6 +8,16 @@ enum ParamValue: Codable, Equatable, Sendable, Hashable {
     case int(Int)
     case string(String)
     case bool(Bool)
+
+    /// Formatted string for display in the settings UI.
+    var displayString: String {
+        switch self {
+        case .double(let d): return String(format: "%.3g", d)
+        case .int(let i):    return String(i)
+        case .string(let s): return s
+        case .bool(let b):   return b ? "On" : "Off"
+        }
+    }
 }
 
 /// A bag of canonical param values.
@@ -157,35 +167,23 @@ extension ParamValues {
         driverDefaults: [ParamDescriptor]
     ) -> ParamValues {
         var resolved = ParamValues()
-
         // 1. Driver defaults (lowest priority)
         for descriptor in driverDefaults {
             if let def = descriptor.defaultValue {
                 resolved.values[descriptor.param] = def
             }
         }
-
         // 2. Model memory
-        if let memory {
-            for (param, value) in memory.lastUsedParams.values {
-                resolved.values[param] = value
-            }
-            if let prompt = memory.lastUsedParams.systemPrompt {
-                resolved.systemPrompt = prompt
-            }
-        }
-
+        if let memory { apply(memory.lastUsedParams, to: &resolved) }
         // 3. Active profile (highest priority)
-        if let profile {
-            for (param, value) in profile.params.values {
-                resolved.values[param] = value
-            }
-            if let prompt = profile.params.systemPrompt {
-                resolved.systemPrompt = prompt
-            }
-        }
-
+        if let profile { apply(profile.params, to: &resolved) }
         return resolved
+    }
+
+    /// Merge all values and the system prompt from `source` into `resolved`.
+    private static func apply(_ source: ParamValues, to resolved: inout ParamValues) {
+        for (param, value) in source.values { resolved.values[param] = value }
+        if let prompt = source.systemPrompt { resolved.systemPrompt = prompt }
     }
 
     /// Filter to only params supported by the given driver schema,

@@ -928,29 +928,9 @@ private struct InstanceDetailPanel: View {
         systemPromptDraft = controller.config.instanceParams.systemPrompt ?? ""
     }
 
-    private func humanName(_ param: CanonicalParam) -> String {
-        switch param {
-        case .contextLength:  return "Context Length"
-        case .temperature:    return "Temperature"
-        case .maxTokens:      return "Max Tokens"
-        case .topK:           return "Top K"
-        case .repeatPenalty:  return "Repeat Penalty"
-        case .presencePenalty: return "Presence Penalty"
-        case .topP:           return "Top P"
-        case .minP:           return "Min P"
-        case .seed:           return "Seed"
-        case .systemPrompt:   return "System Prompt"
-        }
-    }
+    private func humanName(_ param: CanonicalParam) -> String { param.humanName }
 
-    private func paramValueString(_ value: ParamValue) -> String {
-        switch value {
-        case .double(let d): return String(format: "%.3g", d)
-        case .int(let i):    return String(i)
-        case .string(let s): return s
-        case .bool(let b):   return b ? "On" : "Off"
-        }
-    }
+    private func paramValueString(_ value: ParamValue) -> String { value.displayString }
 
     /// Commit a port edit made while the server is stopped. Called on submit/blur.
     private func commitPortOverride() {
@@ -1937,27 +1917,7 @@ private struct ProfileDetailPanel: View {
         systemPromptDraft = profile.params.systemPrompt ?? ""
     }
 
-    private func profileHumanName(_ param: CanonicalParam) -> String {
-        switch param {
-        case .contextLength:   return "Context Length"
-        case .temperature:     return "Temperature"
-        case .maxTokens:       return "Max Tokens"
-        case .topK:            return "Top K"
-        case .repeatPenalty:   return "Repeat Penalty"
-        case .presencePenalty: return "Presence Penalty"
-        case .topP:            return "Top P"
-        case .minP:            return "Min P"
-        case .seed:            return "Seed"
-        case .systemPrompt:    return "System Prompt"
-        }
-    }
+    private func profileHumanName(_ param: CanonicalParam) -> String { param.humanName }
 
-    private func profileValueString(_ value: ParamValue) -> String {
-        switch value {
-        case .double(let d): return String(format: "%.3g", d)
-        case .int(let i):    return String(i)
-        case .string(let s): return s
-        case .bool(let b):   return b ? "On" : "Off"
-        }
-    }
+    private func profileValueString(_ value: ParamValue) -> String { value.displayString }
 }

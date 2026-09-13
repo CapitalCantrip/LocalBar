@@ -131,6 +131,22 @@ enum CanonicalParam: String, Codable, CaseIterable, Sendable, Hashable, CodingKe
     case seed
     case contextLength
     case systemPrompt
+
+    /// Display label used in the settings UI.
+    var humanName: String {
+        switch self {
+        case .contextLength:   return "Context Length"
+        case .temperature:     return "Temperature"
+        case .maxTokens:       return "Max Tokens"
+        case .topK:            return "Top K"
+        case .repeatPenalty:   return "Repeat Penalty"
+        case .presencePenalty: return "Presence Penalty"
+        case .topP:            return "Top P"
+        case .minP:            return "Min P"
+        case .seed:            return "Seed"
+        case .systemPrompt:    return "System Prompt"
+        }
+    }
 }
 
 /// How a param value actually reaches the server.
@@ -303,14 +319,18 @@ extension ModelMetadata {
 
     private func bitsPerParam(for quantization: String?) -> Double {
         guard let q = quantization?.lowercased() else { return 16.0 }
-        // GGUF Q4 variants: ~4.5 effective bits
-        if q.hasPrefix("q4") { return 4.5 }
-        if q.hasPrefix("q5") { return 5.5 }
-        if q.hasPrefix("q6") { return 6.5 }
-        if q.hasPrefix("q8") { return 8.0 }
-        if q.contains("4bit") || q.contains("4-bit") { return 4.5 }
-        if q.contains("8bit") || q.contains("8-bit") { return 8.0 }
-        if q.contains("f16") || q.contains("fp16") || q.contains("bf16") { return 16.0 }
+        // Prefix table: checked before substring matches (more specific wins).
+        let prefixTable: [(String, Double)] = [
+            ("q4", 4.5), ("q5", 5.5), ("q6", 6.5), ("q8", 8.0),
+        ]
+        for (prefix, bits) in prefixTable where q.hasPrefix(prefix) { return bits }
+        // Substring table: "4bit"/"4-bit", "8bit"/"8-bit", float formats.
+        let substringTable: [(String, Double)] = [
+            ("4bit", 4.5), ("4-bit", 4.5),
+            ("8bit", 8.0), ("8-bit", 8.0),
+            ("f16", 16.0), ("fp16", 16.0), ("bf16", 16.0),
+        ]
+        for (sub, bits) in substringTable where q.contains(sub) { return bits }
         return 16.0 // conservative default
     }
 }
