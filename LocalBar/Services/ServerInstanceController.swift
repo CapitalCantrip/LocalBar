@@ -619,7 +619,7 @@ final class ServerInstanceController: Identifiable {
     /// (shows what will actually be sent at launch/switch, including defaults).
     func effectiveParams() -> ParamValues { resolvedParams() }
 
-    private func resolvedModel() async -> ModelRef? {
+    func resolvedModel() async -> ModelRef? {
         guard let key = config.selectedModelKey else { return nil }
         if availableModels.isEmpty { await refreshModels() }
         return availableModels.first(where: { $0.key == key })
@@ -639,6 +639,13 @@ final class ServerInstanceController: Identifiable {
         } catch { return nil }
     }
 
+    /// Returns true when `model`'s filesystem path overlaps with the server-reported `serverID`.
+    /// Extracted for testability and to reduce CC in detectRunningModel.
+    static func modelMatchesServerID(_ model: ModelRef, serverID: String) -> Bool {
+        guard case .filesystem(let path) = model.location else { return false }
+        return path == serverID || serverID.hasPrefix(path) || path.hasPrefix(serverID)
+    }
+
     /// Query the running server's /v1/models endpoint to find what model is
     /// actually loaded, then match it against our scanned availableModels list.
     /// The model ID returned by mlx-lm is the filesystem path passed at launch.
@@ -650,13 +657,7 @@ final class ServerInstanceController: Identifiable {
             guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let list = json["data"] as? [[String: Any]],
                   let firstID = list.first?["id"] as? String else { return nil }
-            // Match by filesystem path (the model location stored in ModelRef).
-            return availableModels.first {
-                if case .filesystem(let path) = $0.location {
-                    return path == firstID || firstID.hasPrefix(path) || path.hasPrefix(firstID)
-                }
-                return false
-            }
+            return availableModels.first { Self.modelMatchesServerID($0, serverID: firstID) }
         } catch {
             return nil
         }

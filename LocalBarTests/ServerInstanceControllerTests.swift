@@ -406,4 +406,63 @@ final class ServerInstanceControllerTests: XCTestCase {
         XCTAssertFalse(controller.config.wasRunningWhenQuit) // unchanged
         XCTAssertEqual(callCount, 0)
     }
+
+    // MARK: - resolvedModel
+
+    func test_resolvedModel_nilKey_returnsNil() async {
+        var config = makeMLXConfig()
+        config.selectedModelKey = nil
+        let controller = ServerInstanceController(config: config)
+        let result = await controller.resolvedModel()
+        XCTAssertNil(result)
+    }
+
+    func test_resolvedModel_matchesSeededModel() async {
+        var config = makeMLXConfig()
+        config.selectedModelKey = "llama3"
+        let controller = ServerInstanceController(config: config)
+        let model = ModelRef(key: "llama3", displayName: "Llama 3", sizeBytes: nil, location: .filesystem(path: "/m/llama3"))
+        controller.seedModels([model])
+        let result = await controller.resolvedModel()
+        XCTAssertEqual(result?.key, "llama3")
+    }
+
+    func test_resolvedModel_keyNotInSeededModels_returnsNil() async {
+        var config = makeMLXConfig()
+        config.selectedModelKey = "mistral"
+        let controller = ServerInstanceController(config: config)
+        let model = ModelRef(key: "llama3", displayName: "Llama 3", sizeBytes: nil, location: .filesystem(path: "/m/llama3"))
+        controller.seedModels([model])
+        let result = await controller.resolvedModel()
+        XCTAssertNil(result)
+    }
+
+    // MARK: - modelMatchesServerID
+
+    func test_modelMatchesServerID_exactMatch() {
+        let model = ModelRef(key: "k", displayName: "m", sizeBytes: nil, location: .filesystem(path: "/models/llama3"))
+        XCTAssertTrue(ServerInstanceController.modelMatchesServerID(model, serverID: "/models/llama3"))
+    }
+
+    func test_modelMatchesServerID_serverIDHasPrefix() {
+        // server returns subpath of model dir
+        let model = ModelRef(key: "k", displayName: "m", sizeBytes: nil, location: .filesystem(path: "/models"))
+        XCTAssertTrue(ServerInstanceController.modelMatchesServerID(model, serverID: "/models/llama3"))
+    }
+
+    func test_modelMatchesServerID_pathHasPrefix() {
+        // model dir contains the server-reported path as prefix
+        let model = ModelRef(key: "k", displayName: "m", sizeBytes: nil, location: .filesystem(path: "/models/llama3/extended"))
+        XCTAssertTrue(ServerInstanceController.modelMatchesServerID(model, serverID: "/models/llama3"))
+    }
+
+    func test_modelMatchesServerID_noMatch() {
+        let model = ModelRef(key: "k", displayName: "m", sizeBytes: nil, location: .filesystem(path: "/models/llama3"))
+        XCTAssertFalse(ServerInstanceController.modelMatchesServerID(model, serverID: "/models/mistral"))
+    }
+
+    func test_modelMatchesServerID_serverManaged_returnsFalse() {
+        let model = ModelRef(key: "k", displayName: "m", sizeBytes: nil, location: .serverManaged)
+        XCTAssertFalse(ServerInstanceController.modelMatchesServerID(model, serverID: "/models/llama3"))
+    }
 }
