@@ -325,4 +325,85 @@ final class ServerInstanceControllerTests: XCTestCase {
         let expected = Int64(2 * 32 * 8 * 128 * 2048) * 2
         XCTAssertEqual(estimate.kvCacheBytes, expected)
     }
+
+    // MARK: - transition
+
+    func test_transition_setsPhase() {
+        let controller = ServerInstanceController(config: makeOllamaConfig())
+        controller.transition(to: .running)
+        XCTAssertEqual(controller.phase, .running)
+    }
+
+    func test_transition_error_setsLastError() {
+        let controller = ServerInstanceController(config: makeOllamaConfig())
+        let err = InstanceError(kind: .launchFailed, message: "boom")
+        controller.transition(to: .error(err))
+        XCTAssertEqual(controller.lastError, err)
+        XCTAssertEqual(controller.phase, .error(err))
+    }
+
+    func test_transition_stopped_doesNotOverwriteLastError() {
+        let controller = ServerInstanceController(config: makeOllamaConfig())
+        let err = InstanceError(kind: .launchFailed, message: "boom")
+        controller.transition(to: .error(err))
+        controller.transition(to: .stopped(.userStopped))
+        XCTAssertEqual(controller.phase, .stopped(.userStopped))
+        // lastError stays; it's cleared by the caller (e.g. retryFromError)
+        XCTAssertEqual(controller.lastError, err)
+    }
+
+    // MARK: - syncWasRunningWhenQuit
+
+    func test_syncWasRunningWhenQuit_running_setsTrue() {
+        var config = makeOllamaConfig()
+        config.wasRunningWhenQuit = false
+        let controller = ServerInstanceController(config: config)
+        var callCount = 0
+        controller.onConfigChanged = { _ in callCount += 1 }
+        controller.syncWasRunningWhenQuit(for: .running)
+        XCTAssertTrue(controller.config.wasRunningWhenQuit)
+        XCTAssertEqual(callCount, 1)
+    }
+
+    func test_syncWasRunningWhenQuit_running_alreadyTrue_noCallback() {
+        var config = makeOllamaConfig()
+        config.wasRunningWhenQuit = true
+        let controller = ServerInstanceController(config: config)
+        var callCount = 0
+        controller.onConfigChanged = { _ in callCount += 1 }
+        controller.syncWasRunningWhenQuit(for: .running)
+        XCTAssertTrue(controller.config.wasRunningWhenQuit)
+        XCTAssertEqual(callCount, 0) // no change, no callback
+    }
+
+    func test_syncWasRunningWhenQuit_stopped_setsFalse() {
+        var config = makeOllamaConfig()
+        config.wasRunningWhenQuit = true
+        let controller = ServerInstanceController(config: config)
+        var callCount = 0
+        controller.onConfigChanged = { _ in callCount += 1 }
+        controller.syncWasRunningWhenQuit(for: .stopped(.userStopped))
+        XCTAssertFalse(controller.config.wasRunningWhenQuit)
+        XCTAssertEqual(callCount, 1)
+    }
+
+    func test_syncWasRunningWhenQuit_error_setsFalse() {
+        var config = makeOllamaConfig()
+        config.wasRunningWhenQuit = true
+        let controller = ServerInstanceController(config: config)
+        let err = InstanceError(kind: .crashed(exitCode: 1), message: "x")
+        controller.syncWasRunningWhenQuit(for: .error(err))
+        XCTAssertFalse(controller.config.wasRunningWhenQuit)
+    }
+
+    func test_syncWasRunningWhenQuit_starting_isNoop() {
+        var config = makeOllamaConfig()
+        config.wasRunningWhenQuit = false
+        let controller = ServerInstanceController(config: config)
+        var callCount = 0
+        controller.onConfigChanged = { _ in callCount += 1 }
+        controller.syncWasRunningWhenQuit(for: .starting)
+        XCTAssertFalse(controller.config.wasRunningWhenQuit) // unchanged
+        XCTAssertEqual(callCount, 0)
+    }
 }

@@ -79,7 +79,7 @@ actor PathScanner {
     /// Falls back to `/usr/bin/env which` if the login shell can't be
     /// determined. Executed on a background queue because
     /// `Process.waitUntilExit` blocks the calling thread.
-    private static func which(_ tool: String) async -> String? {
+    static func which(_ tool: String) async -> String? {
         await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
             DispatchQueue.global(qos: .userInitiated).async {
                 // Determine the user's login shell (SHELL env var, or /bin/zsh fallback).
@@ -130,7 +130,7 @@ actor PathScanner {
 
     /// Synchronous `/usr/bin/env which` used as a fallback when the login
     /// shell is unavailable. Must be called from a background thread.
-    private static func envWhich(_ tool: String) -> String? {
+    static func envWhich(_ tool: String) -> String? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = ["which", tool]

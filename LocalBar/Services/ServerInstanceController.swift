@@ -589,27 +589,19 @@ final class ServerInstanceController: Identifiable {
         contextPollTask = nil
     }
 
-    private func transition(to newPhase: InstancePhase) {
+    func transition(to newPhase: InstancePhase) {
         phase = newPhase
         if case .error(let err) = newPhase { lastError = err }
         syncWasRunningWhenQuit(for: newPhase)
     }
 
     /// Keep `wasRunningWhenQuit` in sync so a restart can reconnect orphans.
-    private func syncWasRunningWhenQuit(for newPhase: InstancePhase) {
-        switch newPhase {
-        case .running:
-            if !config.wasRunningWhenQuit {
-                config.wasRunningWhenQuit = true
-                onConfigChanged?(config)
-            }
-        case .stopped, .error:
-            if config.wasRunningWhenQuit {
-                config.wasRunningWhenQuit = false
-                onConfigChanged?(config)
-            }
-        default: break
-        }
+    func syncWasRunningWhenQuit(for newPhase: InstancePhase) {
+        guard newPhase.isRunning || newPhase.isStopped || newPhase.isError else { return }
+        let newValue = newPhase.isRunning
+        guard config.wasRunningWhenQuit != newValue else { return }
+        config.wasRunningWhenQuit = newValue
+        onConfigChanged?(config)
     }
 
     private func resolvedParams() -> ParamValues {
