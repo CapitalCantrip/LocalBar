@@ -130,6 +130,9 @@ enum CanonicalParam: String, Codable, CaseIterable, Sendable, Hashable, CodingKe
     case presencePenalty
     case seed
     case contextLength
+    /// Never stored in `ParamValues.values[]` — system prompt lives in
+    /// `ParamValues.systemPrompt: String?`. This case exists only to
+    /// keep `humanName` and other switches exhaustive.
     case systemPrompt
 
     /// Display label used in the settings UI.

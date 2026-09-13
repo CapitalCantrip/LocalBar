@@ -231,13 +231,66 @@ final class MLXLMDriverTests: XCTestCase {
 
     func test_modelRef_hfCacheLayout_decodesKey() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
-        // HF cache uses "models--org--repo" directory names.
+        // HF cache flat layout: "models--org--repo" at root (no snapshots subdir).
         let hfDir = (root as NSString).appendingPathComponent("models--mlx-community--llama3-8b")
         try FileManager.default.createDirectory(atPath: hfDir, withIntermediateDirectories: true)
         FileManager.default.createFile(atPath: (hfDir as NSString).appendingPathComponent("config.json"), contents: "{}".data(using: .utf8))
         defer { try? FileManager.default.removeItem(atPath: root) }
         let ref = try XCTUnwrap(MLXLMDriver.modelRef(forRelativePath: "models--mlx-community--llama3-8b", root: root, fm: .default))
         XCTAssertEqual(ref.key, "mlx-community/llama3-8b")
+    }
+
+    func test_modelRef_hfSnapshotPath_decodesKeyFromGrandparent() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        // Real HF cache: models--org--repo/snapshots/<hash>/config.json
+        let snapshotDir = ((root as NSString)
+            .appendingPathComponent("models--mlx-community--llama3-8b")
+            as NSString).appendingPathComponent("snapshots/abc123def456")
+        try FileManager.default.createDirectory(atPath: snapshotDir, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: (snapshotDir as NSString).appendingPathComponent("config.json"), contents: "{}".data(using: .utf8))
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let ref = try XCTUnwrap(MLXLMDriver.modelRef(
+            forRelativePath: "models--mlx-community--llama3-8b/snapshots/abc123def456",
+            root: root, fm: .default))
+        XCTAssertEqual(ref.key, "mlx-community/llama3-8b")
+        XCTAssertEqual(ref.displayName, "llama3-8b")
+    }
+
+    // MARK: - preferredHFSnapshotIDs
+
+    func test_preferredHFSnapshotIDs_refsMain_returnsCanonicalHash() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        let modelDir = (root as NSString).appendingPathComponent("models--mlx-community--llama3-8b")
+        let refsDir = (modelDir as NSString).appendingPathComponent("refs")
+        try FileManager.default.createDirectory(atPath: refsDir, withIntermediateDirectories: true)
+        let canonicalHash = "abc123def456abc123def456abc123def456abc1"
+        FileManager.default.createFile(atPath: (refsDir as NSString).appendingPathComponent("main"),
+                                       contents: (canonicalHash + "\n").data(using: .utf8))
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let preferred = MLXLMDriver.preferredHFSnapshotIDs(root: root, fm: .default)
+        XCTAssertTrue(preferred.contains("models--mlx-community--llama3-8b/" + canonicalHash))
+        XCTAssertEqual(preferred.count, 1)
+    }
+
+    func test_preferredHFSnapshotIDs_noRefsMain_includesAllSnapshots() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        let modelDir = (root as NSString).appendingPathComponent("models--mlx-community--llama3-8b")
+        let snapshotsDir = (modelDir as NSString).appendingPathComponent("snapshots")
+        let hash1 = "aaa111"
+        let hash2 = "bbb222"
+        try FileManager.default.createDirectory(atPath: (snapshotsDir as NSString).appendingPathComponent(hash1),
+                                                withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: (snapshotsDir as NSString).appendingPathComponent(hash2),
+                                                withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let preferred = MLXLMDriver.preferredHFSnapshotIDs(root: root, fm: .default)
+        XCTAssertTrue(preferred.contains("models--mlx-community--llama3-8b/" + hash1))
+        XCTAssertTrue(preferred.contains("models--mlx-community--llama3-8b/" + hash2))
+    }
+
+    func test_preferredHFSnapshotIDs_emptyRoot_returnsEmpty() {
+        let preferred = MLXLMDriver.preferredHFSnapshotIDs(root: "/nonexistent/\(UUID().uuidString)", fm: .default)
+        XCTAssertTrue(preferred.isEmpty)
     }
 
     func test_modelRef_ggufFile_keepsGgufFormat() throws {
@@ -285,5 +338,58 @@ final class MLXLMDriverTests: XCTestCase {
         let models = try await driver.listModels(config: config)
         // Should silently return empty — no crash.
         XCTAssertTrue(models.isEmpty)
+    }
+
+    func test_listModels_hfSnapshot_deduplicatesMultipleSnapshots() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        let canonicalHash = "abc123def456abc123def456abc123def456abc1"
+        let staleHash    = "stale000stale000stale000stale000stale000"
+        // Write refs/main pointing at the canonical hash.
+        let modelDir = (root as NSString).appendingPathComponent("models--mlx-community--llama3-8b")
+        let refsDir = (modelDir as NSString).appendingPathComponent("refs")
+        try FileManager.default.createDirectory(atPath: refsDir, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: (refsDir as NSString).appendingPathComponent("main"),
+                                       contents: canonicalHash.data(using: .utf8))
+        // Create two snapshot dirs, each with config.json.
+        for hash in [canonicalHash, staleHash] {
+            let dir = (((modelDir as NSString).appendingPathComponent("snapshots")) as NSString)
+                .appendingPathComponent(hash)
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            FileManager.default.createFile(atPath: (dir as NSString).appendingPathComponent("config.json"),
+                                           contents: "{}".data(using: .utf8))
+        }
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        var config = makeConfig()
+        config.modelSearchPaths = [root]
+        let models = try await driver.listModels(config: config)
+        let matching = models.filter { $0.key == "mlx-community/llama3-8b" }
+        XCTAssertEqual(matching.count, 1, "expected one entry per model, got \(matching.count)")
+    }
+
+    func test_listModels_hfSnapshot_usesCanonicalSnapshotPath() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        let canonicalHash = "canonical000canonical000canonical000cano"
+        let modelDir = (root as NSString).appendingPathComponent("models--mlx-community--phi3")
+        let refsDir = (modelDir as NSString).appendingPathComponent("refs")
+        try FileManager.default.createDirectory(atPath: refsDir, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: (refsDir as NSString).appendingPathComponent("main"),
+                                       contents: canonicalHash.data(using: .utf8))
+        let snapshotDir = (((modelDir as NSString).appendingPathComponent("snapshots")) as NSString)
+            .appendingPathComponent(canonicalHash)
+        try FileManager.default.createDirectory(atPath: snapshotDir, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: (snapshotDir as NSString).appendingPathComponent("config.json"),
+                                       contents: "{}".data(using: .utf8))
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        var config = makeConfig()
+        config.modelSearchPaths = [root]
+        let models = try await driver.listModels(config: config)
+        let ref = try XCTUnwrap(models.first(where: { $0.key == "mlx-community/phi3" }))
+        if case .filesystem(let path) = ref.location {
+            XCTAssertTrue(path.hasSuffix(canonicalHash), "expected canonical snapshot path, got \(path)")
+        } else {
+            XCTFail("Expected filesystem location")
+        }
     }
 }

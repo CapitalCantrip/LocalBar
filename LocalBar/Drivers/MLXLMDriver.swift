@@ -159,16 +159,56 @@ struct MLXLMDriver: ServerDriver {
         if !searchPaths.contains(hfDefault) { searchPaths.append(hfDefault) }
 
         var models: [ModelRef] = []
+        var seenKeys = Set<String>()
         let fm = FileManager.default
         for root in searchPaths {
+            // Resolve the canonical snapshot for each HF model dir up front,
+            // so we include only one entry per model even with multiple snapshots.
+            let preferredSnapshots = MLXLMDriver.preferredHFSnapshotIDs(root: root, fm: fm)
             guard let enumerator = fm.enumerator(atPath: root) else { continue }
             while let path = enumerator.nextObject() as? String {
+                // For HF snapshot dirs (models--org--repo/snapshots/<hash>),
+                // skip any snapshot that isn't the canonical one for this model.
+                let parts = path.split(separator: "/", maxSplits: 3, omittingEmptySubsequences: false)
+                    .map(String.init)
+                if parts.count >= 3,
+                   parts[0].hasPrefix("models--"),
+                   parts[1] == "snapshots",
+                   !preferredSnapshots.contains(parts[0] + "/" + parts[2]) {
+                    continue
+                }
                 if let ref = MLXLMDriver.modelRef(forRelativePath: path, root: root, fm: fm) {
+                    guard !seenKeys.contains(ref.key) else { continue }
+                    seenKeys.insert(ref.key)
                     models.append(ref)
                 }
             }
         }
         return models
+    }
+
+    /// For each `models--org--repo` directory under `root`, resolves the preferred
+    /// snapshot hash from `refs/main` (a text file containing the commit hash).
+    /// Falls back to the lexicographically first hash when `refs/main` is absent.
+    /// Returns a set of `"models--org--repo/<hash>"` strings.
+    static func preferredHFSnapshotIDs(root: String, fm: FileManager) -> Set<String> {
+        var preferred = Set<String>()
+        guard let entries = try? fm.contentsOfDirectory(atPath: root) else { return preferred }
+        for entry in entries where entry.hasPrefix("models--") {
+            let modelDir = (root as NSString).appendingPathComponent(entry)
+            let refsMain = (modelDir as NSString).appendingPathComponent("refs/main")
+            if let hash = (try? String(contentsOfFile: refsMain, encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines), !hash.isEmpty {
+                preferred.insert(entry + "/" + hash)
+            } else {
+                // No refs/main — include all snapshots (fallback for manual/partial caches).
+                let snapshotsDir = (modelDir as NSString).appendingPathComponent("snapshots")
+                if let hashes = try? fm.contentsOfDirectory(atPath: snapshotsDir) {
+                    for hash in hashes { preferred.insert(entry + "/" + hash) }
+                }
+            }
+        }
+        return preferred
     }
 
     /// Build a ModelRef for one filesystem path found during enumeration.
@@ -179,10 +219,30 @@ struct MLXLMDriver: ServerDriver {
         fm.fileExists(atPath: fullPath, isDirectory: &isDir)
         guard isDir.boolValue else { return nil }
         guard fm.fileExists(atPath: (fullPath as NSString).appendingPathComponent("config.json")) else { return nil }
-        // Decode HF cache layout: "models--org--repo" → "org/repo"
-        let key = path.hasPrefix("models--")
-            ? path.replacingOccurrences(of: "models--", with: "").replacingOccurrences(of: "--", with: "/")
-            : (fullPath as NSString).lastPathComponent
+
+        // Derive the model key and display name based on path structure.
+        let key: String
+        let displayName: String
+        let parts = path.split(separator: "/", maxSplits: 3, omittingEmptySubsequences: false)
+            .map(String.init)
+        if parts.count >= 3, parts[0].hasPrefix("models--"), parts[1] == "snapshots" {
+            // HF cache: models--org--repo/snapshots/<hash> — key from top-level dir.
+            let decoded = parts[0]
+                .replacingOccurrences(of: "models--", with: "")
+                .replacingOccurrences(of: "--", with: "/")
+            key = decoded
+            displayName = (decoded as NSString).lastPathComponent
+        } else if path.hasPrefix("models--"), !path.contains("/") {
+            // Flat HF layout: models--org--repo at root (no snapshots subdir).
+            key = path
+                .replacingOccurrences(of: "models--", with: "")
+                .replacingOccurrences(of: "--", with: "/")
+            displayName = (fullPath as NSString).lastPathComponent
+        } else {
+            key = (fullPath as NSString).lastPathComponent
+            displayName = key
+        }
+
         var metadata = ModelMetadataParser.parse(directoryPath: fullPath, modelKey: key)
         // mlx-lm only serves MLX-compatible models. Safetensors is
         // the weight container MLX adopted — don't let it shadow the
@@ -190,7 +250,7 @@ struct MLXLMDriver: ServerDriver {
         if metadata.modelFormat != .gguf { metadata.modelFormat = .mlx }
         return ModelRef(
             key: key,
-            displayName: (fullPath as NSString).lastPathComponent,
+            displayName: displayName,
             sizeBytes: nil,
             location: .filesystem(path: fullPath),
             metadata: metadata

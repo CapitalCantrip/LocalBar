@@ -14,8 +14,6 @@ actor PersistenceService {
     private var instancesURL: URL { baseURL.appendingPathComponent("instances.json") }
     private var profilesURL:  URL { baseURL.appendingPathComponent("profiles.json") }
     private var memoryURL:    URL { baseURL.appendingPathComponent("model-memory.json") }
-    private var settingsURL:  URL { baseURL.appendingPathComponent("settings.json") }
-
     private let encoder: JSONEncoder = {
         let e = JSONEncoder()
         e.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -81,16 +79,4 @@ actor PersistenceService {
         try saveModelMemory(store)
     }
 
-    // MARK: Settings
-
-    func loadSettings() throws -> AppSettings {
-        guard FileManager.default.fileExists(atPath: settingsURL.path) else { return AppSettings() }
-        let data = try Data(contentsOf: settingsURL)
-        return try decoder.decode(AppSettings.self, from: data)
-    }
-
-    func saveSettings(_ settings: AppSettings) throws {
-        let data = try encoder.encode(settings)
-        try data.write(to: settingsURL, options: .atomic)
-    }
 }

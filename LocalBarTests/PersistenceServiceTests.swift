@@ -134,19 +134,4 @@ final class PersistenceServiceTests: XCTestCase {
         XCTAssertEqual(store[key]?.restartDurationSamples, [20.0, 15.0])
     }
 
-    // MARK: - Settings round-trip
-
-    func test_settings_roundTrip() async throws {
-        let settings = AppSettings(schemaVersion: 1, systemNotificationsEnabled: false)
-        try await service.saveSettings(settings)
-        let loaded = try await service.loadSettings()
-        XCTAssertEqual(loaded.systemNotificationsEnabled, false)
-    }
-
-    func test_settings_defaultWhenFileAbsent() async throws {
-        // Save defaults first so the file exists with the expected value.
-        try await service.saveSettings(AppSettings())
-        let loaded = try await service.loadSettings()
-        XCTAssertEqual(loaded.systemNotificationsEnabled, true)
-    }
 }

@@ -711,7 +711,7 @@ private struct InstanceDetailPanel: View {
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text(humanName(descriptor.param))
+                    Text(descriptor.param.humanName)
                         .font(.callout)
                     if isServerSide {
                         Text("Modelfile")
@@ -742,7 +742,7 @@ private struct InstanceDetailPanel: View {
             Spacer()
             if let profileValue {
                 // Profile is overriding this param — show locked value.
-                Text(paramValueString(profileValue))
+                Text(profileValue.displayString)
                     .font(.callout)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
@@ -756,7 +756,7 @@ private struct InstanceDetailPanel: View {
 
     @ViewBuilder
     private func paramControl(for descriptor: ParamDescriptor) -> some View {
-        let defaultText = descriptor.defaultValue.map { paramValueString($0) }
+        let defaultText = descriptor.defaultValue.map { $0.displayString }
 
         switch descriptor.valueType {
         case .bool:
@@ -918,10 +918,6 @@ private struct InstanceDetailPanel: View {
         systemPromptDraft = controller.config.instanceParams.systemPrompt ?? ""
     }
 
-    private func humanName(_ param: CanonicalParam) -> String { param.humanName }
-
-    private func paramValueString(_ value: ParamValue) -> String { value.displayString }
-
     /// Commit a port edit made while the server is stopped. Called on submit/blur.
     private func commitPortOverride() {
         guard let port = Int(portOverride),
@@ -989,7 +985,7 @@ private struct InstanceDetailPanel: View {
         let params = explicitParams
         return driver.paramSchema.compactMap { descriptor in
             guard let value = params.values[descriptor.param] else { return nil }
-            return (humanName(descriptor.param), paramValueString(value))
+            return (descriptor.param.humanName, value.displayString)
         }
     }
 
@@ -1690,7 +1686,7 @@ private struct ProfileDetailPanel: View {
     private func profileParamRow(for descriptor: ParamDescriptor) -> some View {
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(profileHumanName(descriptor.param))
+                Text(descriptor.param.humanName)
                     .font(.callout)
                 if let note = descriptor.note {
                     Text(note)
@@ -1707,7 +1703,7 @@ private struct ProfileDetailPanel: View {
 
     @ViewBuilder
     private func profileParamControl(for descriptor: ParamDescriptor) -> some View {
-        let defaultText = descriptor.defaultValue.map { profileValueString($0) }
+        let defaultText = descriptor.defaultValue.map { $0.displayString }
 
         switch descriptor.valueType {
         case .bool:
@@ -1896,7 +1892,4 @@ private struct ProfileDetailPanel: View {
         systemPromptDraft = profile.params.systemPrompt ?? ""
     }
 
-    private func profileHumanName(_ param: CanonicalParam) -> String { param.humanName }
-
-    private func profileValueString(_ value: ParamValue) -> String { value.displayString }
 }

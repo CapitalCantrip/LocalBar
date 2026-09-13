@@ -167,13 +167,6 @@ struct ModelMemory: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
-// MARK: - App settings
-
-struct AppSettings: Codable, Equatable, Sendable {
-    var schemaVersion: Int = 1
-    var systemNotificationsEnabled: Bool = true
-}
-
 // MARK: - Param resolution
 
 extension ParamValues {
