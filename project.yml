@@ -63,6 +63,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.localbar.tests
+        GENERATE_INFOPLIST_FILE: YES
 
   LocalBarUITests:
     type: bundle.ui-testing
@@ -77,6 +78,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.localbar.uitests
+        GENERATE_INFOPLIST_FILE: YES
 
 schemes:
   LocalBar:
