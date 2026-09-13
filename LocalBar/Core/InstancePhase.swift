@@ -40,6 +40,25 @@ enum InstancePhase: Equatable, Sendable {
         return false
     }
 
+    var isStopped: Bool {
+        if case .stopped = self { return true }
+        return false
+    }
+
+    var isError: Bool {
+        if case .error = self { return true }
+        return false
+    }
+
+    /// True when the instance is in a state that can be stopped
+    /// (running or still starting up).
+    var isStoppable: Bool {
+        switch self {
+        case .running, .starting: return true
+        default: return false
+        }
+    }
+
     var error: InstanceError? {
         if case .error(let e) = self { return e }
         return nil

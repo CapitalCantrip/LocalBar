@@ -66,12 +66,12 @@ final class ServerInstanceController: Identifiable {
     // MARK: Public API
 
     func start() async {
-        guard case .stopped = phase else { return }
+        guard phase.isStopped else { return }
         await performStart()
     }
 
     func stop() async {
-        guard phase.isRunning || phase == .starting else { return }
+        guard phase.isStoppable else { return }
         await performStop(reason: .userStopped)
     }
 
@@ -92,15 +92,14 @@ final class ServerInstanceController: Identifiable {
     }
 
     func retryFromError() async {
-        guard case .error = phase else { return }
+        guard phase.isError else { return }
         lastError = nil
         await performStart()
     }
 
     /// D4: one-click rollback shown in error state after a failed restart-required switch.
     func rollbackToPreviousModel() async {
-        guard case .error(let err) = phase,
-              let previousKey = err.previousModelKey else { return }
+        guard let previousKey = phase.error?.previousModelKey else { return }
         config.selectedModelKey = previousKey
         lastError = nil
         await performStart()
@@ -593,8 +592,11 @@ final class ServerInstanceController: Identifiable {
     private func transition(to newPhase: InstancePhase) {
         phase = newPhase
         if case .error(let err) = newPhase { lastError = err }
+        syncWasRunningWhenQuit(for: newPhase)
+    }
 
-        // Keep wasRunningWhenQuit in sync so a restart can reconnect orphans.
+    /// Keep `wasRunningWhenQuit` in sync so a restart can reconnect orphans.
+    private func syncWasRunningWhenQuit(for newPhase: InstancePhase) {
         switch newPhase {
         case .running:
             if !config.wasRunningWhenQuit {

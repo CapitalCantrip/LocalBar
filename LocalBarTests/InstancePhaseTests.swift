@@ -130,4 +130,60 @@ final class InstancePhaseTests: XCTestCase {
     func test_aggregate_singleSwitchingModel_returnsTransitioning() {
         XCTAssertEqual([InstancePhase.switchingModel].aggregateIconState, .transitioning)
     }
+
+    // MARK: - isStopped
+
+    func test_isStopped_stoppedNeverStarted() {
+        XCTAssertTrue(InstancePhase.stopped(.neverStarted).isStopped)
+    }
+
+    func test_isStopped_running() {
+        XCTAssertFalse(InstancePhase.running.isStopped)
+    }
+
+    func test_isStopped_starting() {
+        XCTAssertFalse(InstancePhase.starting.isStopped)
+    }
+
+    // MARK: - isError
+
+    func test_isError_error() {
+        let err = InstanceError(kind: .launchFailed, message: "x")
+        XCTAssertTrue(InstancePhase.error(err).isError)
+    }
+
+    func test_isError_stopped() {
+        XCTAssertFalse(InstancePhase.stopped(.neverStarted).isError)
+    }
+
+    func test_isError_running() {
+        XCTAssertFalse(InstancePhase.running.isError)
+    }
+
+    // MARK: - isStoppable
+
+    func test_isStoppable_running() {
+        XCTAssertTrue(InstancePhase.running.isStoppable)
+    }
+
+    func test_isStoppable_starting() {
+        XCTAssertTrue(InstancePhase.starting.isStoppable)
+    }
+
+    func test_isStoppable_stopped() {
+        XCTAssertFalse(InstancePhase.stopped(.neverStarted).isStoppable)
+    }
+
+    func test_isStoppable_stopping() {
+        XCTAssertFalse(InstancePhase.stopping.isStoppable)
+    }
+
+    func test_isStoppable_switchingModel() {
+        XCTAssertFalse(InstancePhase.switchingModel.isStoppable)
+    }
+
+    func test_isStoppable_error() {
+        let err = InstanceError(kind: .launchFailed, message: "x")
+        XCTAssertFalse(InstancePhase.error(err).isStoppable)
+    }
 }
