@@ -15,8 +15,8 @@ final class InstanceRegistryTests: XCTestCase {
 
     // MARK: - Helpers
 
-    private func makeRegistry() -> InstanceRegistry {
-        InstanceRegistry()
+    private func makeRegistry(persistence: InMemoryPersistenceService = InMemoryPersistenceService()) -> InstanceRegistry {
+        InstanceRegistry(persistence: persistence)
     }
 
     private func makeOllamaConfig(name: String = "Test", port: Int = 11434) -> ServerInstanceConfig {
@@ -268,5 +268,60 @@ final class InstanceRegistryTests: XCTestCase {
         // After removal, activeProfileID is cleared, so provider returns nil
         let controller = registry.controllers.first!
         XCTAssertNil(controller.activeProfileProvider?())
+    }
+
+    // MARK: - Persistence seam
+
+    func test_addInstance_savesInstancesToPersistence() async {
+        let store = InMemoryPersistenceService()
+        let registry = makeRegistry(persistence: store)
+        registry.addInstance(config: makeOllamaConfig(name: "Persisted"))
+        // Fire-and-forget Task in persistInstances — drain the cooperative queue.
+        try? await Task.sleep(nanoseconds: 10_000_000)
+        let saved = await store.instances
+        XCTAssertEqual(saved.count, 1)
+        XCTAssertEqual(saved.first?.name, "Persisted")
+    }
+
+    func test_addProfile_savesProfileToPersistence() async {
+        let store = InMemoryPersistenceService()
+        let registry = makeRegistry(persistence: store)
+        registry.addProfile(makeProfile(name: "Saved"))
+        try? await Task.sleep(nanoseconds: 10_000_000)
+        let saved = await store.profiles
+        XCTAssertEqual(saved.count, 1)
+        XCTAssertEqual(saved.first?.name, "Saved")
+    }
+
+    func test_bootstrap_loadsInstancesFromPersistence() async {
+        let store = InMemoryPersistenceService()
+        // Seed the store before bootstrap.
+        try? await store.saveInstances([makeOllamaConfig(name: "Restored")])
+        let registry = makeRegistry(persistence: store)
+        await registry.bootstrap()
+        XCTAssertEqual(registry.controllers.count, 1)
+        XCTAssertEqual(registry.controllers.first?.config.name, "Restored")
+    }
+
+    func test_bootstrap_loadsProfilesFromPersistence() async {
+        let store = InMemoryPersistenceService()
+        try? await store.saveProfiles([makeProfile(name: "RestoredProfile")])
+        let registry = makeRegistry(persistence: store)
+        await registry.bootstrap()
+        XCTAssertEqual(registry.profiles.count, 1)
+        XCTAssertEqual(registry.profiles.first?.name, "RestoredProfile")
+    }
+
+    func test_removeInstance_savesUpdatedInstancesToPersistence() async {
+        let store = InMemoryPersistenceService()
+        let registry = makeRegistry(persistence: store)
+        let config = makeOllamaConfig(name: "ToRemove")
+        registry.addInstance(config: config)
+        let id = registry.controllers.first!.id
+        registry.removeInstance(id: id)
+        // removeInstance dispatches a Task — allow it to settle.
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        let saved = await store.instances
+        XCTAssertTrue(saved.isEmpty)
     }
 }

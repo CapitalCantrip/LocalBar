@@ -8,7 +8,11 @@ final class InstanceRegistry {
 
     private(set) var controllers: [ServerInstanceController] = []
     private(set) var profiles: [NamedProfile] = []
-    private let persistence = PersistenceService()
+    private let persistence: any PersistenceServiceProtocol
+
+    init(persistence: any PersistenceServiceProtocol = PersistenceService()) {
+        self.persistence = persistence
+    }
 
     // MARK: Derived state
 

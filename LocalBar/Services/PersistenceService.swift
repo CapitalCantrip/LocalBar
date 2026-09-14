@@ -1,8 +1,21 @@
 import Foundation
 
+/// The seam between InstanceRegistry and its storage backend.
+/// `PersistenceService` is the disk adapter; tests substitute an in-memory adapter.
+protocol PersistenceServiceProtocol: Sendable {
+    func ensureDirectoryExists() async throws
+    func loadInstances() async throws -> [ServerInstanceConfig]
+    func saveInstances(_ instances: [ServerInstanceConfig]) async throws
+    func loadProfiles() async throws -> [NamedProfile]
+    func saveProfiles(_ profiles: [NamedProfile]) async throws
+    func loadModelMemory() async throws -> [String: ModelMemory]
+    func saveModelMemory(_ memory: [String: ModelMemory]) async throws
+    func upsertModelMemory(_ entry: ModelMemory, into store: inout [String: ModelMemory]) async throws
+}
+
 /// Serialized actor that owns all disk I/O for LocalBar's data stores.
 /// Separate files per domain — corrupt file loses only its own domain.
-actor PersistenceService {
+actor PersistenceService: PersistenceServiceProtocol {
 
     // MARK: Paths
 

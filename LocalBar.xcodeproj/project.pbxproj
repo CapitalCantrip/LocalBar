@@ -9,7 +9,9 @@
 /* Begin PBXBuildFile section */
 		1ED00539D95D1E2C13F929BC /* ModelMetadataTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32B2CEB938AC18FC5E4A6AF7 /* ModelMetadataTests.swift */; };
 		1F48344B08F2C70D4969A7DC /* ServerDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38A1562DDF9D5E69259FE8C5 /* ServerDriver.swift */; };
+		20F3C86AC761415A92A4C2FE /* InMemoryPersistenceService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DA845FEBF3FF1430E28C478 /* InMemoryPersistenceService.swift */; };
 		315A5AD8525294BE214890A3 /* MockServerDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F5F1BD2C47F51F050305A71 /* MockServerDriver.swift */; };
+		34420F8BDD05C9F1181BB5C1 /* PathScannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7D695D9F75D25D4386E4FA0 /* PathScannerTests.swift */; };
 		3604DBFC9EAE35E9CFB50B90 /* PersistenceService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE6A1585892318B6EAEA933E /* PersistenceService.swift */; };
 		3650FCD23E04D65727F014A7 /* DataModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3933141FF75C961928BE5D67 /* DataModel.swift */; };
 		40295178273ED33CA14B9EB7 /* InstancePhase.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE7FFD95CF1DEE0683C5981D /* InstancePhase.swift */; };
@@ -30,7 +32,6 @@
 		CD44450996112348E6AADD1A /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 783467F267AC9F16F8AD3092 /* SettingsView.swift */; };
 		CD93416484E9CBA5B19A18CC /* MLXLMDriverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6869D6CC2458793D7FBE4FE9 /* MLXLMDriverTests.swift */; };
 		DC517B01846ECF0C5ABA296D /* PersistenceServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 525388C356F32866AD1454E8 /* PersistenceServiceTests.swift */; };
-		E1A2B3C4D5E6F70812345678 /* PathScannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A2B3C4D5E6F70812345679 /* PathScannerTests.swift */; };
 		F97A9AB1DA70E5706E3E56E3 /* OllamaDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = CFF3EA5D31A174D160395B4E /* OllamaDriver.swift */; };
 /* End PBXBuildFile section */
 
@@ -62,15 +63,16 @@
 		3933141FF75C961928BE5D67 /* DataModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataModel.swift; sourceTree = "<group>"; };
 		486A231B0B2C1E8F82A08D60 /* LocalBar.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LocalBar.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		525388C356F32866AD1454E8 /* PersistenceServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersistenceServiceTests.swift; sourceTree = "<group>"; };
-		F1A2B3C4D5E6F70812345679 /* PathScannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PathScannerTests.swift; sourceTree = "<group>"; };
 		54AF8055044E68912FA6DAD8 /* InstanceRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstanceRegistry.swift; sourceTree = "<group>"; };
 		6869D6CC2458793D7FBE4FE9 /* MLXLMDriverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MLXLMDriverTests.swift; sourceTree = "<group>"; };
 		6A5C73C11021A70E27B08432 /* ServerInstanceController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerInstanceController.swift; sourceTree = "<group>"; };
 		783467F267AC9F16F8AD3092 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		9ABB74DA62E4DEA7F39F7AC3 /* ModelMetadataParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelMetadataParserTests.swift; sourceTree = "<group>"; };
+		9DA845FEBF3FF1430E28C478 /* InMemoryPersistenceService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InMemoryPersistenceService.swift; sourceTree = "<group>"; };
 		AE7FFD95CF1DEE0683C5981D /* InstancePhase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstancePhase.swift; sourceTree = "<group>"; };
 		BB0258C400AEAD6F0ED41D8B /* InstancePhaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstancePhaseTests.swift; sourceTree = "<group>"; };
 		BBF8DF1E716F0152BA07BE52 /* LocalBarTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LocalBarTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		C7D695D9F75D25D4386E4FA0 /* PathScannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PathScannerTests.swift; sourceTree = "<group>"; };
 		CFF3EA5D31A174D160395B4E /* OllamaDriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaDriver.swift; sourceTree = "<group>"; };
 		D0511056396659F5F4AE57CA /* LocalBarApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalBarApp.swift; sourceTree = "<group>"; };
 		D2948F9148518C1B611FE4D3 /* ServerInstanceControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerInstanceControllerTests.swift; sourceTree = "<group>"; };
@@ -156,6 +158,7 @@
 			isa = PBXGroup;
 			children = (
 				FA6B0C708553D76FFDA8263E /* DataModelTests.swift */,
+				9DA845FEBF3FF1430E28C478 /* InMemoryPersistenceService.swift */,
 				BB0258C400AEAD6F0ED41D8B /* InstancePhaseTests.swift */,
 				EDF3FB9254083A1A42F9A764 /* InstanceRegistryTests.swift */,
 				6869D6CC2458793D7FBE4FE9 /* MLXLMDriverTests.swift */,
@@ -163,8 +166,8 @@
 				9ABB74DA62E4DEA7F39F7AC3 /* ModelMetadataParserTests.swift */,
 				32B2CEB938AC18FC5E4A6AF7 /* ModelMetadataTests.swift */,
 				1D31AF2A10F19DB8B4675636 /* OllamaDriverTests.swift */,
+				C7D695D9F75D25D4386E4FA0 /* PathScannerTests.swift */,
 				525388C356F32866AD1454E8 /* PersistenceServiceTests.swift */,
-				F1A2B3C4D5E6F70812345679 /* PathScannerTests.swift */,
 				D2948F9148518C1B611FE4D3 /* ServerInstanceControllerTests.swift */,
 			);
 			path = LocalBarTests;
@@ -306,6 +309,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B2CE0A984DA3E6F030E21FBC /* DataModelTests.swift in Sources */,
+				20F3C86AC761415A92A4C2FE /* InMemoryPersistenceService.swift in Sources */,
 				52E2731A6755F1D4B1E9DD79 /* InstancePhaseTests.swift in Sources */,
 				66928F7E2AE1B739A3233165 /* InstanceRegistryTests.swift in Sources */,
 				CD93416484E9CBA5B19A18CC /* MLXLMDriverTests.swift in Sources */,
@@ -313,8 +317,8 @@
 				5E0DD7C58B51C7E2EDAF4B21 /* ModelMetadataParserTests.swift in Sources */,
 				1ED00539D95D1E2C13F929BC /* ModelMetadataTests.swift in Sources */,
 				9DC45E089778264A508BC312 /* OllamaDriverTests.swift in Sources */,
+				34420F8BDD05C9F1181BB5C1 /* PathScannerTests.swift in Sources */,
 				DC517B01846ECF0C5ABA296D /* PersistenceServiceTests.swift in Sources */,
-				E1A2B3C4D5E6F70812345678 /* PathScannerTests.swift in Sources */,
 				66710B66AF2D6606D98CA77C /* ServerInstanceControllerTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
