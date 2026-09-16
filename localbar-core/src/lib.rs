@@ -1,5 +1,7 @@
 // localbar-core: platform-agnostic domain logic, drivers, and persistence.
 // No Tauri dependency. All Tauri-specific code lives in localbar-tauri.
+#![deny(clippy::cognitive_complexity)]
+#![deny(clippy::too_many_lines)]
 
 pub mod driver;
 pub mod persistence;
@@ -19,6 +21,30 @@ mod tests {
         CanonicalParam, InstanceError, InstanceErrorKind, InstancePhase, ModelMemory, ParamValue,
         ParamValues, ServerInstanceConfig, ServerType,
     };
+
+    struct SharedPersistence(Arc<Mutex<InMemoryPersistence>>);
+    impl Persistence for SharedPersistence {
+        fn save_instances(&mut self, configs: &[ServerInstanceConfig]) -> Result<(), String> {
+            self.0.lock().unwrap().save_instances(configs)
+        }
+        fn load_instances(&self) -> Result<Vec<ServerInstanceConfig>, String> {
+            self.0.lock().unwrap().load_instances()
+        }
+        fn save_profiles(&mut self, profiles: &[crate::types::NamedProfile]) -> Result<(), String> {
+            self.0.lock().unwrap().save_profiles(profiles)
+        }
+        fn load_profiles(&self) -> Result<Vec<crate::types::NamedProfile>, String> {
+            self.0.lock().unwrap().load_profiles()
+        }
+        fn load_model_memory(&self) -> Result<std::collections::HashMap<crate::types::ModelMemoryKey, ModelMemory>, String> {
+            self.0.lock().unwrap().load_model_memory()
+        }
+        fn upsert_model_memory(&mut self, entry: ModelMemory) -> Result<(), String> {
+            self.0.lock().unwrap().upsert_model_memory(entry)
+        }
+    }
+    unsafe impl Send for SharedPersistence {}
+    unsafe impl Sync for SharedPersistence {}
 
     fn make_registry() -> InstanceRegistry {
         InstanceRegistry::new(Box::new(InMemoryPersistence::default()))
@@ -147,21 +173,18 @@ mod tests {
 
     #[test]
     fn resolve_system_prompt_propagates_through_layers() {
-        let mut profile_params = ParamValues::default();
-        profile_params.system_prompt = Some("You are a helpful assistant.".into());
+        let profile_params = ParamValues { system_prompt: Some("You are a helpful assistant.".into()), ..Default::default() };
         let resolved = ParamValues::resolve(Some(&profile_params), None, &[]);
         assert_eq!(resolved.0.system_prompt.as_deref(), Some("You are a helpful assistant."));
     }
 
     #[test]
     fn resolve_profile_system_prompt_overrides_memory_prompt() {
-        let mut memory_params = ParamValues::default();
-        memory_params.system_prompt = Some("from memory".into());
+        let memory_params = ParamValues { system_prompt: Some("from memory".into()), ..Default::default() };
         let mut memory = make_memory("m");
         memory.last_used_params = memory_params;
 
-        let mut profile_params = ParamValues::default();
-        profile_params.system_prompt = Some("from profile".into());
+        let profile_params = ParamValues { system_prompt: Some("from profile".into()), ..Default::default() };
 
         let resolved = ParamValues::resolve(Some(&profile_params), Some(&memory), &[]);
         assert_eq!(resolved.0.system_prompt.as_deref(), Some("from profile"));
@@ -170,8 +193,7 @@ mod tests {
     #[test]
     fn resolve_profile_no_prompt_clears_memory_prompt() {
         // Profile with None system_prompt should override (clear) the memory-set prompt.
-        let mut memory_params = ParamValues::default();
-        memory_params.system_prompt = Some("from memory".into());
+        let memory_params = ParamValues { system_prompt: Some("from memory".into()), ..Default::default() };
         let mut memory = make_memory("m");
         memory.last_used_params = memory_params;
 
@@ -250,33 +272,7 @@ mod tests {
 
     #[test]
     fn persistence_round_trip_produces_identical_configs() {
-        // Use a shared backing store so we actually exercise reg.save() → reg2.load().
         let store = Arc::new(Mutex::new(InMemoryPersistence::default()));
-
-        struct SharedPersistence(Arc<Mutex<InMemoryPersistence>>);
-        impl Persistence for SharedPersistence {
-            fn save_instances(&mut self, configs: &[ServerInstanceConfig]) -> Result<(), String> {
-                self.0.lock().unwrap().save_instances(configs)
-            }
-            fn load_instances(&self) -> Result<Vec<ServerInstanceConfig>, String> {
-                self.0.lock().unwrap().load_instances()
-            }
-            fn save_profiles(&mut self, profiles: &[crate::types::NamedProfile]) -> Result<(), String> {
-                self.0.lock().unwrap().save_profiles(profiles)
-            }
-            fn load_profiles(&self) -> Result<Vec<crate::types::NamedProfile>, String> {
-                self.0.lock().unwrap().load_profiles()
-            }
-            fn load_model_memory(&self) -> Result<std::collections::HashMap<crate::types::ModelMemoryKey, ModelMemory>, String> {
-                self.0.lock().unwrap().load_model_memory()
-            }
-            fn upsert_model_memory(&mut self, entry: ModelMemory) -> Result<(), String> {
-                self.0.lock().unwrap().upsert_model_memory(entry)
-            }
-        }
-        unsafe impl Send for SharedPersistence {}
-        unsafe impl Sync for SharedPersistence {}
-
         let mut reg = InstanceRegistry::new(Box::new(SharedPersistence(Arc::clone(&store))));
         let mut config = make_config("ollama");
         config.server_type = ServerType::Ollama;

@@ -1,3 +1,6 @@
+#![deny(clippy::cognitive_complexity)]
+#![deny(clippy::too_many_lines)]
+
 use std::collections::HashMap;
 use tauri::{
     tray::{TrayIconBuilder, TrayIconEvent},
@@ -58,46 +61,48 @@ fn quit_app(app: tauri::AppHandle) {
 
 // ─── App entry point ─────────────────────────────────────────────────────────
 
+fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
+    let icon = app.default_window_icon().expect("no default icon configured").clone();
+    let _tray = TrayIconBuilder::new()
+        .icon(icon)
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click { .. } = event {
+                let app = tray.app_handle();
+                if let Some(window) = app.get_webview_window("popover") {
+                    if window.is_visible().unwrap_or(false) {
+                        let _ = window.hide();
+                    } else {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                }
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
+fn wire_settings_close(app: &tauri::App) {
+    // Hide the settings window on close instead of destroying it so
+    // open_settings() can re-show it without recreating the webview.
+    if let Some(settings_win) = app.get_webview_window("settings") {
+        let win = settings_win.clone();
+        settings_win.on_window_event(move |event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = win.hide();
+            }
+        });
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-
-            let icon = app
-                .default_window_icon()
-                .expect("no default icon configured")
-                .clone();
-
-            let _tray = TrayIconBuilder::new()
-                .icon(icon)
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click { .. } = event {
-                        let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("popover") {
-                            if window.is_visible().unwrap_or(false) {
-                                let _ = window.hide();
-                            } else {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
-                        }
-                    }
-                })
-                .build(app)?;
-
-            // Hide the settings window on close instead of destroying it so
-            // open_settings() can re-show it without recreating the webview.
-            if let Some(settings_win) = app.get_webview_window("settings") {
-                let win = settings_win.clone();
-                settings_win.on_window_event(move |event| {
-                    if let WindowEvent::CloseRequested { api, .. } = event {
-                        api.prevent_close();
-                        let _ = win.hide();
-                    }
-                });
-            }
-
+            build_tray(app)?;
+            wire_settings_close(app);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
