@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LocalBar</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 13px;
+      padding: 16px;
+      background: #f5f5f5;
+      color: #1a1a1a;
+    }
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: calc(100vh - 80px);
+      color: #888;
+      gap: 8px;
+    }
+    .actions {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      display: flex;
+      gap: 8px;
+      padding: 12px 16px;
+      background: #f5f5f5;
+      border-top: 1px solid #ddd;
+    }
+    button {
+      flex: 1;
+      padding: 6px 12px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      background: white;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    button:hover { background: #eee; }
+  </style>
+</head>
+<body>
+  <div class="empty-state">
+    <p>No instances configured.</p>
+    <p style="font-size: 11px;">Open Settings to add one.</p>
+  </div>
+  <div class="actions">
+    <button onclick="openSettings()">Settings…</button>
+    <button onclick="quit()">Quit</button>
+  </div>
+  <script type="module">
+    import { invoke } from "https://unpkg.com/@tauri-apps/api@2/core";
+    window.openSettings = () => invoke("open_settings");
+    window.quit = () => invoke("quit_app");
+  </script>
+</body>
+</html>

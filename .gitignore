@@ -25,3 +25,4 @@ Podfile.lock
 
 # Distribution artifacts — built locally and uploaded to Releases; never committed
 *.dmg
+/target/

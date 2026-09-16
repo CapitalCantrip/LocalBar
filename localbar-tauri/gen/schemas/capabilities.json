@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Default capability for LocalBar windows.","local":true,"windows":["popover","settings"],"permissions":["core:default"]}}
