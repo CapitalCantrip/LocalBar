@@ -4,6 +4,7 @@
 #![deny(clippy::too_many_lines)]
 
 pub mod driver;
+pub mod drivers;
 pub mod persistence;
 pub mod registry;
 pub mod testing;
