@@ -26,3 +26,7 @@ Podfile.lock
 # Distribution artifacts — built locally and uploaded to Releases; never committed
 *.dmg
 /target/
+
+# Frontend build artifacts
+localbar-tauri/ui/node_modules/
+localbar-tauri/ui/dist/
