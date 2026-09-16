@@ -11,3 +11,6 @@ tauri = { workspace = true }
 localbar-core = { path = "../localbar-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+uuid = { workspace = true }
+sysinfo = { workspace = true }
+tokio = { workspace = true }

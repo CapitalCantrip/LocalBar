@@ -1,7 +1,7 @@
 // TypeScript mirrors of Rust types from localbar-core.
 // These must stay in sync with the Rust definitions in localbar-core/src/types.rs.
 
-export type ServerType = 'mlx-lm' | 'ollama'
+export type ServerType = 'mlx-lm' | 'ollama' | 'external'
 
 export interface ParamValue {
   type: 'double' | 'int' | 'string' | 'bool'
@@ -35,3 +35,32 @@ export type InstancePhase =
   | { type: 'stopping' }
   | { type: 'switchingModel' }
   | { type: 'error'; message: string }
+
+export function phaseLabel(phase: InstancePhase | undefined): string {
+  if (!phase) return 'Unknown'
+  switch (phase.type) {
+    case 'stopped': return 'Stopped'
+    case 'starting': return 'Starting…'
+    case 'running': return 'Running'
+    case 'stopping': return 'Stopping…'
+    case 'switchingModel': return 'Switching model…'
+    case 'error': return `Error: ${phase.message}`
+  }
+}
+
+export function phaseColor(phase: InstancePhase | undefined): string {
+  if (!phase) return '#aaa'
+  switch (phase.type) {
+    case 'running': return '#22c55e'
+    case 'starting':
+    case 'stopping':
+    case 'switchingModel': return '#f59e0b'
+    case 'error': return '#ef4444'
+    case 'stopped': return '#9ca3af'
+  }
+}
+
+export function isActive(phase: InstancePhase | undefined): boolean {
+  if (!phase) return false
+  return phase.type === 'running' || phase.type === 'starting' || phase.type === 'switchingModel'
+}

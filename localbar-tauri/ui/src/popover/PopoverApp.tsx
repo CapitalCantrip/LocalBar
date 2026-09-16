@@ -1,6 +1,17 @@
+import { useCallback, useEffect, useState } from 'react'
+import { listen } from '@tauri-apps/api/event'
 import { ipc } from '../ipc'
+import {
+  type InstancePhase,
+  type ServerInstanceConfig,
+  isActive,
+  phaseColor,
+  phaseLabel,
+} from '../types'
 
-const styles = {
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
+const s = {
   root: {
     fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
     fontSize: 13,
@@ -11,60 +22,186 @@ const styles = {
     display: 'flex',
     flexDirection: 'column' as const,
   },
-  body: {
-    flex: 1,
-    padding: '16px 16px 8px',
+  body: { flex: 1, padding: '8px 0' },
+  row: {
     display: 'flex',
-    flexDirection: 'column' as const,
     alignItems: 'center',
-    justifyContent: 'center',
-    minHeight: 100,
-  },
-  emptyHeading: {
-    fontWeight: 600,
-    marginBottom: 4,
-  },
-  emptyCaption: {
-    fontSize: 11,
-    color: '#888',
-  },
-  divider: {
-    height: 1,
-    background: '#ddd',
-    margin: 0,
-  },
-  footer: {
-    display: 'flex',
     gap: 8,
-    padding: '10px 12px',
+    padding: '6px 14px',
+    cursor: 'default' as const,
   },
-  btn: {
-    flex: 1,
-    padding: '5px 10px',
-    border: '1px solid #ccc',
-    borderRadius: 6,
-    background: 'white',
-    cursor: 'pointer',
-    fontSize: 12,
-    fontFamily: 'inherit',
+  dot: (color: string): React.CSSProperties => ({
+    width: 8, height: 8, borderRadius: '50%', background: color, flexShrink: 0,
+  }),
+  name: { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const },
+  label: { fontSize: 11, color: '#666', flexShrink: 0, maxWidth: 90, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const },
+  btn: (primary?: boolean): React.CSSProperties => ({
+    padding: '3px 8px', border: '1px solid #ccc', borderRadius: 4,
+    background: primary ? '#1d4ed8' : 'white',
+    color: primary ? 'white' : '#1a1a1a',
+    cursor: 'pointer', fontSize: 11, fontFamily: 'inherit', flexShrink: 0,
+  }),
+  empty: {
+    display: 'flex', flexDirection: 'column' as const,
+    alignItems: 'center', justifyContent: 'center',
+    padding: '24px 16px', gap: 4,
   },
+  divider: { height: 1, background: '#ddd', margin: 0 },
+  footer: { display: 'flex', gap: 8, padding: '10px 12px' },
+  footerBtn: {
+    flex: 1, padding: '5px 10px', border: '1px solid #ccc', borderRadius: 6,
+    background: 'white', cursor: 'pointer', fontSize: 12, fontFamily: 'inherit',
+  },
+  dialog: {
+    position: 'absolute' as const, inset: 0,
+    background: 'rgba(0,0,0,0.4)', display: 'flex',
+    alignItems: 'center', justifyContent: 'center', zIndex: 10,
+  },
+  dialogBox: {
+    background: 'white', borderRadius: 8, padding: 16,
+    maxWidth: 260, boxShadow: '0 4px 20px rgba(0,0,0,0.25)',
+  },
+  dialogMsg: { fontSize: 12, lineHeight: 1.5, marginBottom: 12 },
+  dialogRow: { display: 'flex', gap: 8, justifyContent: 'flex-end' },
 }
 
-export default function PopoverApp() {
+// ─── Confirm dialog ───────────────────────────────────────────────────────────
+
+function ConfirmDialog({ message, onConfirm, onCancel }: {
+  message: string
+  onConfirm: () => void
+  onCancel: () => void
+}) {
   return (
-    <div style={styles.root}>
-      <div style={styles.body}>
-        <p style={styles.emptyHeading}>No instances configured</p>
-        <p style={styles.emptyCaption}>Open Settings to add one.</p>
+    <div style={s.dialog}>
+      <div style={s.dialogBox}>
+        <p style={s.dialogMsg}>{message}</p>
+        <div style={s.dialogRow}>
+          <button style={s.btn()} onClick={onCancel}>Cancel</button>
+          <button style={s.btn(true)} onClick={onConfirm}>Start Anyway</button>
+        </div>
       </div>
-      <div style={styles.divider} />
-      <div style={styles.footer}>
-        <button style={styles.btn} onClick={() => ipc.openSettings()}>
-          Settings…
-        </button>
-        <button style={styles.btn} onClick={() => ipc.quitApp()}>
-          Quit
-        </button>
+    </div>
+  )
+}
+
+// ─── Instance row ─────────────────────────────────────────────────────────────
+
+function InstanceRow({ instance, phase, onStart, onStop }: {
+  instance: ServerInstanceConfig
+  phase: InstancePhase | undefined
+  onStart: () => void
+  onStop: () => void
+}) {
+  const active = isActive(phase)
+  const transitioning = phase?.type === 'starting' || phase?.type === 'stopping'
+  return (
+    <div style={s.row}>
+      <div style={s.dot(phaseColor(phase))} title={phaseLabel(phase)} />
+      <span style={s.name} title={instance.name}>{instance.name}</span>
+      <span style={s.label}>{phaseLabel(phase)}</span>
+      {active && !transitioning && (
+        <button style={s.btn()} onClick={onStop}>Stop</button>
+      )}
+      {!active && !transitioning && (
+        <button style={s.btn(true)} onClick={onStart}>Start</button>
+      )}
+    </div>
+  )
+}
+
+// ─── PopoverApp ───────────────────────────────────────────────────────────────
+
+export default function PopoverApp() {
+  const [instances, setInstances] = useState<ServerInstanceConfig[]>([])
+  const [phases, setPhases] = useState<Record<string, InstancePhase>>({})
+  const [confirm, setConfirm] = useState<{ id: string; msg: string } | null>(null)
+
+  const refresh = useCallback(async () => {
+    const [insts, ph] = await Promise.all([ipc.listInstances(), ipc.listInstancePhases()])
+    setInstances(insts)
+    setPhases(ph)
+  }, [])
+
+  useEffect(() => {
+    refresh()
+    const id = setInterval(refresh, 1500)
+    const unlisten = listen('phase-changed', refresh)
+    const unlistenRemoved = listen('instance-removed', refresh)
+    return () => {
+      clearInterval(id)
+      unlisten.then(f => f())
+      unlistenRemoved.then(f => f())
+    }
+  }, [refresh])
+
+  const handleStart = async (id: string) => {
+    const warning = await ipc.getStartWarning(id)
+    if (warning) { setConfirm({ id, msg: warning }); return }
+    const memWarning = await ipc.checkMemoryWarning(id)
+    if (memWarning) { setConfirm({ id, msg: memWarning }); return }
+    await ipc.startInstance(id)
+    refresh()
+  }
+
+  const handleStop = async (id: string) => {
+    await ipc.stopInstance(id)
+    refresh()
+  }
+
+  const handleConfirm = async () => {
+    if (!confirm) return
+    await ipc.startInstance(confirm.id)
+    setConfirm(null)
+    refresh()
+  }
+
+  const anyRunning = instances.some(i => isActive(phases[i.id]))
+
+  return (
+    <div style={{ ...s.root, position: 'relative' }}>
+      {confirm && (
+        <ConfirmDialog
+          message={confirm.msg}
+          onConfirm={handleConfirm}
+          onCancel={() => setConfirm(null)}
+        />
+      )}
+      <div style={s.body}>
+        {instances.length === 0 ? (
+          <div style={s.empty}>
+            <p style={{ fontWeight: 600, margin: 0 }}>No instances configured</p>
+            <p style={{ fontSize: 11, color: '#888', margin: 0 }}>Open Settings to add one.</p>
+          </div>
+        ) : (
+          instances.map(inst => (
+            <InstanceRow
+              key={inst.id}
+              instance={inst}
+              phase={phases[inst.id]}
+              onStart={() => handleStart(inst.id)}
+              onStop={() => handleStop(inst.id)}
+            />
+          ))
+        )}
+      </div>
+      <div style={s.divider} />
+      <div style={s.footer}>
+        <button style={s.footerBtn} onClick={() => ipc.openSettings()}>Settings…</button>
+        {anyRunning && (
+          <button
+            style={s.footerBtn}
+            onClick={async () => {
+              await Promise.all(
+                instances.filter(i => isActive(phases[i.id])).map(i => ipc.stopInstance(i.id))
+              )
+              refresh()
+            }}
+          >
+            Stop All
+          </button>
+        )}
+        <button style={s.footerBtn} onClick={() => ipc.quitApp()}>Quit</button>
       </div>
     </div>
   )
