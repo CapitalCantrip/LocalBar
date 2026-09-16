@@ -55,5 +55,8 @@ jobs:
         working-directory: localbar-tauri/ui
         run: npm run build
 
+      - name: cargo clippy (workspace)
+        run: cargo clippy --all-targets --workspace -- -D warnings
+
       - name: cargo test (workspace)
         run: cargo test --workspace
