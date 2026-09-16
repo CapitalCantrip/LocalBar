@@ -62,3 +62,5 @@ d4f3fff refactor(ui): extract useInstances hook and startWithWarnings helper
 340d0c1 fix: surface load errors, gate ExternalDriver launch, async stop/start
 752444f fix: propagate non-NotFound errors in FilePersistence::read
 ```
+
+**Addendum (a278e12):** `SettingsApp` now wraps the `onRemoved` callback in `useCallback(() => setSelectedId(null), [])` (`SettingsApp.tsx:227`), so `useInstances` no longer re-registers its interval and listeners every render; clippy, `cargo test` (63 passed) and `tsc` re-run clean at a278e12.
