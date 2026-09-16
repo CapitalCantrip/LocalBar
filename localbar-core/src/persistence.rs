@@ -78,7 +78,8 @@ impl FilePersistence {
 
     fn read(&self) -> Result<StorageFile, String> {
         match std::fs::read_to_string(&self.path) {
-            Err(_) => Ok(StorageFile::default()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(StorageFile::default()),
+            Err(e) => Err(format!("state.json read error: {e}")),
             Ok(s) => serde_json::from_str(&s).map_err(|e| format!("state.json corrupt: {e}")),
         }
     }
@@ -156,6 +157,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = FilePersistence::new(dir.path().join("nonexistent.json"));
         assert!(p.load_instances().unwrap().is_empty());
+    }
+
+    #[test]
+    fn file_persistence_error_on_corrupt_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, b"not valid json {{{{").unwrap();
+        let p = FilePersistence::new(path);
+        assert!(p.load_instances().is_err());
     }
 
     #[test]
