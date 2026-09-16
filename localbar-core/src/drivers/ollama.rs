@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use crate::driver::{HealthStatus, LaunchPlan, ModelMetadata, ServerDriver, ShutdownPlan};
 use crate::types::{
     CanonicalParam, ModelRef, ParamDescriptor, ParamValue, ParamValues, ServerInstanceConfig,
@@ -47,7 +45,7 @@ impl ServerDriver for OllamaDriver {
 
     fn health_check(&self, config: &ServerInstanceConfig) -> HealthStatus {
         let url = tags_url(config);
-        match quick_agent().get(&url).call() {
+        match super::http::quick_agent().get(&url).call() {
             Ok(_) => HealthStatus::Healthy,
             Err(ureq::Error::Status(_, _)) => {
                 HealthStatus::Unhealthy("unexpected status from /api/tags".to_string())
@@ -57,7 +55,7 @@ impl ServerDriver for OllamaDriver {
     }
 
     fn list_models(&self, config: &ServerInstanceConfig) -> Result<Vec<ModelRef>, String> {
-        let resp = quick_agent().get(&tags_url(config)).call().map_err(|e| e.to_string())?;
+        let resp = super::http::quick_agent().get(&tags_url(config)).call().map_err(|e| e.to_string())?;
         let json: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
         parse_tags_response(&json)
     }
@@ -72,7 +70,7 @@ impl ServerDriver for OllamaDriver {
         let url = format!("{}/api/generate", super::http::base_url(config));
         let body = serde_json::json!({"model": tag, "prompt": "", "stream": false});
         // 5-minute timeout: model warm-load into VRAM can be slow on large models.
-        load_agent().post(&url).send_json(body).map_err(|e| e.to_string())?;
+        super::http::load_agent().post(&url).send_json(body).map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -83,7 +81,7 @@ impl ServerDriver for OllamaDriver {
     ) -> Option<ModelMetadata> {
         let url = format!("{}/api/show", super::http::base_url(config));
         let body = serde_json::json!({"name": model_key});
-        let resp = quick_agent().post(&url).send_json(body).ok()?;
+        let resp = super::http::quick_agent().post(&url).send_json(body).ok()?;
         let json: serde_json::Value = resp.into_json().ok()?;
         Some(ModelMetadata {
             parameter_count: json["details"]["parameter_size"].as_str().map(str::to_owned),
@@ -105,16 +103,6 @@ impl ServerDriver for OllamaDriver {
 
 fn tags_url(config: &ServerInstanceConfig) -> String {
     format!("{}/api/tags", super::http::base_url(config))
-}
-
-/// Agent for fast status/metadata calls: 10 s read timeout.
-fn quick_agent() -> ureq::Agent {
-    ureq::AgentBuilder::new().timeout_read(Duration::from_secs(10)).build()
-}
-
-/// Agent for model warm-load: 5 min read timeout.
-fn load_agent() -> ureq::Agent {
-    ureq::AgentBuilder::new().timeout_read(Duration::from_secs(300)).build()
 }
 
 // ─── Modelfile generation (Seam 3 — pure function) ───────────────────────────
