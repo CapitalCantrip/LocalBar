@@ -169,6 +169,7 @@ pub struct ModelRef {
 pub enum ServerType {
     MlxLm,
     Ollama,
+    External,
 }
 
 // ─── ServerInstanceConfig ────────────────────────────────────────────────────

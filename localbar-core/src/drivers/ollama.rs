@@ -69,7 +69,7 @@ impl ServerDriver for OllamaDriver {
         config: &ServerInstanceConfig,
     ) -> Result<(), String> {
         let tag = config.managed_model_tag.as_deref().unwrap_or(&model.key);
-        let url = format!("{}/api/generate", base_url(config));
+        let url = format!("{}/api/generate", super::http::base_url(config));
         let body = serde_json::json!({"model": tag, "prompt": "", "stream": false});
         // 5-minute timeout: model warm-load into VRAM can be slow on large models.
         load_agent().post(&url).send_json(body).map_err(|e| e.to_string())?;
@@ -81,7 +81,7 @@ impl ServerDriver for OllamaDriver {
         model_key: &str,
         config: &ServerInstanceConfig,
     ) -> Option<ModelMetadata> {
-        let url = format!("{}/api/show", base_url(config));
+        let url = format!("{}/api/show", super::http::base_url(config));
         let body = serde_json::json!({"name": model_key});
         let resp = quick_agent().post(&url).send_json(body).ok()?;
         let json: serde_json::Value = resp.into_json().ok()?;
@@ -103,12 +103,8 @@ impl ServerDriver for OllamaDriver {
 
 // ─── HTTP helpers ─────────────────────────────────────────────────────────────
 
-fn base_url(config: &ServerInstanceConfig) -> String {
-    format!("http://{}:{}", config.host, config.port)
-}
-
 fn tags_url(config: &ServerInstanceConfig) -> String {
-    format!("{}/api/tags", base_url(config))
+    format!("{}/api/tags", super::http::base_url(config))
 }
 
 /// Agent for fast status/metadata calls: 10 s read timeout.

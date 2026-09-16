@@ -61,6 +61,12 @@ pub trait ServerDriver: Send + Sync {
 
     fn health_check(&self, config: &ServerInstanceConfig) -> HealthStatus;
 
+    /// True when this driver owns the server process (full driver).
+    /// False for external drivers — callers must not invoke `launch`/`stop` to spawn processes.
+    fn manages_lifecycle(&self) -> bool {
+        true
+    }
+
     /// Returns best-effort metadata for a model. Default: None (C4).
     fn fetch_model_metadata(
         &self,
