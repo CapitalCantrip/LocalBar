@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
-import { listen } from '@tauri-apps/api/event'
+import { useState } from 'react'
 import { ipc } from '../ipc'
 import {
   type InstancePhase,
@@ -8,6 +7,8 @@ import {
   phaseColor,
   phaseLabel,
 } from '../types'
+import { useInstances } from '../useInstances'
+import { startWithWarnings } from '../startWithWarnings'
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
@@ -113,46 +114,19 @@ function InstanceRow({ instance, phase, onStart, onStop }: {
 // ─── PopoverApp ───────────────────────────────────────────────────────────────
 
 export default function PopoverApp() {
-  const [instances, setInstances] = useState<ServerInstanceConfig[]>([])
-  const [phases, setPhases] = useState<Record<string, InstancePhase>>({})
-  const [confirm, setConfirm] = useState<{ id: string; msg: string } | null>(null)
+  const { instances, phases, refresh } = useInstances()
+  const [confirm, setConfirm] = useState<{ id: string; msg: string; resolve: (v: boolean) => void } | null>(null)
 
-  const refresh = useCallback(async () => {
-    const [insts, ph] = await Promise.all([ipc.listInstances(), ipc.listInstancePhases()])
-    setInstances(insts)
-    setPhases(ph)
-  }, [])
-
-  useEffect(() => {
-    refresh()
-    const id = setInterval(refresh, 1500)
-    const unlisten = listen('phase-changed', refresh)
-    const unlistenRemoved = listen('instance-removed', refresh)
-    return () => {
-      clearInterval(id)
-      unlisten.then(f => f())
-      unlistenRemoved.then(f => f())
-    }
-  }, [refresh])
+  const promptWarning = (id: string, msg: string): Promise<boolean> =>
+    new Promise(resolve => setConfirm({ id, msg, resolve }))
 
   const handleStart = async (id: string) => {
-    const warning = await ipc.getStartWarning(id)
-    if (warning) { setConfirm({ id, msg: warning }); return }
-    const memWarning = await ipc.checkMemoryWarning(id)
-    if (memWarning) { setConfirm({ id, msg: memWarning }); return }
-    await ipc.startInstance(id)
-    refresh()
+    const started = await startWithWarnings(id, msg => promptWarning(id, msg))
+    if (started) refresh()
   }
 
   const handleStop = async (id: string) => {
     await ipc.stopInstance(id)
-    refresh()
-  }
-
-  const handleConfirm = async () => {
-    if (!confirm) return
-    await ipc.startInstance(confirm.id)
-    setConfirm(null)
     refresh()
   }
 
@@ -163,8 +137,8 @@ export default function PopoverApp() {
       {confirm && (
         <ConfirmDialog
           message={confirm.msg}
-          onConfirm={handleConfirm}
-          onCancel={() => setConfirm(null)}
+          onConfirm={() => { confirm.resolve(true); setConfirm(null) }}
+          onCancel={() => { confirm.resolve(false); setConfirm(null) }}
         />
       )}
       <div style={s.body}>

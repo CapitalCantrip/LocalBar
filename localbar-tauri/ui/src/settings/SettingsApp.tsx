@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
-import { listen } from '@tauri-apps/api/event'
+import { useState } from 'react'
 import { ipc } from '../ipc'
 import {
   type InstancePhase,
@@ -8,6 +7,8 @@ import {
   phaseColor,
   phaseLabel,
 } from '../types'
+import { useInstances } from '../useInstances'
+import { startWithWarnings } from '../startWithWarnings'
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
@@ -149,11 +150,7 @@ function DetailPanel({ instance, phase, onRefresh }: {
   const transitioning = phase?.type === 'starting' || phase?.type === 'stopping'
 
   const handleStart = async () => {
-    const warning = await ipc.getStartWarning(instance.id)
-    if (warning && !confirm(warning + '\n\nStart anyway?')) return
-    const memWarning = await ipc.checkMemoryWarning(instance.id)
-    if (memWarning && !confirm(memWarning + '\n\nStart anyway?')) return
-    await ipc.startInstance(instance.id)
+    await startWithWarnings(instance.id, async msg => confirm(msg + '\n\nStart anyway?') ?? false)
     onRefresh()
   }
 
@@ -226,31 +223,9 @@ function DetailPanel({ instance, phase, onRefresh }: {
 // ─── SettingsApp ──────────────────────────────────────────────────────────────
 
 export default function SettingsApp() {
-  const [instances, setInstances] = useState<ServerInstanceConfig[]>([])
-  const [phases, setPhases] = useState<Record<string, InstancePhase>>({})
+  const { instances, phases, refresh } = useInstances()
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [showAddSheet, setShowAddSheet] = useState(false)
-
-  const refresh = useCallback(async () => {
-    const [insts, ph] = await Promise.all([ipc.listInstances(), ipc.listInstancePhases()])
-    setInstances(insts)
-    setPhases(ph)
-  }, [])
-
-  useEffect(() => {
-    refresh()
-    const id = setInterval(refresh, 2000)
-    const unlisten = listen('phase-changed', refresh)
-    const unlistenRemoved = listen('instance-removed', () => {
-      setSelectedId(null)
-      refresh()
-    })
-    return () => {
-      clearInterval(id)
-      unlisten.then(f => f())
-      unlistenRemoved.then(f => f())
-    }
-  }, [refresh])
 
   const handleAdd = async (name: string, serverType: string, port: number, execPath: string) => {
     const id = await ipc.addInstance(name, serverType, port, execPath)
