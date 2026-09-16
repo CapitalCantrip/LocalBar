@@ -223,7 +223,7 @@ function DetailPanel({ instance, phase, onRefresh }: {
 // ─── SettingsApp ──────────────────────────────────────────────────────────────
 
 export default function SettingsApp() {
-  const { instances, phases, refresh } = useInstances()
+  const { instances, phases, refresh } = useInstances(() => setSelectedId(null))
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [showAddSheet, setShowAddSheet] = useState(false)
 

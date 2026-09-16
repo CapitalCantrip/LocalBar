@@ -1802,6 +1802,7 @@ dependencies = [
 name = "localbar-tauri"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "localbar-core",
  "serde",
  "serde_json",

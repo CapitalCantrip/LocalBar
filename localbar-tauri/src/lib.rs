@@ -341,8 +341,12 @@ fn remove_instance(state: State<'_, AppState>, app: AppHandle, id: String) -> Re
     let uuid = parse_uuid(&id)?;
     // Extract child before kill/wait so the mutex is not held during blocking ops.
     let child = state.processes.lock().unwrap().remove(&uuid);
+    let grace = state.registry.lock().unwrap()
+        .get_config(uuid)
+        .map(|c| driver_for_type(c.server_type).stop(c).grace_period_secs)
+        .unwrap_or(0.0);
     if let Some(child) = child {
-        graceful_kill(child, 0.0);
+        graceful_kill(child, grace);
     }
     let mut reg = state.registry.lock().unwrap();
     reg.remove_instance(uuid)?;
