@@ -480,8 +480,10 @@ fn on_startup(app: &tauri::App) {
         app.emit("startup-error", e.clone()).ok();
     }
 
-    // Intentional: restore all auto-start instances concurrently — each launch
-    // is independent and there is no port-conflict policy between them at startup.
+    // The C3 start_warning gate is bypassed here on purpose for now: every
+    // auto-start instance is launched concurrently, so two large models can
+    // load at once and exhaust memory. That risk is known; a startup chooser
+    // that lets the user pick which instances to restore is tracked in #15.
     let configs: Vec<_> = state.registry.lock().unwrap().all_configs().cloned().collect();
     for config in configs {
         if config.was_running_when_quit || config.start_on_launch {
