@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 import { ipc } from '../ipc'
 import {
   type InstancePhase,
@@ -223,8 +223,9 @@ function DetailPanel({ instance, phase, onRefresh }: {
 // ─── SettingsApp ──────────────────────────────────────────────────────────────
 
 export default function SettingsApp() {
-  const { instances, phases, refresh } = useInstances(() => setSelectedId(null))
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const clearSelected = useCallback(() => setSelectedId(null), [])
+  const { instances, phases, refresh } = useInstances(clearSelected)
   const [showAddSheet, setShowAddSheet] = useState(false)
 
   const handleAdd = async (name: string, serverType: string, port: number, execPath: string) => {
