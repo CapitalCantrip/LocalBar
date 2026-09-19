@@ -499,8 +499,8 @@ fn on_startup(app: &tauri::App) {
 // ─── Tray / window wiring ────────────────────────────────────────────────────
 
 fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
-    let icon = app.default_window_icon().expect("no default icon configured").clone();
-    let _tray = TrayIconBuilder::new()
+    let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
+    let tray = TrayIconBuilder::new()
         .icon(icon)
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click { .. } = event {
@@ -516,6 +516,9 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
             }
         })
         .build(app)?;
+    // TrayIcon removes itself from the status bar on drop; leak intentionally so it
+    // lives for the duration of the process.
+    std::mem::forget(tray);
     Ok(())
 }
 
@@ -542,7 +545,12 @@ fn setup_handler(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
     app.manage(state);
     #[cfg(target_os = "macos")]
     app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-    build_tray(app)?;
+    // Propagating Err here would cause Tauri to panic!() inside applicationDidFinishLaunching,
+    // which cannot unwind through ObjC and aborts. Use process::exit for fatal tray failures.
+    if let Err(e) = build_tray(app) {
+        eprintln!("[localbar] fatal: could not create tray icon: {e}");
+        std::process::exit(1);
+    }
     wire_settings_close(app);
     on_startup(app);
     Ok(())
