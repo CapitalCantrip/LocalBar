@@ -19,9 +19,20 @@ use localbar_core::types::{
     InstanceError, InstanceErrorKind, InstancePhase, ModelMemoryKey, ModelRef,
     ParamValues, ServerInstanceConfig, ServerType,
 };
-use localbar_core::{ensure_managed_model, push_restart_duration_sample, update_model_memory};
+use localbar_core::{adopt_external_as_new_instance, ensure_managed_model, push_restart_duration_sample, update_model_memory};
 
 // ─── DTO ─────────────────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ErrorKindDto {
+    LaunchFailed,
+    PortConflict { port: u16 },
+    HealthCheckFailed,
+    StopFailed,
+    ModelSwitchFailed,
+    Unexpected,
+}
 
 /// Wire-format for InstancePhase. Separate from core type — core has no Serialize impl.
 #[derive(serde::Serialize, Clone)]
@@ -32,7 +43,7 @@ pub enum InstancePhaseDto {
     Running,
     Stopping,
     SwitchingModel,
-    Error { message: String },
+    Error { kind: ErrorKindDto, message: String },
 }
 
 // ─── AppState ────────────────────────────────────────────────────────────────
@@ -85,6 +96,17 @@ fn parse_server_type(s: &str) -> Result<ServerType, String> {
     }
 }
 
+fn error_kind_to_dto(kind: &InstanceErrorKind) -> ErrorKindDto {
+    match kind {
+        InstanceErrorKind::LaunchFailed => ErrorKindDto::LaunchFailed,
+        InstanceErrorKind::PortConflict { port } => ErrorKindDto::PortConflict { port: *port },
+        InstanceErrorKind::HealthCheckFailed => ErrorKindDto::HealthCheckFailed,
+        InstanceErrorKind::StopFailed => ErrorKindDto::StopFailed,
+        InstanceErrorKind::ModelSwitchFailed => ErrorKindDto::ModelSwitchFailed,
+        InstanceErrorKind::Unexpected => ErrorKindDto::Unexpected,
+    }
+}
+
 fn phase_to_dto(phase: &InstancePhase) -> InstancePhaseDto {
     match phase {
         InstancePhase::Stopped => InstancePhaseDto::Stopped,
@@ -92,7 +114,10 @@ fn phase_to_dto(phase: &InstancePhase) -> InstancePhaseDto {
         InstancePhase::Running => InstancePhaseDto::Running,
         InstancePhase::Stopping => InstancePhaseDto::Stopping,
         InstancePhase::SwitchingModel => InstancePhaseDto::SwitchingModel,
-        InstancePhase::Error(e) => InstancePhaseDto::Error { message: e.message.clone() },
+        InstancePhase::Error(e) => InstancePhaseDto::Error {
+            kind: error_kind_to_dto(&e.kind),
+            message: e.message.clone(),
+        },
     }
 }
 
@@ -469,16 +494,62 @@ fn add_instance(
     state: State<'_, AppState>,
     name: String,
     server_type: String,
+    host: Option<String>,
     port: u16,
     executable_path: String,
 ) -> Result<String, String> {
     let stype = parse_server_type(&server_type)?;
-    let config = ServerInstanceConfig::new(name, stype, port, executable_path);
+    let mut config = ServerInstanceConfig::new(name, stype, port, executable_path);
+    if let Some(h) = host {
+        config.host = h;
+    }
     let id = config.id;
     let mut reg = state.registry.lock().unwrap();
     reg.add_instance(config);
     reg.save()?;
     Ok(id.to_string())
+}
+
+/// Probe an external server for its first listed model key without touching the registry.
+async fn probe_external_model_key(host: String, port: u16) -> Option<String> {
+    let mut probe = ServerInstanceConfig::new("probe", ServerType::External, port, "");
+    probe.host = host;
+    tauri::async_runtime::spawn_blocking(move || {
+        ExternalDriver.list_models(&probe).ok()
+            .and_then(|ms| ms.into_iter().next().map(|m| m.key))
+    }).await.unwrap_or(None)
+}
+
+fn activate_adopted_instance(app: &AppHandle, state: &AppState, original_id: Uuid, new_id: Uuid) {
+    state.registry.lock().unwrap().set_phase(original_id, InstancePhase::Stopped).ok();
+    app.emit("phase-changed", original_id.to_string()).ok();
+    let config = state.registry.lock().unwrap().get_config(new_id).cloned();
+    if let Some(cfg) = config { adopt_running(app, &cfg); }
+    app.emit("instance-added", new_id.to_string()).ok();
+}
+
+/// Promote a port-conflicting managed instance's occupant to a tracked external instance.
+#[tauri::command]
+async fn adopt_as_external_instance(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    conflicting_id: String,
+) -> Result<String, String> {
+    let uuid = parse_uuid(&conflicting_id)?;
+    let (host, port) = {
+        let reg = state.registry.lock().unwrap();
+        reg.get_config(uuid)
+            .ok_or_else(|| format!("instance {conflicting_id} not found"))
+            .map(|c| (c.host.clone(), c.port))?
+    };
+    let detected_model = probe_external_model_key(host, port).await;
+    let new_id = adopt_external_as_new_instance(
+        &mut state.registry.lock().unwrap(),
+        uuid,
+        detected_model,
+    )?;
+    activate_adopted_instance(&app, &state, uuid, new_id);
+    Ok(new_id.to_string())
 }
 
 #[tauri::command]
@@ -955,6 +1026,7 @@ pub fn run() {
             set_start_on_launch, set_selected_model,
             switch_model_cmd, update_instance_params, set_active_profile_cmd,
             list_models_cmd, fetch_model_metadata_cmd, get_resolved_params,
+            adopt_as_external_instance,
             open_settings, quit_app,
         ])
         .build(tauri::generate_context!())

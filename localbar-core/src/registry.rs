@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::persistence::Persistence;
-use crate::types::{InstancePhase, ModelMemory, ModelMemoryKey, NamedProfile, ParamValues, ServerInstanceConfig};
+use crate::types::{InstancePhase, ModelMemory, ModelMemoryKey, NamedProfile, ParamValues, ServerInstanceConfig, ServerType};
 
 // ─── InstanceRecord ──────────────────────────────────────────────────────────
 
@@ -80,11 +80,16 @@ impl InstanceRegistry {
 
     /// Returns a warning string when starting this instance would conflict with
     /// another active instance, or None when it is safe to start (C3).
-    /// Callers receive the message or None — no policy logic outside this method.
+    /// External instances are excluded — they are unmanaged processes, so running
+    /// a managed instance alongside them is the intended use case.
     pub fn start_warning(&self, instance_id: Uuid) -> Option<String> {
         self.instances
             .iter()
-            .find(|r| r.config.id != instance_id && r.phase.is_active())
+            .find(|r| {
+                r.config.id != instance_id
+                    && r.config.server_type != ServerType::External
+                    && r.phase.is_active()
+            })
             .map(|r| {
                 format!(
                     "\"{}\" is already running. Starting another instance at the same time may cause conflicts.",
@@ -161,6 +166,10 @@ mod tests {
         ServerInstanceConfig::new(name, ServerType::Ollama, 11434, "/usr/bin/ollama")
     }
 
+    fn external_config(name: &str) -> ServerInstanceConfig {
+        ServerInstanceConfig::new(name, ServerType::External, 1234, "")
+    }
+
     #[test]
     fn remove_instance_decrements_count() {
         let mut reg = make_registry();
@@ -223,6 +232,28 @@ mod tests {
     fn update_config_unknown_id_returns_err() {
         let mut reg = make_registry();
         assert!(reg.update_config(uuid::Uuid::new_v4(), |c| c.name = "x".into()).is_err());
+    }
+
+    #[test]
+    fn start_warning_none_when_only_external_is_running() {
+        let mut reg = make_registry();
+        let ext = reg.add_instance(external_config("lm-studio"));
+        let managed = reg.add_instance(ollama_config("ollama"));
+        reg.set_phase(ext, InstancePhase::Running).unwrap();
+        // External instance running must NOT block starting a managed one.
+        assert_eq!(reg.start_warning(managed), None);
+    }
+
+    #[test]
+    fn start_warning_some_when_managed_is_running_and_external_also_up() {
+        let mut reg = make_registry();
+        let ext = reg.add_instance(external_config("lm-studio"));
+        let a = reg.add_instance(ollama_config("alpha"));
+        let b = reg.add_instance(ollama_config("beta"));
+        reg.set_phase(ext, InstancePhase::Running).unwrap();
+        reg.set_phase(a, InstancePhase::Running).unwrap();
+        // Managed instance already running must still warn.
+        assert!(reg.start_warning(b).is_some());
     }
 
     #[test]

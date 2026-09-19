@@ -14,7 +14,34 @@ use uuid::Uuid;
 
 use driver::ServerDriver;
 use registry::InstanceRegistry;
-use types::{ModelMemory, ModelMemoryKey, ParamValues};
+use types::{ModelMemory, ModelMemoryKey, ParamValues, ServerInstanceConfig, ServerType};
+
+// ─── adopt_external_as_new_instance ──────────────────────────────────────────
+
+/// Create a new External instance at the same host:port as the conflicting managed instance.
+/// The original instance is left in its current phase; callers may reset it to Stopped.
+/// `detected_model_key` should come from probing the server's `/v1/models` before calling.
+pub fn adopt_external_as_new_instance(
+    registry: &mut InstanceRegistry,
+    conflicting_id: Uuid,
+    detected_model_key: Option<String>,
+) -> Result<Uuid, String> {
+    let (host, port) = registry
+        .get_config(conflicting_id)
+        .ok_or_else(|| format!("adopt_external: no instance {conflicting_id}"))
+        .map(|c| (c.host.clone(), c.port))?;
+    let mut new_config = ServerInstanceConfig::new(
+        format!("Adopted ({}:{})", host, port),
+        ServerType::External,
+        port,
+        "",
+    );
+    new_config.host = host;
+    new_config.selected_model_key = detected_model_key;
+    let new_id = registry.add_instance(new_config);
+    registry.save()?;
+    Ok(new_id)
+}
 
 // ─── ensure_managed_model ────────────────────────────────────────────────────
 
@@ -108,7 +135,7 @@ mod tests {
         CanonicalParam, InstanceError, InstanceErrorKind, InstancePhase, ModelMemory, ParamValue,
         ParamValues, ServerInstanceConfig, ServerType,
     };
-    use super::{ensure_managed_model, update_model_memory};
+    use super::{adopt_external_as_new_instance, ensure_managed_model, update_model_memory};
 
     struct SharedPersistence(Arc<Mutex<InMemoryPersistence>>);
     impl Persistence for SharedPersistence {
@@ -555,6 +582,62 @@ mod tests {
         let mut reg = make_registry();
         let id = reg.add_instance(ollama_config("o"));
         assert!(super::push_restart_duration_sample(&mut reg, id, 1.0).is_ok());
+    }
+
+    // ── adopt_external_as_new_instance ───────────────────────────────────────
+
+    #[test]
+    fn adopt_external_creates_new_instance_with_external_type() {
+        let mut reg = make_registry();
+        let mut cfg = ollama_config("ollama");
+        cfg.port = 11434;
+        let original_id = reg.add_instance(cfg);
+        let new_id = adopt_external_as_new_instance(&mut reg, original_id, None).unwrap();
+        assert_ne!(new_id, original_id);
+        let new_cfg = reg.get_config(new_id).unwrap();
+        assert_eq!(new_cfg.server_type, ServerType::External);
+        assert_eq!(new_cfg.port, 11434);
+    }
+
+    #[test]
+    fn adopt_external_persists_detected_model_key() {
+        let mut reg = make_registry();
+        let original_id = reg.add_instance(ollama_config("ollama"));
+        let new_id = adopt_external_as_new_instance(
+            &mut reg,
+            original_id,
+            Some("llama3:8b".into()),
+        ).unwrap();
+        assert_eq!(
+            reg.get_config(new_id).unwrap().selected_model_key.as_deref(),
+            Some("llama3:8b"),
+        );
+    }
+
+    #[test]
+    fn adopt_external_preserves_original_instance() {
+        let mut reg = make_registry();
+        let original_id = reg.add_instance(ollama_config("ollama"));
+        adopt_external_as_new_instance(&mut reg, original_id, None).unwrap();
+        // Original config must still be accessible with all its fields intact.
+        assert!(reg.get_config(original_id).is_some());
+    }
+
+    #[test]
+    fn adopt_external_unknown_id_returns_err() {
+        let mut reg = make_registry();
+        assert!(adopt_external_as_new_instance(&mut reg, uuid::Uuid::new_v4(), None).is_err());
+    }
+
+    #[test]
+    fn adopt_external_host_is_propagated() {
+        let mut reg = make_registry();
+        let mut cfg = make_config("mlx");
+        cfg.host = "192.168.1.10".into();
+        cfg.port = 8080;
+        let original_id = reg.add_instance(cfg);
+        let new_id = adopt_external_as_new_instance(&mut reg, original_id, None).unwrap();
+        assert_eq!(reg.get_config(new_id).unwrap().host, "192.168.1.10");
     }
 
     // ── Mock driver sanity ────────────────────────────────────────────────────
