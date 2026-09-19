@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use crate::driver::{HealthStatus, LaunchPlan, ServerDriver, ShutdownPlan};
 use crate::drivers::http::base_url;
 use crate::types::{ModelRef, ParamDescriptor, ParamValues, ServerInstanceConfig, ServerType};
@@ -41,7 +39,7 @@ impl ServerDriver for ExternalDriver {
     }
 
     fn health_check(&self, config: &ServerInstanceConfig) -> HealthStatus {
-        let agent = quick_agent();
+        let agent = super::http::quick_agent();
         match probe_result(&agent, &models_url(config)) {
             ProbeOutcome::Ok => return HealthStatus::Healthy,
             ProbeOutcome::Unreachable => return HealthStatus::Unreachable,
@@ -55,7 +53,7 @@ impl ServerDriver for ExternalDriver {
     }
 
     fn list_models(&self, config: &ServerInstanceConfig) -> Result<Vec<ModelRef>, String> {
-        let resp = quick_agent()
+        let resp = super::http::quick_agent()
             .get(&models_url(config))
             .call()
             .map_err(|e| e.to_string())?;
@@ -81,13 +79,6 @@ fn models_url(config: &ServerInstanceConfig) -> String {
 
 fn health_url(config: &ServerInstanceConfig) -> String {
     format!("{}/health", base_url(config))
-}
-
-fn quick_agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(5))
-        .timeout_read(Duration::from_secs(10))
-        .build()
 }
 
 // ─── Probe helpers ────────────────────────────────────────────────────────────

@@ -1,6 +1,5 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use serde_json::Value;
 
@@ -73,8 +72,8 @@ impl ServerDriver for MLXLMDriver {
     }
 
     fn health_check(&self, config: &ServerInstanceConfig) -> HealthStatus {
-        let url = format!("http://{}:{}/health", config.host, config.port);
-        match quick_agent().get(&url).call() {
+        let url = format!("{}/health", super::http::base_url(config));
+        match super::http::quick_agent().get(&url).call() {
             Ok(_) => HealthStatus::Healthy,
             Err(ureq::Error::Status(_, _)) => {
                 HealthStatus::Unhealthy("unexpected status from /health".to_string())
@@ -328,12 +327,6 @@ fn split_tokens(text: &str) -> impl Iterator<Item = &str> {
         .filter(|s| !s.is_empty())
 }
 
-fn quick_agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(5))
-        .timeout_read(Duration::from_secs(10))
-        .build()
-}
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
 

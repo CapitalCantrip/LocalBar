@@ -38,16 +38,18 @@ pub enum InstancePhaseDto {
 pub struct AppState {
     pub registry: Mutex<InstanceRegistry>,
     pub processes: Mutex<HashMap<Uuid, Child>>,
+    /// Stored here so on_startup can emit it once windows are ready.
+    pub load_error: Option<String>,
 }
 
 impl AppState {
     pub fn new(data_dir: std::path::PathBuf) -> Self {
         let persistence = FilePersistence::new(data_dir.join("state.json"));
-        let mut registry = InstanceRegistry::new(Box::new(persistence));
-        registry.load().ok();
+        let registry = InstanceRegistry::new(Box::new(persistence));
         Self {
             registry: Mutex::new(registry),
             processes: Mutex::new(HashMap::new()),
+            load_error: None,
         }
     }
 }
@@ -108,6 +110,28 @@ fn port_is_open(host: &str, port: u16) -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
 }
 
+/// Send SIGTERM on Unix, then wait up to `grace_secs`, then SIGKILL.
+fn graceful_kill(mut child: Child, grace_secs: f64) {
+    #[cfg(unix)]
+    {
+        // SAFETY: kill(2) is always safe to call with a valid pid and SIGTERM.
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM); }
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs_f64(grace_secs.clamp(0.0, 60.0));
+        loop {
+            if child.try_wait().map(|s| s.is_some()).unwrap_or(true) {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 // ─── Phase mutation helpers ───────────────────────────────────────────────────
 
 fn set_phase_emit(app: &AppHandle, id: Uuid, phase: InstancePhase) {
@@ -160,7 +184,11 @@ async fn run_health_poll(app: AppHandle, id: Uuid) {
             set_error_emit(&app, id, InstanceErrorKind::LaunchFailed, "process exited unexpectedly");
             return;
         }
-        if check_health_once(&app, id) {
+        let app_clone = app.clone();
+        let healthy = tauri::async_runtime::spawn_blocking(move || check_health_once(&app_clone, id))
+            .await
+            .unwrap_or(false);
+        if healthy {
             set_phase_emit(&app, id, InstancePhase::Running);
             return;
         }
@@ -177,42 +205,61 @@ fn adopt_running(app: &AppHandle, config: &ServerInstanceConfig) {
     set_phase_emit(app, config.id, InstancePhase::Running);
 }
 
-fn detect_port_conflict(app: &AppHandle, config: &ServerInstanceConfig) -> bool {
-    // Port occupied but health check fails → something else is there.
-    if port_is_open(&config.host, config.port) {
-        let driver = driver_for_type(config.server_type);
-        if driver.health_check(config) != HealthStatus::Healthy {
-            set_error_emit(app, config.id, InstanceErrorKind::PortConflict { port: config.port },
-                &format!("port {} is in use by another process", config.port));
-            return true;
-        }
+/// Returns true and sets PortConflict error if the port is occupied by a foreign process.
+/// Accepts the already-computed health status to avoid a redundant network round-trip.
+fn detect_port_conflict(app: &AppHandle, config: &ServerInstanceConfig, health: &HealthStatus) -> bool {
+    if port_is_open(&config.host, config.port) && *health != HealthStatus::Healthy {
+        set_error_emit(app, config.id, InstanceErrorKind::PortConflict { port: config.port },
+            &format!("port {} is in use by another process", config.port));
+        return true;
     }
     false
 }
 
+/// Returns the spawned Child, or None if the instance was adopted/conflicted/errored.
+fn try_spawn_instance(app: &AppHandle, id: Uuid, config: &ServerInstanceConfig) -> Option<Child> {
+    let driver = driver_for_type(config.server_type);
+    let first_health = driver.health_check(config);
+
+    if first_health == HealthStatus::Healthy {
+        adopt_running(app, config);
+        return None;
+    }
+    if detect_port_conflict(app, config, &first_health) {
+        return None;
+    }
+    // External drivers never own a process — if the server isn't reachable, that's an error.
+    if !driver.manages_lifecycle() {
+        set_error_emit(app, id, InstanceErrorKind::HealthCheckFailed,
+            &format!("no server detected at {}:{}", config.host, config.port));
+        return None;
+    }
+    let plan = match driver.launch(config, None, &config.instance_params) {
+        Ok(p) => p,
+        Err(e) => { set_error_emit(app, id, InstanceErrorKind::LaunchFailed, &e); return None; }
+    };
+    match spawn_from_plan(&plan) {
+        Ok(c) => Some(c),
+        Err(e) => { set_error_emit(app, id, InstanceErrorKind::LaunchFailed, &e); None }
+    }
+}
+
 fn launch_instance(app: AppHandle, id: Uuid) {
     let Some(config) = clone_config(&app, id) else { return };
-    let driver = driver_for_type(config.server_type);
+    let Some(child) = try_spawn_instance(&app, id, &config) else { return };
 
-    // Adopt-on-start: process already healthy on the configured port.
-    if driver.health_check(&config) == HealthStatus::Healthy {
-        adopt_running(&app, &config);
-        return;
+    // Guard against a Stop that arrived during the blocking I/O above.
+    {
+        let state = app.state::<AppState>();
+        let reg = state.registry.lock().unwrap();
+        if !matches!(reg.get_phase(id), Some(InstancePhase::Starting)) {
+            drop(reg);
+            graceful_kill(child, 0.0);
+            return;
+        }
     }
-
-    if detect_port_conflict(&app, &config) {
-        return;
-    }
-
-    let plan = match driver.launch(&config, None, &config.instance_params) {
-        Ok(p) => p,
-        Err(e) => { set_error_emit(&app, id, InstanceErrorKind::LaunchFailed, &e); return; }
-    };
-    let child = match spawn_from_plan(&plan) {
-        Ok(c) => c,
-        Err(e) => { set_error_emit(&app, id, InstanceErrorKind::LaunchFailed, &e); return; }
-    };
     app.state::<AppState>().processes.lock().unwrap().insert(id, child);
+    // ParamValues::resolve is not called here — resolution is scaffolded for T8+.
     tauri::async_runtime::spawn(run_health_poll(app, id));
 }
 
@@ -292,9 +339,14 @@ fn add_instance(
 #[tauri::command]
 fn remove_instance(state: State<'_, AppState>, app: AppHandle, id: String) -> Result<(), String> {
     let uuid = parse_uuid(&id)?;
-    if let Some(mut child) = state.processes.lock().unwrap().remove(&uuid) {
-        let _ = child.kill();
-        let _ = child.wait();
+    // Extract child before kill/wait so the mutex is not held during blocking ops.
+    let child = state.processes.lock().unwrap().remove(&uuid);
+    let grace = state.registry.lock().unwrap()
+        .get_config(uuid)
+        .map(|c| driver_for_type(c.server_type).stop(c).grace_period_secs)
+        .unwrap_or(0.0);
+    if let Some(child) = child {
+        graceful_kill(child, grace);
     }
     let mut reg = state.registry.lock().unwrap();
     reg.remove_instance(uuid)?;
@@ -326,7 +378,7 @@ fn set_selected_model(
 // ─── IPC: lifecycle ───────────────────────────────────────────────────────────
 
 #[tauri::command]
-fn start_instance(state: State<'_, AppState>, app: AppHandle, id: String) -> Result<(), String> {
+async fn start_instance(state: State<'_, AppState>, app: AppHandle, id: String) -> Result<(), String> {
     let uuid = parse_uuid(&id)?;
     {
         let mut reg = state.registry.lock().unwrap();
@@ -338,19 +390,48 @@ fn start_instance(state: State<'_, AppState>, app: AppHandle, id: String) -> Res
         reg.set_phase(uuid, InstancePhase::Starting).ok();
     }
     app.emit("phase-changed", uuid.to_string()).ok();
-    launch_instance(app, uuid);
+    // launch_instance does blocking network I/O (health checks); run it off the main thread.
+    tauri::async_runtime::spawn_blocking(move || launch_instance(app, uuid));
     Ok(())
 }
 
+/// Returns Err if the instance was adopted and the server is still up after the stop attempt.
+async fn do_stop(app: &AppHandle, uuid: Uuid, child: Option<Child>, grace: f64) -> Result<(), String> {
+    if let Some(child) = child {
+        tauri::async_runtime::spawn_blocking(move || graceful_kill(child, grace))
+            .await
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    // Adopted instance — verify it actually stopped.
+    let config = clone_config(app, uuid);
+    let still_up = tauri::async_runtime::spawn_blocking(move || {
+        config.map(|c| driver_for_type(c.server_type).health_check(&c) == HealthStatus::Healthy)
+              .unwrap_or(false)
+    }).await.unwrap_or(false);
+    if still_up {
+        Err("cannot stop: server was not launched by LocalBar and is still running".to_string())
+    } else {
+        Ok(())
+    }
+}
+
 #[tauri::command]
-fn stop_instance(state: State<'_, AppState>, app: AppHandle, id: String) -> Result<(), String> {
+async fn stop_instance(state: State<'_, AppState>, app: AppHandle, id: String) -> Result<(), String> {
     let uuid = parse_uuid(&id)?;
     state.registry.lock().unwrap().set_phase(uuid, InstancePhase::Stopping)?;
     app.emit("phase-changed", &id).ok();
 
-    if let Some(mut child) = state.processes.lock().unwrap().remove(&uuid) {
-        let _ = child.kill();
-        let _ = child.wait();
+    // Extract child before blocking ops so the mutex is not held during kill/wait.
+    let child = state.processes.lock().unwrap().remove(&uuid);
+    let grace = clone_config(&app, uuid)
+        .map(|c| driver_for_type(c.server_type).stop(&c).grace_period_secs)
+        .unwrap_or(0.0);
+
+    if let Err(e) = do_stop(&app, uuid, child, grace).await {
+        state.registry.lock().unwrap().set_phase(uuid, InstancePhase::Running).ok();
+        app.emit("phase-changed", &id).ok();
+        return Err(e);
     }
 
     {
@@ -393,12 +474,24 @@ fn mark_running_instances_for_reconnect(app: &AppHandle) {
 
 fn on_startup(app: &tauri::App) {
     let state = app.state::<AppState>();
+
+    if let Some(e) = &state.load_error {
+        eprintln!("[localbar] state.json failed to load: {e}");
+        app.emit("startup-error", e.clone()).ok();
+    }
+
+    // The C3 start_warning gate is bypassed here on purpose for now: every
+    // auto-start instance is launched concurrently, so two large models can
+    // load at once and exhaust memory. That risk is known; a startup chooser
+    // that lets the user pick which instances to restore is tracked in #15.
     let configs: Vec<_> = state.registry.lock().unwrap().all_configs().cloned().collect();
     for config in configs {
         if config.was_running_when_quit || config.start_on_launch {
             let handle = app.handle().clone();
             let id = config.id;
-            tauri::async_runtime::spawn(async move { launch_instance(handle, id) });
+            tauri::async_runtime::spawn(async move {
+                tauri::async_runtime::spawn_blocking(move || launch_instance(handle, id)).await.ok();
+            });
         }
     }
 }
@@ -442,7 +535,11 @@ fn wire_settings_close(app: &tauri::App) {
 
 fn setup_handler(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    app.manage(AppState::new(data_dir));
+    let mut state = AppState::new(data_dir);
+    if let Err(e) = state.registry.lock().unwrap().load() {
+        state.load_error = Some(e);
+    }
+    app.manage(state);
     #[cfg(target_os = "macos")]
     app.set_activation_policy(tauri::ActivationPolicy::Accessory);
     build_tray(app)?;
