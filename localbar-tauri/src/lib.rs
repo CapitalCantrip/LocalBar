@@ -202,10 +202,39 @@ async fn run_health_poll(app: AppHandle, id: Uuid) {
 // ─── Core launch logic (shared by IPC command + startup) ─────────────────────
 
 fn adopt_running(app: &AppHandle, config: &ServerInstanceConfig) {
+    let was_running = {
+        let state = app.state::<AppState>();
+        let reg = state.registry.lock().unwrap();
+        let result = matches!(reg.get_phase(config.id), Some(InstancePhase::Running));
+        result
+    };
     set_phase_emit(app, config.id, InstancePhase::Running);
-    // Adopted instances have no process to watch, so spin up a health poller so the
-    // phase self-corrects if the external server goes down.
-    tauri::async_runtime::spawn(run_adopted_health_poll(app.clone(), config.id));
+    // Only spawn a health poller on first adoption — re-validation from Start reuses the
+    // existing poller rather than layering a second one on top.
+    if !was_running {
+        tauri::async_runtime::spawn(run_adopted_health_poll(app.clone(), config.id));
+    }
+}
+
+fn adopted_phase_is_active(app: &AppHandle, id: Uuid) -> bool {
+    let state = app.state::<AppState>();
+    let reg = state.registry.lock().unwrap();
+    matches!(reg.get_phase(id), Some(InstancePhase::Running) | Some(InstancePhase::Error(_)))
+}
+
+fn apply_adopted_health_result(app: &AppHandle, id: Uuid, healthy: bool) {
+    let state = app.state::<AppState>();
+    let current_phase = state.registry.lock().unwrap().get_phase(id).cloned();
+    match (healthy, current_phase) {
+        (false, Some(InstancePhase::Running)) => {
+            set_error_emit(app, id, InstanceErrorKind::HealthCheckFailed,
+                "server is no longer reachable");
+        }
+        (true, Some(InstancePhase::Error(_))) => {
+            set_phase_emit(app, id, InstancePhase::Running);
+        }
+        _ => {}
+    }
 }
 
 /// Polls health every 10 s for an externally-adopted (unmanaged) instance.
@@ -214,38 +243,12 @@ fn adopt_running(app: &AppHandle, config: &ServerInstanceConfig) {
 async fn run_adopted_health_poll(app: AppHandle, id: Uuid) {
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-
-        // Stop polling once the instance is no longer in a state we manage here.
-        {
-            let state = app.state::<AppState>();
-            let reg = state.registry.lock().unwrap();
-            match reg.get_phase(id) {
-                Some(InstancePhase::Running) | Some(InstancePhase::Error(_)) => {}
-                _ => return,
-            }
-        }
-
+        if !adopted_phase_is_active(&app, id) { return; }
         let app_clone = app.clone();
         let healthy = tauri::async_runtime::spawn_blocking(move || check_health_once(&app_clone, id))
             .await
             .unwrap_or(false);
-
-        {
-            let state = app.state::<AppState>();
-            let reg = state.registry.lock().unwrap();
-            let current_phase = reg.get_phase(id).cloned();
-            drop(reg);
-            match (healthy, current_phase) {
-                (false, Some(InstancePhase::Running)) => {
-                    set_error_emit(&app, id, InstanceErrorKind::HealthCheckFailed,
-                        "server is no longer reachable");
-                }
-                (true, Some(InstancePhase::Error(_))) => {
-                    set_phase_emit(&app, id, InstancePhase::Running);
-                }
-                _ => {}
-            }
-        }
+        apply_adopted_health_result(&app, id, healthy);
     }
 }
 
@@ -426,11 +429,19 @@ async fn start_instance(state: State<'_, AppState>, app: AppHandle, id: String) 
     let uuid = parse_uuid(&id)?;
     {
         let mut reg = state.registry.lock().unwrap();
+        let is_external = reg.get_config(uuid)
+            .ok_or("instance not found")
+            .map(|c| c.server_type == ServerType::External)?;
         let phase = reg.get_phase(uuid);
-        if matches!(phase, Some(InstancePhase::Starting | InstancePhase::Running | InstancePhase::Stopping)) {
+        // Always skip transitions already in progress.
+        if matches!(phase, Some(InstancePhase::Starting | InstancePhase::Stopping)) {
             return Ok(());
         }
-        reg.get_config(uuid).ok_or("instance not found")?;
+        // For managed instances, Running means the server is up — no action needed.
+        // For External instances, allow re-validation: the unmanaged server may have stopped.
+        if !is_external && matches!(phase, Some(InstancePhase::Running)) {
+            return Ok(());
+        }
         reg.set_phase(uuid, InstancePhase::Starting).ok();
     }
     app.emit("phase-changed", uuid.to_string()).ok();
@@ -657,7 +668,7 @@ fn install_popover_key_monitor(app: &tauri::App) {
         // Leak the monitor intentionally: it must live as long as the app.
         let _monitor = NSEvent::addLocalMonitorForEventsMatchingMask_handler(
             NSEventMask::KeyDown,
-            &*block,
+            &block,
         );
         std::mem::forget(_monitor);
     }
