@@ -792,11 +792,45 @@ fn get_resolved_params(state: State<'_, AppState>, id: String) -> Result<ParamVa
     Ok(ParamValues::resolve(profile, memory, &schema).0)
 }
 
+#[derive(serde::Serialize)]
+struct ParamSchemaEntry {
+    key: &'static str,
+    label: &'static str,
+    kind: &'static str,
+    server_flag: &'static str,
+    default_value: Option<localbar_core::types::ParamValue>,
+}
+
+fn param_schema_entry(d: &localbar_core::types::ParamDescriptor) -> Option<ParamSchemaEntry> {
+    use localbar_core::types::CanonicalParam::*;
+    let (key, label, kind) = match d.param {
+        Temperature     => ("temperature",     "Temperature",       "double"),
+        TopP            => ("topP",            "Top-P",             "double"),
+        TopK            => ("topK",            "Top-K",             "int"),
+        MinP            => ("minP",            "Min-P",             "double"),
+        MaxTokens       => ("maxTokens",       "Max tokens",        "int"),
+        RepeatPenalty   => ("repeatPenalty",   "Repeat penalty",    "double"),
+        PresencePenalty => ("presencePenalty", "Presence penalty",  "double"),
+        Seed            => ("seed",            "Seed",              "int"),
+        ContextLength   => ("contextLength",   "Context length",    "int"),
+        SystemPrompt    => return None,
+    };
+    Some(ParamSchemaEntry { key, label, kind, server_flag: d.server_flag_name, default_value: d.default_value.clone() })
+}
+
+#[tauri::command]
+fn get_param_schema(server_type: String) -> Result<Vec<ParamSchemaEntry>, String> {
+    let stype = parse_server_type(&server_type)?;
+    Ok(driver_for_type(stype).param_schema().iter().filter_map(param_schema_entry).collect())
+}
+
 #[tauri::command]
 fn open_settings(app: AppHandle) {
     if let Some(popover) = app.get_webview_window("popover") {
         let _ = popover.hide();
     }
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
     if let Some(win) = app.get_webview_window("settings") {
         let _ = win.show();
         let _ = win.set_focus();
@@ -973,10 +1007,13 @@ fn install_popover_key_monitor(_app: &tauri::App) {}
 fn wire_settings_close(app: &tauri::App) {
     if let Some(settings_win) = app.get_webview_window("settings") {
         let win = settings_win.clone();
+        let handle = app.handle().clone();
         settings_win.on_window_event(move |event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = win.hide();
+                #[cfg(target_os = "macos")]
+                let _ = handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
         });
     }
@@ -1026,7 +1063,7 @@ pub fn run() {
             get_start_warning, check_memory_warning, start_instance, stop_instance,
             set_start_on_launch, set_selected_model,
             switch_model_cmd, update_instance_params, set_active_profile_cmd,
-            list_models_cmd, fetch_model_metadata_cmd, get_resolved_params,
+            list_models_cmd, fetch_model_metadata_cmd, get_resolved_params, get_param_schema,
             adopt_as_external_instance,
             open_settings, quit_app,
         ])

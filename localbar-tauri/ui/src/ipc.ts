@@ -1,6 +1,14 @@
 import { invoke } from '@tauri-apps/api/core'
 import type { InstancePhase, ModelMetadata, ModelRef, ParamValues, ServerInstanceConfig } from './types'
 
+export interface ParamSchemaEntry {
+  key: string
+  label: string
+  kind: 'double' | 'int'
+  server_flag: string
+  default_value: { type: 'double' | 'int'; value: number } | null
+}
+
 export const ipc = {
   listInstances: (): Promise<ServerInstanceConfig[]> =>
     invoke('list_instances'),
@@ -51,6 +59,9 @@ export const ipc = {
 
   getResolvedParams: (id: string): Promise<ParamValues> =>
     invoke('get_resolved_params', { id }),
+
+  getParamSchema: (serverType: string): Promise<ParamSchemaEntry[]> =>
+    invoke('get_param_schema', { serverType }),
 
   openSettings: (): Promise<void> =>
     invoke('open_settings'),

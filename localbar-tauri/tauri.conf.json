@@ -4,6 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.localbar.app",
   "build": {
+    "beforeDevCommand": { "script": "npm run dev", "cwd": "ui" },
+    "devUrl": "http://localhost:5173",
     "frontendDist": "ui/dist"
   },
   "app": {

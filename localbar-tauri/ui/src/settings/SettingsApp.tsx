@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ipc } from '../ipc'
+import { ipc, type ParamSchemaEntry } from '../ipc'
 import {
   type InstancePhase,
   type ModelMetadata,
@@ -108,11 +108,12 @@ const s = {
 
 // ─── Add-instance sheet ───────────────────────────────────────────────────────
 
-type ServerTypeOption = 'ollama' | 'mlx-lm'
+type ServerTypeOption = 'ollama' | 'mlx-lm' | 'external'
 
 const DEFAULTS: Record<ServerTypeOption, { port: string; execPath: string; namePlaceholder: string }> = {
   ollama: { port: '11434', execPath: '/usr/local/bin/ollama', namePlaceholder: 'My Ollama' },
   'mlx-lm': { port: '8080', execPath: 'uvx', namePlaceholder: 'My mlx-lm' },
+  external: { port: '11434', execPath: '', namePlaceholder: 'My External Server' },
 }
 
 function AddInstanceSheet({ onAdd, onCancel }: {
@@ -133,7 +134,7 @@ function AddInstanceSheet({ onAdd, onCancel }: {
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!name.trim() || !execPath.trim()) return
+    if (!name.trim() || (serverType !== 'external' && !execPath.trim())) return
     setBusy(true)
     try { await onAdd(name.trim(), serverType, parseInt(port, 10) || parseInt(DEFAULTS[serverType].port, 10), execPath.trim()) }
     finally { setBusy(false) }
@@ -146,7 +147,7 @@ function AddInstanceSheet({ onAdd, onCancel }: {
         <div style={s.field}>
           <span style={s.fieldLabel}>Server type</span>
           <div style={{ display: 'flex', gap: 16, marginTop: 2 }}>
-            {(['ollama', 'mlx-lm'] as const).map(t => (
+            {(['ollama', 'mlx-lm', 'external'] as const).map(t => (
               <label key={t} style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', fontSize: 13 }}>
                 <input type="radio" name="serverType" value={t} checked={serverType === t} onChange={() => selectType(t)} />
                 {t}
@@ -162,10 +163,12 @@ function AddInstanceSheet({ onAdd, onCancel }: {
           <label style={s.fieldLabel}>Port</label>
           <input style={s.input} value={port} onChange={e => setPort(e.target.value)} />
         </div>
-        <div style={s.field}>
-          <label style={s.fieldLabel}>Executable path</label>
-          <input style={s.input} value={execPath} onChange={e => setExecPath(e.target.value)} />
-        </div>
+        {serverType !== 'external' && (
+          <div style={s.field}>
+            <label style={s.fieldLabel}>Executable path</label>
+            <input style={s.input} value={execPath} onChange={e => setExecPath(e.target.value)} />
+          </div>
+        )}
         <div style={s.sheetBtns}>
           <button type="button" style={s.btn()} onClick={onCancel}>Cancel</button>
           <button type="submit" style={s.primaryBtn} disabled={busy || !name.trim()}>
@@ -179,19 +182,12 @@ function AddInstanceSheet({ onAdd, onCancel }: {
 
 // ─── Param editor ────────────────────────────────────────────────────────────
 
-const PARAM_FIELDS: { key: string; label: string; kind: 'double' | 'int' }[] = [
-  { key: 'temperature', label: 'Temperature', kind: 'double' },
-  { key: 'contextLength', label: 'Context length', kind: 'int' },
-  { key: 'topP', label: 'Top-P', kind: 'double' },
-  { key: 'repeatPenalty', label: 'Repeat penalty', kind: 'double' },
-  { key: 'seed', label: 'Seed', kind: 'int' },
-]
-
 function ParamEditor({ instance, onRefresh }: {
   instance: ServerInstanceConfig
   onRefresh: () => void
 }) {
   const [params, setParams] = useState<ParamValues | null>(null)
+  const [schema, setSchema] = useState<ParamSchemaEntry[]>([])
   const [systemPrompt, setSystemPrompt] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -200,7 +196,8 @@ function ParamEditor({ instance, onRefresh }: {
       setParams(p)
       setSystemPrompt(p.system_prompt ?? '')
     }).catch(() => {})
-  }, [instance.id])
+    ipc.getParamSchema(instance.server_type).then(setSchema).catch(() => {})
+  }, [instance.id, instance.server_type])
 
   const setField = (key: string, raw: string, kind: 'double' | 'int') => {
     const num = kind === 'int' ? parseInt(raw, 10) : parseFloat(raw)
@@ -227,7 +224,7 @@ function ParamEditor({ instance, onRefresh }: {
   return (
     <div style={s.field}>
       <span style={s.fieldLabel}>Parameters</span>
-      {PARAM_FIELDS.map(f => (
+      {schema.map(f => (
         <div key={f.key} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
           <label style={{ fontSize: 12, color: '#555', width: 110 }}>{f.label}</label>
           <input
