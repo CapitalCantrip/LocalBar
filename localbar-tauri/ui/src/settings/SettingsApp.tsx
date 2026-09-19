@@ -355,9 +355,17 @@ function DetailPanel({ instance, phase, onRefresh }: {
 }) {
   const active = isActive(phase)
   const transitioning = phase?.type === 'starting' || phase?.type === 'stopping'
+  const [confirmingRemove, setConfirmingRemove] = useState(false)
 
   const handleStart = async () => {
-    await startWithWarnings(instance.id, async msg => confirm(msg + '\n\nStart anyway?') ?? false)
+    await startWithWarnings(instance.id, async msg => {
+      setConfirmingRemove(false)
+      return new Promise(resolve => {
+        // Use inline state for start warnings too — avoids confirm() suppression
+        const ok = window.confirm(msg + '\n\nStart anyway?')
+        resolve(ok)
+      })
+    })
     onRefresh()
   }
 
@@ -367,7 +375,7 @@ function DetailPanel({ instance, phase, onRefresh }: {
   }
 
   const handleRemove = async () => {
-    if (!confirm(`Remove "${instance.name}"? This cannot be undone.`)) return
+    setConfirmingRemove(false)
     await ipc.removeInstance(instance.id)
   }
 
@@ -375,7 +383,15 @@ function DetailPanel({ instance, phase, onRefresh }: {
     <div style={s.detailPane}>
       <div style={s.detailHeader}>
         <span style={s.detailTitle}>{instance.name}</span>
-        <button style={s.btn(true)} onClick={handleRemove}>Remove</button>
+        {confirmingRemove ? (
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <span style={{ fontSize: 12, color: '#c00' }}>Remove?</span>
+            <button style={s.btn(true)} onClick={handleRemove}>Yes</button>
+            <button style={s.btn()} onClick={() => setConfirmingRemove(false)}>No</button>
+          </div>
+        ) : (
+          <button style={s.btn(true)} onClick={() => setConfirmingRemove(true)}>Remove</button>
+        )}
       </div>
       <div style={s.detailBody}>
         <div style={s.field}>

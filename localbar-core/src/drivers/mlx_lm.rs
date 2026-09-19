@@ -36,7 +36,6 @@ impl ServerDriver for MLXLMDriver {
 
     fn param_schema(&self) -> Vec<ParamDescriptor> {
         vec![
-            ParamDescriptor { param: CanonicalParam::ContextLength,   server_flag_name: "--max-kv-size",         modelfile_param_name: None, default_value: None },
             ParamDescriptor { param: CanonicalParam::Temperature,     server_flag_name: "--temp",                modelfile_param_name: None, default_value: Some(ParamValue::Double(0.0)) },
             ParamDescriptor { param: CanonicalParam::MaxTokens,       server_flag_name: "--max-tokens",          modelfile_param_name: None, default_value: None },
             ParamDescriptor { param: CanonicalParam::TopK,            server_flag_name: "--top-k",               modelfile_param_name: None, default_value: None },
