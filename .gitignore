@@ -30,3 +30,13 @@ Podfile.lock
 # Frontend build artifacts
 localbar-tauri/ui/node_modules/
 localbar-tauri/ui/dist/
+
+# Dev tooling
+.scratch/
+.vscode/
+
+# Tauri-generated platform icons not needed for the current macOS target
+localbar-tauri/icons/Square*.png
+localbar-tauri/icons/StoreLogo.png
+localbar-tauri/icons/android/
+localbar-tauri/icons/ios/
