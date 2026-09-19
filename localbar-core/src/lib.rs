@@ -46,6 +46,33 @@ pub fn ensure_managed_model(
     registry.save()
 }
 
+// ─── push_restart_duration_sample ────────────────────────────────────────────
+
+/// Append a startup-duration sample to the rolling window in ModelMemory.
+///
+/// The window holds at most 10 samples, newest first. No-ops when no model is
+/// selected. Duration is wall-clock seconds from when the instance entered
+/// Starting (or SwitchingModel) to when it first became healthy.
+pub fn push_restart_duration_sample(
+    registry: &mut InstanceRegistry,
+    id: Uuid,
+    duration_secs: f64,
+) -> Result<(), String> {
+    let config = registry
+        .get_config(id)
+        .ok_or_else(|| format!("push_restart_duration_sample: no instance {id}"))?;
+    let Some(model_key) = config.selected_model_key.clone() else { return Ok(()); };
+    let server_type = config.server_type;
+    let key = ModelMemoryKey { server_type, model_key: model_key.clone() };
+    let mut entry = registry
+        .get_model_memory(&key)
+        .cloned()
+        .unwrap_or_else(|| ModelMemory::new(server_type, model_key));
+    entry.restart_duration_samples.insert(0, duration_secs);
+    entry.restart_duration_samples.truncate(10);
+    registry.upsert_model_memory(entry)
+}
+
 // ─── update_model_memory ─────────────────────────────────────────────────────
 
 /// Persist the params that were active when a model became Running (auto-memory).
@@ -469,6 +496,65 @@ mod tests {
         // but the real test is that the driver was called (not the content format).
         let calls = driver.managed_config_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
+    }
+
+    // ── push_restart_duration_sample ─────────────────────────────────────────
+
+    #[test]
+    fn push_restart_duration_sample_records_value() {
+        let mut reg = make_registry();
+        let mut cfg = ollama_config("o");
+        cfg.selected_model_key = Some("llama3:8b".into());
+        let id = reg.add_instance(cfg);
+        super::push_restart_duration_sample(&mut reg, id, 3.5).unwrap();
+        let key = crate::types::ModelMemoryKey {
+            server_type: ServerType::Ollama,
+            model_key: "llama3:8b".into(),
+        };
+        let mem = reg.get_model_memory(&key).unwrap();
+        assert_eq!(mem.restart_duration_samples, vec![3.5]);
+    }
+
+    #[test]
+    fn push_restart_duration_sample_newest_first() {
+        let mut reg = make_registry();
+        let mut cfg = ollama_config("o");
+        cfg.selected_model_key = Some("m".into());
+        let id = reg.add_instance(cfg);
+        super::push_restart_duration_sample(&mut reg, id, 1.0).unwrap();
+        super::push_restart_duration_sample(&mut reg, id, 2.0).unwrap();
+        let key = crate::types::ModelMemoryKey {
+            server_type: ServerType::Ollama,
+            model_key: "m".into(),
+        };
+        let mem = reg.get_model_memory(&key).unwrap();
+        assert_eq!(mem.restart_duration_samples[0], 2.0, "newest first");
+        assert_eq!(mem.restart_duration_samples[1], 1.0);
+    }
+
+    #[test]
+    fn push_restart_duration_sample_window_capped_at_10() {
+        let mut reg = make_registry();
+        let mut cfg = ollama_config("o");
+        cfg.selected_model_key = Some("m".into());
+        let id = reg.add_instance(cfg);
+        for i in 0..12 {
+            super::push_restart_duration_sample(&mut reg, id, i as f64).unwrap();
+        }
+        let key = crate::types::ModelMemoryKey {
+            server_type: ServerType::Ollama,
+            model_key: "m".into(),
+        };
+        let mem = reg.get_model_memory(&key).unwrap();
+        assert_eq!(mem.restart_duration_samples.len(), 10, "window must not exceed 10");
+        assert_eq!(mem.restart_duration_samples[0], 11.0, "newest sample at index 0");
+    }
+
+    #[test]
+    fn push_restart_duration_sample_noop_when_no_model_selected() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(ollama_config("o"));
+        assert!(super::push_restart_duration_sample(&mut reg, id, 1.0).is_ok());
     }
 
     // ── Mock driver sanity ────────────────────────────────────────────────────

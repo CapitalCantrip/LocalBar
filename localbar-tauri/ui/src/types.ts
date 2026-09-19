@@ -3,6 +3,17 @@
 
 export type ServerType = 'mlx-lm' | 'ollama' | 'external'
 
+export interface ModelRef {
+  key: string
+  display_name: string
+  size_bytes: number | null
+}
+
+export interface ModelMetadata {
+  parameter_count: string | null
+  quantization: string | null
+}
+
 export interface ParamValue {
   type: 'double' | 'int' | 'string' | 'bool'
   value: number | string | boolean

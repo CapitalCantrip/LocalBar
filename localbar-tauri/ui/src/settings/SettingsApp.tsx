@@ -1,7 +1,9 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { ipc } from '../ipc'
 import {
   type InstancePhase,
+  type ModelMetadata,
+  type ModelRef,
   type ServerInstanceConfig,
   isActive,
   phaseColor,
@@ -91,6 +93,16 @@ const s = {
   },
   sheetBtns: { display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 },
   checkbox: { display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 },
+  modelList: { display: 'flex', flexDirection: 'column' as const, gap: 2 },
+  modelRow: (selected: boolean): React.CSSProperties => ({
+    display: 'flex', alignItems: 'center', gap: 8,
+    padding: '6px 10px', borderRadius: 6, cursor: 'pointer',
+    background: selected ? '#e8f0fe' : 'transparent',
+    border: selected ? '1px solid #93c5fd' : '1px solid transparent',
+  }),
+  modelName: { flex: 1, fontSize: 12, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const },
+  modelMeta: { fontSize: 11, color: '#888', flexShrink: 0 },
+  refreshNote: { fontSize: 11, color: '#aaa', fontStyle: 'italic' as const },
 }
 
 // ─── Add-instance sheet ───────────────────────────────────────────────────────
@@ -135,6 +147,100 @@ function AddInstanceSheet({ onAdd, onCancel }: {
           </button>
         </div>
       </form>
+    </div>
+  )
+}
+
+// ─── Model list ───────────────────────────────────────────────────────────────
+
+function ModelList({ instance, phase, onRefresh }: {
+  instance: ServerInstanceConfig
+  phase: InstancePhase | undefined
+  onRefresh: () => void
+}) {
+  const [models, setModels] = useState<ModelRef[]>([])
+  const [metaMap, setMetaMap] = useState<Record<string, ModelMetadata | null>>({})
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const fetchRef = useRef(0)
+
+  const fetchModels = useCallback(async () => {
+    const seq = ++fetchRef.current
+    setLoading(true)
+    setError(null)
+    try {
+      const list = await ipc.listModels(instance.id)
+      if (seq !== fetchRef.current) return
+      setModels(list)
+      // Fetch metadata for each model in the background.
+      list.forEach(async m => {
+        const meta = await ipc.fetchModelMetadata(instance.id, m.key).catch(() => null)
+        if (seq !== fetchRef.current) return
+        setMetaMap(prev => ({ ...prev, [m.key]: meta }))
+      })
+    } catch (e) {
+      if (seq === fetchRef.current) setError(String(e))
+    } finally {
+      if (seq === fetchRef.current) setLoading(false)
+    }
+  }, [instance.id])
+
+  // Re-scan whenever the panel opens for this instance (instance.id change) or on phase change.
+  useEffect(() => { fetchModels() }, [fetchModels])
+
+  const handleSelect = async (key: string) => {
+    if (key === instance.selected_model_key) return
+    if (isActive(phase) && phase?.type !== 'switchingModel') {
+      await ipc.switchModel(instance.id, key)
+    } else {
+      await ipc.setSelectedModel(instance.id, key)
+    }
+    onRefresh()
+  }
+
+  const metaLabel = (key: string): string => {
+    const m = metaMap[key]
+    if (!m) return ''
+    const parts = [m.parameter_count, m.quantization].filter(Boolean)
+    return parts.join(' · ')
+  }
+
+  if (error) {
+    return (
+      <div style={s.field}>
+        <span style={s.fieldLabel}>Models <span style={s.refreshNote}>(unavailable)</span></span>
+        <span style={{ ...s.fieldValue, color: '#ef4444', fontSize: 11 }}>{error}</span>
+      </div>
+    )
+  }
+
+  return (
+    <div style={s.field}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span style={s.fieldLabel}>Models</span>
+        {loading && <span style={s.refreshNote}>refreshing…</span>}
+        {!loading && (
+          <button
+            style={{ ...s.btn(), padding: '1px 6px', fontSize: 11 }}
+            onClick={fetchModels}
+          >↺</button>
+        )}
+      </div>
+      {models.length === 0 && !loading && (
+        <span style={{ ...s.fieldValue, color: '#aaa', fontSize: 11 }}>No models found</span>
+      )}
+      <div style={s.modelList}>
+        {models.map(m => (
+          <div
+            key={m.key}
+            style={s.modelRow(m.key === instance.selected_model_key)}
+            onClick={() => handleSelect(m.key)}
+          >
+            <span style={s.modelName} title={m.key}>{m.display_name}</span>
+            {metaLabel(m.key) && <span style={s.modelMeta}>{metaLabel(m.key)}</span>}
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
@@ -198,12 +304,7 @@ function DetailPanel({ instance, phase, onRefresh }: {
           <span style={s.fieldLabel}>Executable</span>
           <span style={{ ...s.fieldValue, wordBreak: 'break-all', fontSize: 11 }}>{instance.executable_path}</span>
         </div>
-        {instance.selected_model_key && (
-          <div style={s.field}>
-            <span style={s.fieldLabel}>Model</span>
-            <span style={s.fieldValue}>{instance.selected_model_key}</span>
-          </div>
-        )}
+        <ModelList instance={instance} phase={phase} onRefresh={onRefresh} />
         <label style={s.checkbox}>
           <input
             type="checkbox"

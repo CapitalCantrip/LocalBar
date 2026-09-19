@@ -13,7 +13,7 @@ pub enum HealthStatus {
 
 // ─── Model metadata ───────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ModelMetadata {
     pub parameter_count: Option<String>,
     pub quantization: Option<String>,

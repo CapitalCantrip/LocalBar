@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter, Listener, Manager, State, WindowEvent};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use uuid::Uuid;
 
-use localbar_core::driver::{HealthStatus, ServerDriver};
+use localbar_core::driver::{HealthStatus, ModelMetadata, ServerDriver};
 use localbar_core::drivers::external::ExternalDriver;
 use localbar_core::drivers::mlx_lm::MLXLMDriver;
 use localbar_core::drivers::ollama::OllamaDriver;
@@ -19,7 +19,7 @@ use localbar_core::types::{
     InstanceError, InstanceErrorKind, InstancePhase, ModelMemoryKey, ModelRef,
     ParamValues, ServerInstanceConfig, ServerType,
 };
-use localbar_core::{ensure_managed_model, update_model_memory};
+use localbar_core::{ensure_managed_model, push_restart_duration_sample, update_model_memory};
 
 // ─── DTO ─────────────────────────────────────────────────────────────────────
 
@@ -42,6 +42,9 @@ pub struct AppState {
     pub processes: Mutex<HashMap<Uuid, Child>>,
     /// Stored here so on_startup can emit it once windows are ready.
     pub load_error: Option<String>,
+    /// Wall-clock instant when each instance entered Starting or SwitchingModel,
+    /// keyed by instance id. Consumed once the instance reaches Running.
+    pub start_times: Mutex<HashMap<Uuid, std::time::Instant>>,
 }
 
 impl AppState {
@@ -52,6 +55,7 @@ impl AppState {
             registry: Mutex::new(registry),
             processes: Mutex::new(HashMap::new()),
             load_error: None,
+            start_times: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -161,6 +165,7 @@ fn delete_managed_config_if_present(config: Option<&ServerInstanceConfig>) {
 
 fn record_model_memory_on_running(app: &AppHandle, id: Uuid) {
     let state = app.state::<AppState>();
+    let start_time = state.start_times.lock().unwrap().remove(&id);
     let mut reg = state.registry.lock().unwrap();
     let Some(config) = reg.get_config(id).cloned() else { return };
     let schema = driver_for_type(config.server_type).param_schema();
@@ -172,6 +177,9 @@ fn record_model_memory_on_running(app: &AppHandle, id: Uuid) {
     let memory = reg.get_model_memory(&mem_key).cloned();
     let resolved = ParamValues::resolve(profile.as_ref(), memory.as_ref(), &schema);
     update_model_memory(&mut reg, id, resolved.0).ok();
+    if let Some(t) = start_time {
+        push_restart_duration_sample(&mut reg, id, t.elapsed().as_secs_f64()).ok();
+    }
 }
 
 // ─── Health-poll loop ─────────────────────────────────────────────────────────
@@ -474,6 +482,7 @@ async fn start_instance(state: State<'_, AppState>, app: AppHandle, id: String) 
         reg.set_phase(uuid, InstancePhase::Starting).ok();
     }
     app.emit("phase-changed", uuid.to_string()).ok();
+    app.state::<AppState>().start_times.lock().unwrap().insert(uuid, std::time::Instant::now());
     // launch_instance does blocking network I/O (health checks); run it off the main thread.
     tauri::async_runtime::spawn_blocking(move || launch_instance(app, uuid));
     Ok(())
@@ -555,15 +564,27 @@ async fn switch_model_cmd(
     model_key: String,
 ) -> Result<(), String> {
     let uuid = parse_uuid(&id)?;
-    {
+    let old_key = {
         let mut reg = state.registry.lock().unwrap();
+        let old_key = reg.get_config(uuid).and_then(|c| c.selected_model_key.clone());
         reg.update_config(uuid, |c| c.selected_model_key = Some(model_key))?;
         let server_type = reg.get_config(uuid).unwrap().server_type;
         let driver = driver_for_type(server_type);
         ensure_managed_model(&mut reg, uuid, &*driver)?;
-    }
+        old_key
+    };
     app.emit("config-changed", uuid.to_string()).ok();
-    warm_load_model(&app, uuid).await
+    // Record when the switch begins so its duration can be pushed to ModelMemory.
+    state.start_times.lock().unwrap().insert(uuid, std::time::Instant::now());
+    if let Err(e) = warm_load_model(&app, uuid).await {
+        // Rollback: revert selected_model_key so a future start uses the last known-good model.
+        let mut reg = state.registry.lock().unwrap();
+        reg.update_config(uuid, |c| c.selected_model_key = old_key).ok();
+        reg.save().ok();
+        return Err(e);
+    }
+    record_model_memory_on_running(&app, uuid);
+    Ok(())
 }
 
 #[tauri::command]
@@ -602,6 +623,20 @@ async fn list_models_cmd(state: State<'_, AppState>, id: String) -> Result<Vec<M
     let Some(config) = config else { return Err(format!("instance {id} not found")) };
     tauri::async_runtime::spawn_blocking(move || {
         driver_for_type(config.server_type).list_models(&config)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn fetch_model_metadata_cmd(
+    state: State<'_, AppState>,
+    id: String,
+    model_key: String,
+) -> Result<Option<ModelMetadata>, String> {
+    let uuid = parse_uuid(&id)?;
+    let config = state.registry.lock().unwrap().get_config(uuid)
+        .ok_or_else(|| format!("instance {id} not found"))?.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(driver_for_type(config.server_type).fetch_model_metadata(&model_key, &config))
     }).await.map_err(|e| e.to_string())?
 }
 
@@ -853,7 +888,7 @@ pub fn run() {
             get_start_warning, check_memory_warning, start_instance, stop_instance,
             set_start_on_launch, set_selected_model,
             switch_model_cmd, update_instance_params, set_active_profile_cmd,
-            list_models_cmd, get_resolved_params,
+            list_models_cmd, fetch_model_metadata_cmd, get_resolved_params,
             open_settings, quit_app,
         ])
         .build(tauri::generate_context!())

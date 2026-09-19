@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { InstancePhase, ServerInstanceConfig } from './types'
+import type { InstancePhase, ModelMetadata, ModelRef, ServerInstanceConfig } from './types'
 
 export const ipc = {
   listInstances: (): Promise<ServerInstanceConfig[]> =>
@@ -36,6 +36,15 @@ export const ipc = {
 
   setSelectedModel: (id: string, modelKey: string | null): Promise<void> =>
     invoke('set_selected_model', { id, modelKey }),
+
+  listModels: (id: string): Promise<ModelRef[]> =>
+    invoke('list_models_cmd', { id }),
+
+  switchModel: (id: string, modelKey: string): Promise<void> =>
+    invoke('switch_model_cmd', { id, modelKey }),
+
+  fetchModelMetadata: (id: string, modelKey: string): Promise<ModelMetadata | null> =>
+    invoke('fetch_model_metadata_cmd', { id, modelKey }),
 
   openSettings: (): Promise<void> =>
     invoke('open_settings'),
