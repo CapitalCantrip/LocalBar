@@ -895,6 +895,7 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let tray = TrayIconBuilder::new()
         .icon(icon)
         .icon_as_template(true)
+        .tooltip(concat!("LocalBar v", env!("CARGO_PKG_VERSION")))
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click { button_state, .. } = event {
                 if button_state != tauri::tray::MouseButtonState::Up {
