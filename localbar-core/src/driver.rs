@@ -69,6 +69,12 @@ pub trait ServerDriver: Send + Sync {
         true
     }
 
+    /// True when switching models requires a process restart (stop + relaunch).
+    /// Default: false (e.g. Ollama switches via API without restarting).
+    fn switch_requires_restart(&self) -> bool {
+        false
+    }
+
     /// Returns best-effort metadata for a model. Default: None (C4).
     fn fetch_model_metadata(
         &self,

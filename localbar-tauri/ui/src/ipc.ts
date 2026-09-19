@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { InstancePhase, ModelMetadata, ModelRef, ServerInstanceConfig } from './types'
+import type { InstancePhase, ModelMetadata, ModelRef, ParamValues, ServerInstanceConfig } from './types'
 
 export const ipc = {
   listInstances: (): Promise<ServerInstanceConfig[]> =>
@@ -45,6 +45,12 @@ export const ipc = {
 
   fetchModelMetadata: (id: string, modelKey: string): Promise<ModelMetadata | null> =>
     invoke('fetch_model_metadata_cmd', { id, modelKey }),
+
+  updateInstanceParams: (id: string, params: ParamValues): Promise<void> =>
+    invoke('update_instance_params', { id, params }),
+
+  getResolvedParams: (id: string): Promise<ParamValues> =>
+    invoke('get_resolved_params', { id }),
 
   openSettings: (): Promise<void> =>
     invoke('open_settings'),

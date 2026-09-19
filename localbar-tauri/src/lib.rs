@@ -204,6 +204,25 @@ fn current_phase_is_starting(app: &AppHandle, id: Uuid) -> bool {
     matches!(reg.get_phase(id), Some(InstancePhase::Starting))
 }
 
+fn current_phase_is_switching_model(app: &AppHandle, id: Uuid) -> bool {
+    let state = app.state::<AppState>();
+    let reg = state.registry.lock().unwrap();
+    matches!(reg.get_phase(id), Some(InstancePhase::SwitchingModel))
+}
+
+fn rollback_switch_key(app: &AppHandle, id: Uuid, old_key: &Option<String>) {
+    let state = app.state::<AppState>();
+    let mut reg = state.registry.lock().unwrap();
+    reg.update_config(id, |c| c.selected_model_key = old_key.clone()).ok();
+    reg.save().ok();
+}
+
+fn spawn_for_model_switch(config: &ServerInstanceConfig) -> Result<Child, String> {
+    let driver = driver_for_type(config.server_type);
+    let plan = driver.launch(config, None, &config.instance_params)?;
+    spawn_from_plan(&plan)
+}
+
 async fn check_and_transition_running(app: &AppHandle, id: Uuid) -> bool {
     let app_clone = app.clone();
     let healthy = tauri::async_runtime::spawn_blocking(move || check_health_once(&app_clone, id))
@@ -229,6 +248,51 @@ async fn run_health_poll(app: AppHandle, id: Uuid) {
         if tokio::time::Instant::now() >= deadline {
             set_error_emit(&app, id, InstanceErrorKind::HealthCheckFailed, "startup timed out after 30 s");
             return;
+        }
+    }
+}
+
+async fn run_restart_switch_poll(app: AppHandle, id: Uuid, old_key: Option<String>) {
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        if !current_phase_is_switching_model(&app, id) { return; }
+        if !process_is_alive(&app, id) {
+            rollback_switch_key(&app, id, &old_key);
+            set_error_emit(&app, id, InstanceErrorKind::ModelSwitchFailed, "process exited unexpectedly during model switch");
+            return;
+        }
+        if check_and_transition_running(&app, id).await { return; }
+        if tokio::time::Instant::now() >= deadline {
+            rollback_switch_key(&app, id, &old_key);
+            set_error_emit(&app, id, InstanceErrorKind::HealthCheckFailed, "model switch timed out after 30 s");
+            return;
+        }
+    }
+}
+
+/// Kill the current process and relaunch with the new model key already set in config.
+/// Returns Ok(false) on success (health poll handles memory recording); Err on spawn failure.
+async fn warm_load_model_restart(app: &AppHandle, id: Uuid, old_key: Option<String>) -> Result<bool, String> {
+    let child = app.state::<AppState>().processes.lock().unwrap().remove(&id);
+    let grace = clone_config(app, id)
+        .map(|c| driver_for_type(c.server_type).stop(&c).grace_period_secs)
+        .unwrap_or(0.0);
+    if let Some(child) = child {
+        tauri::async_runtime::spawn_blocking(move || graceful_kill(child, grace))
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    let Some(config) = clone_config(app, id) else { return Ok(false) };
+    match spawn_for_model_switch(&config) {
+        Ok(child) => {
+            app.state::<AppState>().processes.lock().unwrap().insert(id, child);
+            tauri::async_runtime::spawn(run_restart_switch_poll(app.clone(), id, old_key));
+            Ok(false)
+        }
+        Err(e) => {
+            set_error_emit(app, id, InstanceErrorKind::ModelSwitchFailed, &e);
+            Err(e)
         }
     }
 }
@@ -540,18 +604,24 @@ async fn stop_instance(state: State<'_, AppState>, app: AppHandle, id: String) -
 
 // ─── IPC: T8 param tuning + model management ─────────────────────────────────
 
-async fn warm_load_model(app: &AppHandle, id: Uuid) -> Result<(), String> {
-    let Some(config) = clone_config(app, id) else { return Ok(()) };
-    let Some(model_key) = config.selected_model_key.clone() else { return Ok(()) };
+/// Returns Ok(true) when the caller should call record_model_memory_on_running (sync switch).
+/// Returns Ok(false) for a restart switch — the health poll records memory when healthy.
+async fn warm_load_model(app: &AppHandle, id: Uuid, old_key: Option<String>) -> Result<bool, String> {
+    let Some(config) = clone_config(app, id) else { return Ok(true) };
+    let Some(model_key) = config.selected_model_key.clone() else { return Ok(true) };
     let phase = app.state::<AppState>().registry.lock().unwrap().get_phase(id).cloned();
-    if !matches!(phase, Some(InstancePhase::Running)) { return Ok(()) }
+    if !matches!(phase, Some(InstancePhase::Running)) { return Ok(true) }
     set_phase_emit(app, id, InstancePhase::SwitchingModel);
+    let driver = driver_for_type(config.server_type);
+    if driver.switch_requires_restart() {
+        return warm_load_model_restart(app, id, old_key).await;
+    }
     let result = tauri::async_runtime::spawn_blocking(move || {
         let model = ModelRef { key: model_key.clone(), display_name: model_key, size_bytes: None };
-        driver_for_type(config.server_type).switch_model(&model, &config.instance_params, &config)
+        driver.switch_model(&model, &config.instance_params, &config)
     }).await.map_err(|e| e.to_string())?;
     match result {
-        Ok(()) => { set_phase_emit(app, id, InstancePhase::Running); Ok(()) }
+        Ok(()) => { set_phase_emit(app, id, InstancePhase::Running); Ok(true) }
         Err(e) => { set_error_emit(app, id, InstanceErrorKind::ModelSwitchFailed, &e); Err(e) }
     }
 }
@@ -576,15 +646,11 @@ async fn switch_model_cmd(
     app.emit("config-changed", uuid.to_string()).ok();
     // Record when the switch begins so its duration can be pushed to ModelMemory.
     state.start_times.lock().unwrap().insert(uuid, std::time::Instant::now());
-    if let Err(e) = warm_load_model(&app, uuid).await {
-        // Rollback: revert selected_model_key so a future start uses the last known-good model.
-        let mut reg = state.registry.lock().unwrap();
-        reg.update_config(uuid, |c| c.selected_model_key = old_key).ok();
-        reg.save().ok();
-        return Err(e);
+    match warm_load_model(&app, uuid, old_key.clone()).await {
+        Ok(true) => { record_model_memory_on_running(&app, uuid); Ok(()) }
+        Ok(false) => Ok(()),  // restart path: poll records memory when healthy
+        Err(e) => { rollback_switch_key(&app, uuid, &old_key); Err(e) }
     }
-    record_model_memory_on_running(&app, uuid);
-    Ok(())
 }
 
 #[tauri::command]

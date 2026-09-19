@@ -92,13 +92,17 @@ impl ServerDriver for MLXLMDriver {
         Ok(models)
     }
 
+    fn switch_requires_restart(&self) -> bool {
+        true
+    }
+
     fn switch_model(
         &self,
         _model: &ModelRef,
         _params: &ParamValues,
         _config: &ServerInstanceConfig,
     ) -> Result<(), String> {
-        Err("mlx-lm requires a server restart to switch models".to_string())
+        Err("mlx-lm switches models via process restart — call switch_requires_restart first".to_string())
     }
 
     fn fetch_model_metadata(
@@ -335,6 +339,13 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    // ── Driver trait behaviour ────────────────────────────────────────────────
+
+    #[test]
+    fn switch_requires_restart_is_true() {
+        assert!(MLXLMDriver::default().switch_requires_restart());
+    }
 
     // ── Display name derivation ───────────────────────────────────────────────
 

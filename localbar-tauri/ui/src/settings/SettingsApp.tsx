@@ -4,6 +4,7 @@ import {
   type InstancePhase,
   type ModelMetadata,
   type ModelRef,
+  type ParamValues,
   type ServerInstanceConfig,
   isActive,
   phaseColor,
@@ -107,30 +108,55 @@ const s = {
 
 // ─── Add-instance sheet ───────────────────────────────────────────────────────
 
+type ServerTypeOption = 'ollama' | 'mlx-lm'
+
+const DEFAULTS: Record<ServerTypeOption, { port: string; execPath: string; namePlaceholder: string }> = {
+  ollama: { port: '11434', execPath: '/usr/local/bin/ollama', namePlaceholder: 'My Ollama' },
+  'mlx-lm': { port: '8080', execPath: 'uvx', namePlaceholder: 'My mlx-lm' },
+}
+
 function AddInstanceSheet({ onAdd, onCancel }: {
   onAdd: (name: string, serverType: string, port: number, execPath: string) => Promise<void>
   onCancel: () => void
 }) {
   const [name, setName] = useState('')
-  const [port, setPort] = useState('11434')
-  const [execPath, setExecPath] = useState('/usr/local/bin/ollama')
+  const [serverType, setServerType] = useState<ServerTypeOption>('ollama')
+  const [port, setPort] = useState(DEFAULTS.ollama.port)
+  const [execPath, setExecPath] = useState(DEFAULTS.ollama.execPath)
   const [busy, setBusy] = useState(false)
+
+  const selectType = (t: ServerTypeOption) => {
+    setServerType(t)
+    setPort(DEFAULTS[t].port)
+    setExecPath(DEFAULTS[t].execPath)
+  }
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!name.trim() || !execPath.trim()) return
     setBusy(true)
-    try { await onAdd(name.trim(), 'ollama', parseInt(port, 10) || 11434, execPath.trim()) }
+    try { await onAdd(name.trim(), serverType, parseInt(port, 10) || parseInt(DEFAULTS[serverType].port, 10), execPath.trim()) }
     finally { setBusy(false) }
   }
 
   return (
     <div style={s.sheet}>
       <form style={s.sheetBox} onSubmit={submit}>
-        <p style={s.sheetTitle}>Add Ollama Instance</p>
+        <p style={s.sheetTitle}>Add Instance</p>
+        <div style={s.field}>
+          <span style={s.fieldLabel}>Server type</span>
+          <div style={{ display: 'flex', gap: 16, marginTop: 2 }}>
+            {(['ollama', 'mlx-lm'] as const).map(t => (
+              <label key={t} style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', fontSize: 13 }}>
+                <input type="radio" name="serverType" value={t} checked={serverType === t} onChange={() => selectType(t)} />
+                {t}
+              </label>
+            ))}
+          </div>
+        </div>
         <div style={s.field}>
           <label style={s.fieldLabel}>Name</label>
-          <input style={s.input} value={name} onChange={e => setName(e.target.value)} placeholder="My Ollama" autoFocus />
+          <input style={s.input} value={name} onChange={e => setName(e.target.value)} placeholder={DEFAULTS[serverType].namePlaceholder} autoFocus />
         </div>
         <div style={s.field}>
           <label style={s.fieldLabel}>Port</label>
@@ -147,6 +173,84 @@ function AddInstanceSheet({ onAdd, onCancel }: {
           </button>
         </div>
       </form>
+    </div>
+  )
+}
+
+// ─── Param editor ────────────────────────────────────────────────────────────
+
+const PARAM_FIELDS: { key: string; label: string; kind: 'double' | 'int' }[] = [
+  { key: 'temperature', label: 'Temperature', kind: 'double' },
+  { key: 'contextLength', label: 'Context length', kind: 'int' },
+  { key: 'topP', label: 'Top-P', kind: 'double' },
+  { key: 'repeatPenalty', label: 'Repeat penalty', kind: 'double' },
+  { key: 'seed', label: 'Seed', kind: 'int' },
+]
+
+function ParamEditor({ instance, onRefresh }: {
+  instance: ServerInstanceConfig
+  onRefresh: () => void
+}) {
+  const [params, setParams] = useState<ParamValues | null>(null)
+  const [systemPrompt, setSystemPrompt] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    ipc.getResolvedParams(instance.id).then(p => {
+      setParams(p)
+      setSystemPrompt(p.system_prompt ?? '')
+    }).catch(() => {})
+  }, [instance.id])
+
+  const setField = (key: string, raw: string, kind: 'double' | 'int') => {
+    const num = kind === 'int' ? parseInt(raw, 10) : parseFloat(raw)
+    if (raw !== '' && isNaN(num)) return
+    setParams(prev => {
+      if (!prev) return prev
+      const values = { ...prev.values }
+      if (raw === '') { delete values[key] } else { values[key] = { type: kind, value: num } }
+      return { ...prev, values }
+    })
+  }
+
+  const apply = async () => {
+    if (!params) return
+    setBusy(true)
+    try {
+      await ipc.updateInstanceParams(instance.id, { ...params, system_prompt: systemPrompt || null })
+      onRefresh()
+    } finally { setBusy(false) }
+  }
+
+  if (!params) return null
+
+  return (
+    <div style={s.field}>
+      <span style={s.fieldLabel}>Parameters</span>
+      {PARAM_FIELDS.map(f => (
+        <div key={f.key} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+          <label style={{ fontSize: 12, color: '#555', width: 110 }}>{f.label}</label>
+          <input
+            style={{ ...s.input, width: 90 }}
+            type="number"
+            step={f.kind === 'double' ? '0.01' : '1'}
+            value={(params.values[f.key]?.value as number | undefined) ?? ''}
+            onChange={e => setField(f.key, e.target.value, f.kind)}
+          />
+        </div>
+      ))}
+      <div style={{ marginBottom: 4 }}>
+        <label style={{ fontSize: 12, color: '#555' }}>System prompt</label>
+        <textarea
+          style={{ ...s.input, height: 56, marginTop: 4, resize: 'vertical' as const, display: 'block' }}
+          value={systemPrompt}
+          onChange={e => setSystemPrompt(e.target.value)}
+          placeholder="Optional system prompt…"
+        />
+      </div>
+      <button style={s.btn()} onClick={apply} disabled={busy}>
+        {busy ? 'Saving…' : 'Save params'}
+      </button>
     </div>
   )
 }
@@ -305,6 +409,7 @@ function DetailPanel({ instance, phase, onRefresh }: {
           <span style={{ ...s.fieldValue, wordBreak: 'break-all', fontSize: 11 }}>{instance.executable_path}</span>
         </div>
         <ModelList instance={instance} phase={phase} onRefresh={onRefresh} />
+        <ParamEditor instance={instance} onRefresh={onRefresh} />
         <label style={s.checkbox}>
           <input
             type="checkbox"
