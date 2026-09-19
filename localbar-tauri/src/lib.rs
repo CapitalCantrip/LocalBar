@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::process::Child;
 use std::sync::Mutex;
 
-use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+use tauri::{AppHandle, Emitter, Listener, Manager, State, WindowEvent};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use uuid::Uuid;
 
@@ -202,7 +202,54 @@ async fn run_health_poll(app: AppHandle, id: Uuid) {
 // ─── Core launch logic (shared by IPC command + startup) ─────────────────────
 
 fn adopt_running(app: &AppHandle, config: &ServerInstanceConfig) {
+    let was_running = {
+        let state = app.state::<AppState>();
+        let reg = state.registry.lock().unwrap();
+        let result = matches!(reg.get_phase(config.id), Some(InstancePhase::Running));
+        result
+    };
     set_phase_emit(app, config.id, InstancePhase::Running);
+    // Only spawn a health poller on first adoption — re-validation from Start reuses the
+    // existing poller rather than layering a second one on top.
+    if !was_running {
+        tauri::async_runtime::spawn(run_adopted_health_poll(app.clone(), config.id));
+    }
+}
+
+fn adopted_phase_is_active(app: &AppHandle, id: Uuid) -> bool {
+    let state = app.state::<AppState>();
+    let reg = state.registry.lock().unwrap();
+    matches!(reg.get_phase(id), Some(InstancePhase::Running) | Some(InstancePhase::Error(_)))
+}
+
+fn apply_adopted_health_result(app: &AppHandle, id: Uuid, healthy: bool) {
+    let state = app.state::<AppState>();
+    let current_phase = state.registry.lock().unwrap().get_phase(id).cloned();
+    match (healthy, current_phase) {
+        (false, Some(InstancePhase::Running)) => {
+            set_error_emit(app, id, InstanceErrorKind::HealthCheckFailed,
+                "server is no longer reachable");
+        }
+        (true, Some(InstancePhase::Error(_))) => {
+            set_phase_emit(app, id, InstancePhase::Running);
+        }
+        _ => {}
+    }
+}
+
+/// Polls health every 10 s for an externally-adopted (unmanaged) instance.
+/// Transitions to Error if the server becomes unreachable, and re-adopts (Running) if it
+/// comes back. Exits when the phase leaves the Running/Error cycle (e.g. user clicks Stop).
+async fn run_adopted_health_poll(app: AppHandle, id: Uuid) {
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        if !adopted_phase_is_active(&app, id) { return; }
+        let app_clone = app.clone();
+        let healthy = tauri::async_runtime::spawn_blocking(move || check_health_once(&app_clone, id))
+            .await
+            .unwrap_or(false);
+        apply_adopted_health_result(&app, id, healthy);
+    }
 }
 
 /// Returns true and sets PortConflict error if the port is occupied by a foreign process.
@@ -382,11 +429,19 @@ async fn start_instance(state: State<'_, AppState>, app: AppHandle, id: String) 
     let uuid = parse_uuid(&id)?;
     {
         let mut reg = state.registry.lock().unwrap();
+        let is_external = reg.get_config(uuid)
+            .ok_or("instance not found")
+            .map(|c| c.server_type == ServerType::External)?;
         let phase = reg.get_phase(uuid);
-        if matches!(phase, Some(InstancePhase::Starting | InstancePhase::Running | InstancePhase::Stopping)) {
+        // Always skip transitions already in progress.
+        if matches!(phase, Some(InstancePhase::Starting | InstancePhase::Stopping)) {
             return Ok(());
         }
-        reg.get_config(uuid).ok_or("instance not found")?;
+        // For managed instances, Running means the server is up — no action needed.
+        // For External instances, allow re-validation: the unmanaged server may have stopped.
+        if !is_external && matches!(phase, Some(InstancePhase::Running)) {
+            return Ok(());
+        }
         reg.set_phase(uuid, InstancePhase::Starting).ok();
     }
     app.emit("phase-changed", uuid.to_string()).ok();
@@ -429,8 +484,9 @@ async fn stop_instance(state: State<'_, AppState>, app: AppHandle, id: String) -
         .unwrap_or(0.0);
 
     if let Err(e) = do_stop(&app, uuid, child, grace).await {
-        state.registry.lock().unwrap().set_phase(uuid, InstancePhase::Running).ok();
-        app.emit("phase-changed", &id).ok();
+        // Show an error badge so the user knows why Stop didn't work (e.g. adopted server
+        // still running), rather than silently reverting to Running with no indication.
+        set_error_emit(&app, uuid, InstanceErrorKind::StopFailed, &e);
         return Err(e);
     }
 
@@ -446,6 +502,9 @@ async fn stop_instance(state: State<'_, AppState>, app: AppHandle, id: String) -
 
 #[tauri::command]
 fn open_settings(app: AppHandle) {
+    if let Some(popover) = app.get_webview_window("popover") {
+        let _ = popover.hide();
+    }
     if let Some(win) = app.get_webview_window("settings") {
         let _ = win.show();
         let _ = win.set_focus();
@@ -496,14 +555,59 @@ fn on_startup(app: &tauri::App) {
     }
 }
 
+// ─── Tray icon state ─────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq)]
+enum TrayIconState { Idle, Running, Transitioning, Error }
+
+fn icon_bytes(state: TrayIconState) -> &'static [u8] {
+    match state {
+        TrayIconState::Idle          => include_bytes!("../icons/tray-idle.png"),
+        TrayIconState::Running       => include_bytes!("../icons/tray-running.png"),
+        TrayIconState::Transitioning => include_bytes!("../icons/tray-transitioning.png"),
+        TrayIconState::Error         => include_bytes!("../icons/tray-error.png"),
+    }
+}
+
+fn compute_tray_state(app: &AppHandle) -> TrayIconState {
+    let state = app.state::<AppState>();
+    let reg = state.registry.lock().unwrap();
+    let (mut running, mut transitioning, mut error) = (false, false, false);
+    for config in reg.all_configs() {
+        match reg.get_phase(config.id) {
+            Some(InstancePhase::Running)       => running       = true,
+            Some(InstancePhase::Error(_))      => error         = true,
+            Some(InstancePhase::Starting
+               | InstancePhase::Stopping
+               | InstancePhase::SwitchingModel) => transitioning = true,
+            _ => {}
+        }
+    }
+    if error             { TrayIconState::Error }
+    else if transitioning { TrayIconState::Transitioning }
+    else if running       { TrayIconState::Running }
+    else                  { TrayIconState::Idle }
+}
+
+fn sync_tray_icon(app: &AppHandle) {
+    let state = compute_tray_state(app);
+    if let Ok(icon) = tauri::image::Image::from_bytes(icon_bytes(state)) {
+        app.state::<tauri::tray::TrayIcon>().set_icon(Some(icon)).ok();
+    }
+}
+
 // ─── Tray / window wiring ────────────────────────────────────────────────────
 
 fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
-    let icon = app.default_window_icon().expect("no default icon configured").clone();
-    let _tray = TrayIconBuilder::new()
+    let icon = tauri::image::Image::from_bytes(icon_bytes(TrayIconState::Idle))?;
+    let tray = TrayIconBuilder::new()
         .icon(icon)
+        .icon_as_template(true)
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click { .. } = event {
+            if let TrayIconEvent::Click { button_state, .. } = event {
+                if button_state != tauri::tray::MouseButtonState::Up {
+                    return;
+                }
                 let app = tray.app_handle();
                 if let Some(window) = app.get_webview_window("popover") {
                     if window.is_visible().unwrap_or(false) {
@@ -516,8 +620,62 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
             }
         })
         .build(app)?;
+    app.manage(tray);
     Ok(())
 }
+
+fn wire_popover_autohide(app: &tauri::App) {
+    if let Some(popover) = app.get_webview_window("popover") {
+        let win = popover.clone();
+        popover.on_window_event(move |event| {
+            if let WindowEvent::Focused(false) = event {
+                let _ = win.hide();
+            }
+        });
+    }
+}
+
+/// Install a local NSEvent monitor so that ESC and Cmd+W dismiss the popover
+/// regardless of WKWebView's key-event filtering.
+/// Cmd+H is intentionally NOT intercepted: LSUIElement apps have no Dock presence,
+/// so "hide app" is meaningless and the event should pass through unconsumed.
+#[cfg(target_os = "macos")]
+fn install_popover_key_monitor(app: &tauri::App) {
+    use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags};
+    use block2::RcBlock;
+
+    let Some(popover) = app.get_webview_window("popover") else { return };
+
+    // key codes (hardware-layout independent)
+    const KEY_W:   u16 = 13;
+    const KEY_ESC: u16 = 53;
+    const CMD: NSEventModifierFlags = NSEventModifierFlags::Command;
+
+    let block = RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| -> *mut NSEvent {
+        // SAFETY: the pointer comes directly from AppKit and is valid for this call.
+        let ev = unsafe { event.as_ref() };
+        let code = ev.keyCode();
+        let mods = ev.modifierFlags().intersection(CMD);
+        let dismiss = code == KEY_ESC || (mods == CMD && code == KEY_W);
+        if dismiss && popover.is_visible().unwrap_or(false) {
+            let _ = popover.hide();
+            return std::ptr::null_mut(); // consume the event
+        }
+        event.as_ptr()
+    });
+
+    unsafe {
+        // Leak the monitor intentionally: it must live as long as the app.
+        let _monitor = NSEvent::addLocalMonitorForEventsMatchingMask_handler(
+            NSEventMask::KeyDown,
+            &block,
+        );
+        std::mem::forget(_monitor);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_popover_key_monitor(_app: &tauri::App) {}
 
 fn wire_settings_close(app: &tauri::App) {
     if let Some(settings_win) = app.get_webview_window("settings") {
@@ -542,7 +700,18 @@ fn setup_handler(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
     app.manage(state);
     #[cfg(target_os = "macos")]
     app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-    build_tray(app)?;
+    // Propagating Err here would cause Tauri to panic!() inside applicationDidFinishLaunching,
+    // which cannot unwind through ObjC and aborts. Use process::exit for fatal tray failures.
+    if let Err(e) = build_tray(app) {
+        eprintln!("[localbar] fatal: could not create tray icon: {e}");
+        std::process::exit(1);
+    }
+    {
+        let handle = app.handle().clone();
+        app.listen("phase-changed", move |_| sync_tray_icon(&handle));
+    }
+    wire_popover_autohide(app);
+    install_popover_key_monitor(app);
     wire_settings_close(app);
     on_startup(app);
     Ok(())

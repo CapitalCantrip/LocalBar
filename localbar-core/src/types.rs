@@ -261,6 +261,7 @@ pub enum InstanceErrorKind {
     LaunchFailed,
     PortConflict { port: u16 },
     HealthCheckFailed,
+    StopFailed,
     ModelSwitchFailed,
     Unexpected,
 }
