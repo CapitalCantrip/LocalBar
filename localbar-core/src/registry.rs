@@ -1,7 +1,9 @@
+use std::collections::HashMap;
+
 use uuid::Uuid;
 
 use crate::persistence::Persistence;
-use crate::types::{InstancePhase, ServerInstanceConfig};
+use crate::types::{InstancePhase, ModelMemory, ModelMemoryKey, NamedProfile, ParamValues, ServerInstanceConfig};
 
 // ─── InstanceRecord ──────────────────────────────────────────────────────────
 
@@ -14,12 +16,19 @@ pub struct InstanceRecord {
 
 pub struct InstanceRegistry {
     instances: Vec<InstanceRecord>,
+    profiles: Vec<NamedProfile>,
+    model_memory: HashMap<ModelMemoryKey, ModelMemory>,
     persistence: Box<dyn Persistence>,
 }
 
 impl InstanceRegistry {
     pub fn new(persistence: Box<dyn Persistence>) -> Self {
-        Self { instances: Vec::new(), persistence }
+        Self {
+            instances: Vec::new(),
+            profiles: Vec::new(),
+            model_memory: HashMap::new(),
+            persistence,
+        }
     }
 
     pub fn add_instance(&mut self, config: ServerInstanceConfig) -> Uuid {
@@ -97,6 +106,37 @@ impl InstanceRegistry {
             .into_iter()
             .map(|config| InstanceRecord { phase: InstancePhase::Stopped, config })
             .collect();
+        Ok(())
+    }
+
+    /// Load named profiles from the backing store into the in-memory cache.
+    pub fn load_profiles(&mut self) -> Result<(), String> {
+        self.profiles = self.persistence.load_profiles()?;
+        Ok(())
+    }
+
+    /// Load model memory from the backing store into the in-memory cache.
+    pub fn load_model_memory(&mut self) -> Result<(), String> {
+        self.model_memory = self.persistence.load_model_memory()?;
+        Ok(())
+    }
+
+    /// Return the resolved-params layer for the active profile of the given instance, if any.
+    pub fn get_active_profile_params(&self, instance_id: Uuid) -> Option<&ParamValues> {
+        let record = self.instances.iter().find(|r| r.config.id == instance_id)?;
+        let profile_id = record.config.active_profile_id?;
+        self.profiles.iter().find(|p| p.id == profile_id).map(|p| &p.params)
+    }
+
+    /// Return the cached `ModelMemory` for the given key, if any.
+    pub fn get_model_memory(&self, key: &ModelMemoryKey) -> Option<&ModelMemory> {
+        self.model_memory.get(key)
+    }
+
+    /// Persist and cache a model-memory entry.
+    pub fn upsert_model_memory(&mut self, entry: ModelMemory) -> Result<(), String> {
+        self.persistence.upsert_model_memory(entry.clone())?;
+        self.model_memory.insert(entry.key(), entry);
         Ok(())
     }
 

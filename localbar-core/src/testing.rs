@@ -1,4 +1,8 @@
 /// Mock ServerDriver for use in tests. Stateless; returns canned values.
+use std::sync::{Arc, Mutex};
+
+use uuid::Uuid;
+
 use crate::driver::{HealthStatus, LaunchPlan, ServerDriver, ShutdownPlan};
 use crate::types::{
     CanonicalParam, ModelRef, ParamDescriptor, ParamValue, ParamValues, ServerInstanceConfig,
@@ -8,6 +12,10 @@ use crate::types::{
 pub struct MockDriver {
     pub server_type: ServerType,
     pub models: Vec<ModelRef>,
+    /// Captures (tag, content) pairs from `apply_managed_config` calls.
+    pub managed_config_calls: Arc<Mutex<Vec<(String, String)>>>,
+    /// Captures tag strings from `delete_managed_config` calls.
+    pub delete_config_calls: Arc<Mutex<Vec<String>>>,
 }
 
 impl MockDriver {
@@ -26,6 +34,8 @@ impl MockDriver {
                     size_bytes: None,
                 },
             ],
+            managed_config_calls: Arc::new(Mutex::new(Vec::new())),
+            delete_config_calls: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -95,5 +105,51 @@ impl ServerDriver for MockDriver {
 
     fn health_check(&self, _config: &ServerInstanceConfig) -> HealthStatus {
         HealthStatus::Healthy
+    }
+
+    // ── Managed-config methods (Ollama-like behaviour when server_type == Ollama) ──
+
+    fn generate_managed_config(
+        &self,
+        base_key: &str,
+        _params: &ParamValues,
+        _config: &ServerInstanceConfig,
+    ) -> Option<String> {
+        if self.server_type == ServerType::Ollama {
+            Some(format!("FROM {base_key}"))
+        } else {
+            None
+        }
+    }
+
+    fn managed_config_tag(&self, model_key: &str, instance_id: Uuid) -> Option<String> {
+        if self.server_type == ServerType::Ollama {
+            let sanitized = model_key
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+                .collect::<String>();
+            Some(format!("localbar/{sanitized}-{}", &instance_id.to_string()[..8]))
+        } else {
+            None
+        }
+    }
+
+    fn apply_managed_config(
+        &self,
+        _config: &ServerInstanceConfig,
+        tag: &str,
+        content: &str,
+    ) -> Result<(), String> {
+        self.managed_config_calls.lock().unwrap().push((tag.to_string(), content.to_string()));
+        Ok(())
+    }
+
+    fn delete_managed_config(
+        &self,
+        _config: &ServerInstanceConfig,
+        tag: &str,
+    ) -> Result<(), String> {
+        self.delete_config_calls.lock().unwrap().push(tag.to_string());
+        Ok(())
     }
 }

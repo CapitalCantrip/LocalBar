@@ -1,3 +1,5 @@
+use uuid::Uuid;
+
 use crate::driver::{HealthStatus, LaunchPlan, ModelMetadata, ServerDriver, ShutdownPlan};
 use crate::types::{
     CanonicalParam, ModelRef, ParamDescriptor, ParamValue, ParamValues, ServerInstanceConfig,
@@ -97,6 +99,69 @@ impl ServerDriver for OllamaDriver {
     ) -> Option<String> {
         Some(generate_modelfile(&self.param_schema(), base_key, params))
     }
+
+    fn managed_config_tag(&self, model_key: &str, instance_id: Uuid) -> Option<String> {
+        Some(managed_tag(model_key, instance_id))
+    }
+
+    fn apply_managed_config(
+        &self,
+        config: &ServerInstanceConfig,
+        tag: &str,
+        content: &str,
+    ) -> Result<(), String> {
+        let path = std::env::temp_dir()
+            .join(format!("localbar-{}.modelfile", Uuid::new_v4()));
+        std::fs::write(&path, content)
+            .map_err(|e| format!("write temp Modelfile: {e}"))?;
+        let status = std::process::Command::new(&config.executable_path)
+            .args(["create", tag, "-f"])
+            .arg(&path)
+            .status()
+            .map_err(|e| format!("ollama create spawn: {e}"))?;
+        std::fs::remove_file(&path).ok();
+        if status.success() { Ok(()) } else { Err(format!("ollama create {tag} failed")) }
+    }
+
+    fn delete_managed_config(
+        &self,
+        config: &ServerInstanceConfig,
+        tag: &str,
+    ) -> Result<(), String> {
+        std::process::Command::new(&config.executable_path)
+            .args(["rm", tag])
+            .status()
+            .map_err(|e| format!("ollama rm spawn: {e}"))?;
+        Ok(())
+    }
+}
+
+// ─── Managed tag ─────────────────────────────────────────────────────────────
+
+/// Build the managed model tag: `localbar/<sanitised-model-key>-<first-8-chars-of-instance-id>`.
+pub fn managed_tag(model_key: &str, instance_id: Uuid) -> String {
+    let sanitized = sanitize_model_key_for_tag(model_key);
+    let short_id = &instance_id.to_string()[..8];
+    format!("localbar/{sanitized}-{short_id}")
+}
+
+/// Lowercase the key and replace runs of non-alphanumeric characters with a single hyphen.
+fn sanitize_model_key_for_tag(key: &str) -> String {
+    let mut result = String::new();
+    let mut last_was_sep = true; // suppress leading hyphens
+    for ch in key.chars() {
+        if ch.is_ascii_alphanumeric() {
+            result.push(ch.to_ascii_lowercase());
+            last_was_sep = false;
+        } else if !last_was_sep {
+            result.push('-');
+            last_was_sep = true;
+        }
+    }
+    if result.ends_with('-') {
+        result.pop();
+    }
+    result
 }
 
 // ─── HTTP helpers ─────────────────────────────────────────────────────────────
@@ -153,6 +218,45 @@ fn parse_tags_response(json: &serde_json::Value) -> Result<Vec<ModelRef>, String
 fn model_ref_from_json(m: &serde_json::Value) -> Result<ModelRef, String> {
     let key = m["name"].as_str().ok_or("missing model name")?.to_owned();
     Ok(ModelRef { display_name: key.clone(), key, size_bytes: m["size"].as_i64() })
+}
+
+// ─── sanitize_model_key_for_tag tests ────────────────────────────────────────
+
+#[cfg(test)]
+mod tag_tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_simple_name() {
+        assert_eq!(sanitize_model_key_for_tag("llama3"), "llama3");
+    }
+
+    #[test]
+    fn sanitize_colon_becomes_hyphen() {
+        assert_eq!(sanitize_model_key_for_tag("llama3:8b"), "llama3-8b");
+    }
+
+    #[test]
+    fn sanitize_runs_collapsed_to_single_hyphen() {
+        assert_eq!(sanitize_model_key_for_tag("a::b"), "a-b");
+    }
+
+    #[test]
+    fn sanitize_leading_trailing_non_alnum_stripped() {
+        assert_eq!(sanitize_model_key_for_tag(":llama3:"), "llama3");
+    }
+
+    #[test]
+    fn sanitize_uppercase_lowercased() {
+        assert_eq!(sanitize_model_key_for_tag("Llama3:8B"), "llama3-8b");
+    }
+
+    #[test]
+    fn managed_tag_format() {
+        let id = uuid::Uuid::parse_str("12345678-1234-1234-1234-123456789012").unwrap();
+        let tag = managed_tag("llama3:8b", id);
+        assert_eq!(tag, "localbar/llama3-8b-12345678");
+    }
 }
 
 // ─── Seam 3 tests — pure Modelfile generation, no process needed ──────────────

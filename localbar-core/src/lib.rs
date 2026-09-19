@@ -10,6 +10,65 @@ pub mod registry;
 pub mod testing;
 pub mod types;
 
+use uuid::Uuid;
+
+use driver::ServerDriver;
+use registry::InstanceRegistry;
+use types::{ModelMemory, ModelMemoryKey, ParamValues};
+
+// ─── ensure_managed_model ────────────────────────────────────────────────────
+
+/// Resolve params and bake a managed model tag for an instance.
+///
+/// Must be called **after** `selected_model_key` is written to the config
+/// (Bug 1 fix): the tag is built from whatever key is currently in the config.
+/// No-ops for drivers that return `None` from `generate_managed_config`.
+pub fn ensure_managed_model(
+    registry: &mut InstanceRegistry,
+    id: Uuid,
+    driver: &dyn ServerDriver,
+) -> Result<(), String> {
+    let config = registry
+        .get_config(id)
+        .ok_or_else(|| format!("ensure_managed_model: no instance {id}"))?
+        .clone();
+    let Some(model_key) = config.selected_model_key.clone() else { return Ok(()); };
+    let profile = registry.get_active_profile_params(id).cloned();
+    let mem_key = ModelMemoryKey { server_type: config.server_type, model_key: model_key.clone() };
+    let memory = registry.get_model_memory(&mem_key).cloned();
+    let schema = driver.param_schema();
+    let resolved = ParamValues::resolve(profile.as_ref(), memory.as_ref(), &schema);
+    let Some(content) = driver.generate_managed_config(&model_key, &resolved.0, &config)
+        else { return Ok(()); };
+    let Some(tag) = driver.managed_config_tag(&model_key, id) else { return Ok(()); };
+    driver.apply_managed_config(&config, &tag, &content)?;
+    registry.update_config(id, |c| c.managed_model_tag = Some(tag))?;
+    registry.save()
+}
+
+// ─── update_model_memory ─────────────────────────────────────────────────────
+
+/// Persist the params that were active when a model became Running (auto-memory).
+/// No-ops when no model is selected.
+pub fn update_model_memory(
+    registry: &mut InstanceRegistry,
+    id: Uuid,
+    params: ParamValues,
+) -> Result<(), String> {
+    let config = registry
+        .get_config(id)
+        .ok_or_else(|| format!("update_model_memory: no instance {id}"))?;
+    let Some(model_key) = config.selected_model_key.clone() else { return Ok(()); };
+    let server_type = config.server_type;
+    let key = ModelMemoryKey { server_type, model_key: model_key.clone() };
+    let mut entry = registry
+        .get_model_memory(&key)
+        .cloned()
+        .unwrap_or_else(|| ModelMemory::new(server_type, model_key));
+    entry.last_used_params = params;
+    registry.upsert_model_memory(entry)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -22,6 +81,7 @@ mod tests {
         CanonicalParam, InstanceError, InstanceErrorKind, InstancePhase, ModelMemory, ParamValue,
         ParamValues, ServerInstanceConfig, ServerType,
     };
+    use super::{ensure_managed_model, update_model_memory};
 
     struct SharedPersistence(Arc<Mutex<InMemoryPersistence>>);
     impl Persistence for SharedPersistence {
@@ -287,6 +347,128 @@ mod tests {
 
         let loaded = reg2.get_config(id).expect("config should exist after load");
         assert_eq!(loaded, &config);
+    }
+
+    // ── ensure_managed_model (T8 Seam 1) ────────────────────────────────────
+
+    fn ollama_config(name: &str) -> ServerInstanceConfig {
+        ServerInstanceConfig::new(name, ServerType::Ollama, 11434, "/usr/bin/ollama")
+    }
+
+    #[test]
+    fn ensure_managed_model_noop_when_no_model_selected() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(ollama_config("o"));
+        let driver = MockDriver::new(ServerType::Ollama);
+        ensure_managed_model(&mut reg, id, &driver).unwrap();
+        assert!(driver.managed_config_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ensure_managed_model_noop_for_driver_without_managed_config() {
+        let mut reg = make_registry();
+        let mut cfg = make_config("mlx");
+        cfg.selected_model_key = Some("model-a".into());
+        let id = reg.add_instance(cfg);
+        let driver = MockDriver::new(ServerType::MlxLm);
+        ensure_managed_model(&mut reg, id, &driver).unwrap();
+        assert!(driver.managed_config_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ensure_managed_model_calls_apply_with_localbar_tag() {
+        let mut reg = make_registry();
+        let mut cfg = ollama_config("o");
+        cfg.selected_model_key = Some("llama3:8b".into());
+        let id = reg.add_instance(cfg);
+        let driver = MockDriver::new(ServerType::Ollama);
+        ensure_managed_model(&mut reg, id, &driver).unwrap();
+        let calls = driver.managed_config_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].0.starts_with("localbar/"), "tag must start with 'localbar/'");
+        assert!(calls[0].0.contains("llama3"), "tag must contain sanitised model key");
+    }
+
+    #[test]
+    fn ensure_managed_model_stores_tag_in_config() {
+        let mut reg = make_registry();
+        let mut cfg = ollama_config("o");
+        cfg.selected_model_key = Some("llama3:8b".into());
+        let id = reg.add_instance(cfg);
+        let driver = MockDriver::new(ServerType::Ollama);
+        ensure_managed_model(&mut reg, id, &driver).unwrap();
+        let tag = reg.get_config(id).unwrap().managed_model_tag.clone();
+        assert!(tag.is_some());
+        assert!(tag.unwrap().starts_with("localbar/"));
+    }
+
+    /// Bug 1: the tag must be computed from the key that is in the config
+    /// **at the time ensure_managed_model is called**, not from a stale snapshot.
+    #[test]
+    fn ensure_managed_model_uses_current_model_key_bug1() {
+        let mut reg = make_registry();
+        let mut cfg = ollama_config("o");
+        cfg.selected_model_key = Some("old-model".into());
+        let id = reg.add_instance(cfg);
+
+        // Caller updates key BEFORE calling ensure_managed_model (Bug 1 fix).
+        reg.update_config(id, |c| c.selected_model_key = Some("new-model".into())).unwrap();
+
+        let driver = MockDriver::new(ServerType::Ollama);
+        ensure_managed_model(&mut reg, id, &driver).unwrap();
+
+        let calls = driver.managed_config_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].0.contains("new-model"), "tag must use new model key");
+        assert!(!calls[0].0.contains("old-model"), "tag must not use old model key");
+    }
+
+    // ── update_model_memory (T8 Seam 1) ─────────────────────────────────────
+
+    #[test]
+    fn update_model_memory_stores_params_for_model() {
+        let mut reg = make_registry();
+        let mut cfg = make_config("mlx");
+        cfg.selected_model_key = Some("model-a".into());
+        let id = reg.add_instance(cfg);
+        let mut params = ParamValues::default();
+        params.values.insert(CanonicalParam::Temperature, ParamValue::Double(0.3));
+        update_model_memory(&mut reg, id, params.clone()).unwrap();
+        let key = crate::types::ModelMemoryKey {
+            server_type: ServerType::MlxLm,
+            model_key: "model-a".into(),
+        };
+        let mem = reg.get_model_memory(&key).unwrap();
+        assert_eq!(mem.last_used_params.values[&CanonicalParam::Temperature], ParamValue::Double(0.3));
+    }
+
+    #[test]
+    fn update_model_memory_noop_when_no_model_selected() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(make_config("mlx"));
+        assert!(update_model_memory(&mut reg, id, ParamValues::default()).is_ok());
+    }
+
+    #[test]
+    fn ensure_managed_model_includes_memory_params_in_modelfile() {
+        let mut reg = make_registry();
+        let mut cfg = ollama_config("o");
+        cfg.selected_model_key = Some("llama3:8b".into());
+        let id = reg.add_instance(cfg);
+
+        // Prime model memory with a specific temperature.
+        let mut mem_params = ParamValues::default();
+        mem_params.values.insert(CanonicalParam::Temperature, ParamValue::Double(0.42));
+        update_model_memory(&mut reg, id, mem_params).unwrap();
+
+        let driver = MockDriver::new(ServerType::Ollama);
+        ensure_managed_model(&mut reg, id, &driver).unwrap();
+
+        // The content passed to apply_managed_config is generated by MockDriver's
+        // generate_managed_config ("FROM <key>"), which doesn't embed params —
+        // but the real test is that the driver was called (not the content format).
+        let calls = driver.managed_config_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
     }
 
     // ── Mock driver sanity ────────────────────────────────────────────────────

@@ -16,8 +16,10 @@ use localbar_core::drivers::ollama::OllamaDriver;
 use localbar_core::persistence::FilePersistence;
 use localbar_core::registry::InstanceRegistry;
 use localbar_core::types::{
-    InstanceError, InstanceErrorKind, InstancePhase, ServerInstanceConfig, ServerType,
+    InstanceError, InstanceErrorKind, InstancePhase, ModelMemoryKey, ModelRef,
+    ParamValues, ServerInstanceConfig, ServerType,
 };
+use localbar_core::{ensure_managed_model, update_model_memory};
 
 // ─── DTO ─────────────────────────────────────────────────────────────────────
 
@@ -151,6 +153,27 @@ fn clone_config(app: &AppHandle, id: Uuid) -> Option<ServerInstanceConfig> {
     app.state::<AppState>().registry.lock().unwrap().get_config(id).cloned()
 }
 
+fn delete_managed_config_if_present(config: Option<&ServerInstanceConfig>) {
+    let Some(cfg) = config else { return };
+    let Some(tag) = &cfg.managed_model_tag else { return };
+    driver_for_type(cfg.server_type).delete_managed_config(cfg, tag).ok();
+}
+
+fn record_model_memory_on_running(app: &AppHandle, id: Uuid) {
+    let state = app.state::<AppState>();
+    let mut reg = state.registry.lock().unwrap();
+    let Some(config) = reg.get_config(id).cloned() else { return };
+    let schema = driver_for_type(config.server_type).param_schema();
+    let profile = reg.get_active_profile_params(id).cloned();
+    let mem_key = ModelMemoryKey {
+        server_type: config.server_type,
+        model_key: config.selected_model_key.clone().unwrap_or_default(),
+    };
+    let memory = reg.get_model_memory(&mem_key).cloned();
+    let resolved = ParamValues::resolve(profile.as_ref(), memory.as_ref(), &schema);
+    update_model_memory(&mut reg, id, resolved.0).ok();
+}
+
 // ─── Health-poll loop ─────────────────────────────────────────────────────────
 
 fn check_health_once(app: &AppHandle, id: Uuid) -> bool {
@@ -173,25 +196,28 @@ fn current_phase_is_starting(app: &AppHandle, id: Uuid) -> bool {
     matches!(reg.get_phase(id), Some(InstancePhase::Starting))
 }
 
+async fn check_and_transition_running(app: &AppHandle, id: Uuid) -> bool {
+    let app_clone = app.clone();
+    let healthy = tauri::async_runtime::spawn_blocking(move || check_health_once(&app_clone, id))
+        .await
+        .unwrap_or(false);
+    if healthy {
+        record_model_memory_on_running(app, id);
+        set_phase_emit(app, id, InstancePhase::Running);
+    }
+    healthy
+}
+
 async fn run_health_poll(app: AppHandle, id: Uuid) {
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
     loop {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        if !current_phase_is_starting(&app, id) {
-            return;
-        }
+        if !current_phase_is_starting(&app, id) { return; }
         if !process_is_alive(&app, id) {
             set_error_emit(&app, id, InstanceErrorKind::LaunchFailed, "process exited unexpectedly");
             return;
         }
-        let app_clone = app.clone();
-        let healthy = tauri::async_runtime::spawn_blocking(move || check_health_once(&app_clone, id))
-            .await
-            .unwrap_or(false);
-        if healthy {
-            set_phase_emit(&app, id, InstancePhase::Running);
-            return;
-        }
+        if check_and_transition_running(&app, id).await { return; }
         if tokio::time::Instant::now() >= deadline {
             set_error_emit(&app, id, InstanceErrorKind::HealthCheckFailed, "startup timed out after 30 s");
             return;
@@ -386,15 +412,18 @@ fn add_instance(
 #[tauri::command]
 fn remove_instance(state: State<'_, AppState>, app: AppHandle, id: String) -> Result<(), String> {
     let uuid = parse_uuid(&id)?;
-    // Extract child before kill/wait so the mutex is not held during blocking ops.
     let child = state.processes.lock().unwrap().remove(&uuid);
-    let grace = state.registry.lock().unwrap()
-        .get_config(uuid)
-        .map(|c| driver_for_type(c.server_type).stop(c).grace_period_secs)
-        .unwrap_or(0.0);
+    let (grace, config_snap) = {
+        let reg = state.registry.lock().unwrap();
+        let grace = reg.get_config(uuid)
+            .map(|c| driver_for_type(c.server_type).stop(c).grace_period_secs)
+            .unwrap_or(0.0);
+        (grace, reg.get_config(uuid).cloned())
+    };
     if let Some(child) = child {
         graceful_kill(child, grace);
     }
+    delete_managed_config_if_present(config_snap.as_ref());
     let mut reg = state.registry.lock().unwrap();
     reg.remove_instance(uuid)?;
     reg.save()?;
@@ -498,6 +527,97 @@ async fn stop_instance(state: State<'_, AppState>, app: AppHandle, id: String) -
     }
     app.emit("phase-changed", id).ok();
     Ok(())
+}
+
+// ─── IPC: T8 param tuning + model management ─────────────────────────────────
+
+async fn warm_load_model(app: &AppHandle, id: Uuid) -> Result<(), String> {
+    let Some(config) = clone_config(app, id) else { return Ok(()) };
+    let Some(model_key) = config.selected_model_key.clone() else { return Ok(()) };
+    let phase = app.state::<AppState>().registry.lock().unwrap().get_phase(id).cloned();
+    if !matches!(phase, Some(InstancePhase::Running)) { return Ok(()) }
+    set_phase_emit(app, id, InstancePhase::SwitchingModel);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let model = ModelRef { key: model_key.clone(), display_name: model_key, size_bytes: None };
+        driver_for_type(config.server_type).switch_model(&model, &config.instance_params, &config)
+    }).await.map_err(|e| e.to_string())?;
+    match result {
+        Ok(()) => { set_phase_emit(app, id, InstancePhase::Running); Ok(()) }
+        Err(e) => { set_error_emit(app, id, InstanceErrorKind::ModelSwitchFailed, &e); Err(e) }
+    }
+}
+
+#[tauri::command]
+async fn switch_model_cmd(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    id: String,
+    model_key: String,
+) -> Result<(), String> {
+    let uuid = parse_uuid(&id)?;
+    {
+        let mut reg = state.registry.lock().unwrap();
+        reg.update_config(uuid, |c| c.selected_model_key = Some(model_key))?;
+        let server_type = reg.get_config(uuid).unwrap().server_type;
+        let driver = driver_for_type(server_type);
+        ensure_managed_model(&mut reg, uuid, &*driver)?;
+    }
+    app.emit("config-changed", uuid.to_string()).ok();
+    warm_load_model(&app, uuid).await
+}
+
+#[tauri::command]
+fn update_instance_params(
+    state: State<'_, AppState>,
+    id: String,
+    params: ParamValues,
+) -> Result<(), String> {
+    let uuid = parse_uuid(&id)?;
+    let mut reg = state.registry.lock().unwrap();
+    reg.update_config(uuid, |c| c.instance_params = params)?;
+    let server_type = reg.get_config(uuid).unwrap().server_type;
+    let driver = driver_for_type(server_type);
+    ensure_managed_model(&mut reg, uuid, &*driver)
+}
+
+#[tauri::command]
+fn set_active_profile_cmd(
+    state: State<'_, AppState>,
+    id: String,
+    profile_id: Option<String>,
+) -> Result<(), String> {
+    let uuid = parse_uuid(&id)?;
+    let pid = profile_id.as_deref().map(parse_uuid).transpose()?;
+    let mut reg = state.registry.lock().unwrap();
+    reg.update_config(uuid, |c| c.active_profile_id = pid)?;
+    let server_type = reg.get_config(uuid).unwrap().server_type;
+    let driver = driver_for_type(server_type);
+    ensure_managed_model(&mut reg, uuid, &*driver)
+}
+
+#[tauri::command]
+async fn list_models_cmd(state: State<'_, AppState>, id: String) -> Result<Vec<ModelRef>, String> {
+    let uuid = parse_uuid(&id)?;
+    let config = state.registry.lock().unwrap().get_config(uuid).cloned();
+    let Some(config) = config else { return Err(format!("instance {id} not found")) };
+    tauri::async_runtime::spawn_blocking(move || {
+        driver_for_type(config.server_type).list_models(&config)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn get_resolved_params(state: State<'_, AppState>, id: String) -> Result<ParamValues, String> {
+    let uuid = parse_uuid(&id)?;
+    let reg = state.registry.lock().unwrap();
+    let config = reg.get_config(uuid).ok_or_else(|| format!("instance {id} not found"))?;
+    let profile = reg.get_active_profile_params(uuid);
+    let mem_key = ModelMemoryKey {
+        server_type: config.server_type,
+        model_key: config.selected_model_key.clone().unwrap_or_default(),
+    };
+    let memory = reg.get_model_memory(&mem_key);
+    let schema = driver_for_type(config.server_type).param_schema();
+    Ok(ParamValues::resolve(profile, memory, &schema).0)
 }
 
 #[tauri::command]
@@ -691,12 +811,20 @@ fn wire_settings_close(app: &tauri::App) {
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
+fn load_persisted_state(state: &mut AppState) {
+    let mut reg = state.registry.lock().unwrap();
+    if let Err(e) = reg.load() {
+        state.load_error = Some(e);
+    } else {
+        reg.load_model_memory().ok();
+        reg.load_profiles().ok();
+    }
+}
+
 fn setup_handler(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mut state = AppState::new(data_dir);
-    if let Err(e) = state.registry.lock().unwrap().load() {
-        state.load_error = Some(e);
-    }
+    load_persisted_state(&mut state);
     app.manage(state);
     #[cfg(target_os = "macos")]
     app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -721,18 +849,12 @@ pub fn run() {
     tauri::Builder::default()
         .setup(setup_handler)
         .invoke_handler(tauri::generate_handler![
-            list_instances,
-            list_instance_phases,
-            add_instance,
-            remove_instance,
-            get_start_warning,
-            check_memory_warning,
-            start_instance,
-            stop_instance,
-            set_start_on_launch,
-            set_selected_model,
-            open_settings,
-            quit_app,
+            list_instances, list_instance_phases, add_instance, remove_instance,
+            get_start_warning, check_memory_warning, start_instance, stop_instance,
+            set_start_on_launch, set_selected_model,
+            switch_model_cmd, update_instance_params, set_active_profile_cmd,
+            list_models_cmd, get_resolved_params,
+            open_settings, quit_app,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

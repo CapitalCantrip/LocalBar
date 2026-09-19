@@ -1,3 +1,5 @@
+use uuid::Uuid;
+
 use crate::types::{ModelRef, ParamDescriptor, ParamValues, ServerInstanceConfig, ServerType};
 
 // ─── Health ───────────────────────────────────────────────────────────────────
@@ -85,5 +87,32 @@ pub trait ServerDriver: Send + Sync {
         _config: &ServerInstanceConfig,
     ) -> Option<String> {
         None
+    }
+
+    /// Compute the managed config tag for a given model key and instance id.
+    /// Returns None for drivers that don't use managed configs.
+    fn managed_config_tag(&self, _model_key: &str, _instance_id: Uuid) -> Option<String> {
+        None
+    }
+
+    /// Apply (create/update) the managed config artifact on the server.
+    /// Default: no-op (drivers that don't use managed configs do nothing).
+    fn apply_managed_config(
+        &self,
+        _config: &ServerInstanceConfig,
+        _tag: &str,
+        _content: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Delete the managed config artifact from the server.
+    /// Default: no-op. Called when an instance is removed (cleanup).
+    fn delete_managed_config(
+        &self,
+        _config: &ServerInstanceConfig,
+        _tag: &str,
+    ) -> Result<(), String> {
+        Ok(())
     }
 }
