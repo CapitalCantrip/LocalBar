@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::process::Child;
 use std::sync::Mutex;
 
-use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+use tauri::{AppHandle, Emitter, Listener, Manager, State, WindowEvent};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use uuid::Uuid;
 
@@ -446,6 +446,9 @@ async fn stop_instance(state: State<'_, AppState>, app: AppHandle, id: String) -
 
 #[tauri::command]
 fn open_settings(app: AppHandle) {
+    if let Some(popover) = app.get_webview_window("popover") {
+        let _ = popover.hide();
+    }
     if let Some(win) = app.get_webview_window("settings") {
         let _ = win.show();
         let _ = win.set_focus();
@@ -496,14 +499,59 @@ fn on_startup(app: &tauri::App) {
     }
 }
 
+// ─── Tray icon state ─────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq)]
+enum TrayIconState { Idle, Running, Transitioning, Error }
+
+fn icon_bytes(state: TrayIconState) -> &'static [u8] {
+    match state {
+        TrayIconState::Idle          => include_bytes!("../icons/tray-idle.png"),
+        TrayIconState::Running       => include_bytes!("../icons/tray-running.png"),
+        TrayIconState::Transitioning => include_bytes!("../icons/tray-transitioning.png"),
+        TrayIconState::Error         => include_bytes!("../icons/tray-error.png"),
+    }
+}
+
+fn compute_tray_state(app: &AppHandle) -> TrayIconState {
+    let state = app.state::<AppState>();
+    let reg = state.registry.lock().unwrap();
+    let (mut running, mut transitioning, mut error) = (false, false, false);
+    for config in reg.all_configs() {
+        match reg.get_phase(config.id) {
+            Some(InstancePhase::Running)       => running       = true,
+            Some(InstancePhase::Error(_))      => error         = true,
+            Some(InstancePhase::Starting
+               | InstancePhase::Stopping
+               | InstancePhase::SwitchingModel) => transitioning = true,
+            _ => {}
+        }
+    }
+    if error             { TrayIconState::Error }
+    else if transitioning { TrayIconState::Transitioning }
+    else if running       { TrayIconState::Running }
+    else                  { TrayIconState::Idle }
+}
+
+fn sync_tray_icon(app: &AppHandle) {
+    let state = compute_tray_state(app);
+    if let Ok(icon) = tauri::image::Image::from_bytes(icon_bytes(state)) {
+        app.state::<tauri::tray::TrayIcon>().set_icon(Some(icon)).ok();
+    }
+}
+
 // ─── Tray / window wiring ────────────────────────────────────────────────────
 
 fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
-    let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
+    let icon = tauri::image::Image::from_bytes(icon_bytes(TrayIconState::Idle))?;
     let tray = TrayIconBuilder::new()
         .icon(icon)
+        .icon_as_template(true)
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click { .. } = event {
+            if let TrayIconEvent::Click { button_state, .. } = event {
+                if button_state != tauri::tray::MouseButtonState::Up {
+                    return;
+                }
                 let app = tray.app_handle();
                 if let Some(window) = app.get_webview_window("popover") {
                     if window.is_visible().unwrap_or(false) {
@@ -516,11 +564,62 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
             }
         })
         .build(app)?;
-    // TrayIcon removes itself from the status bar on drop; leak intentionally so it
-    // lives for the duration of the process.
-    std::mem::forget(tray);
+    app.manage(tray);
     Ok(())
 }
+
+fn wire_popover_autohide(app: &tauri::App) {
+    if let Some(popover) = app.get_webview_window("popover") {
+        let win = popover.clone();
+        popover.on_window_event(move |event| {
+            if let WindowEvent::Focused(false) = event {
+                let _ = win.hide();
+            }
+        });
+    }
+}
+
+/// Install a local NSEvent monitor so that ESC and Cmd+W dismiss the popover
+/// regardless of WKWebView's key-event filtering.
+/// Cmd+H is intentionally NOT intercepted: LSUIElement apps have no Dock presence,
+/// so "hide app" is meaningless and the event should pass through unconsumed.
+#[cfg(target_os = "macos")]
+fn install_popover_key_monitor(app: &tauri::App) {
+    use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags};
+    use block2::RcBlock;
+
+    let Some(popover) = app.get_webview_window("popover") else { return };
+
+    // key codes (hardware-layout independent)
+    const KEY_W:   u16 = 13;
+    const KEY_ESC: u16 = 53;
+    const CMD: NSEventModifierFlags = NSEventModifierFlags::Command;
+
+    let block = RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| -> *mut NSEvent {
+        // SAFETY: the pointer comes directly from AppKit and is valid for this call.
+        let ev = unsafe { event.as_ref() };
+        let code = ev.keyCode();
+        let mods = ev.modifierFlags().intersection(CMD);
+        let dismiss = code == KEY_ESC || (mods == CMD && code == KEY_W);
+        if dismiss && popover.is_visible().unwrap_or(false) {
+            let _ = popover.hide();
+            return std::ptr::null_mut(); // consume the event
+        }
+        event.as_ptr()
+    });
+
+    unsafe {
+        // Leak the monitor intentionally: it must live as long as the app.
+        let _monitor = NSEvent::addLocalMonitorForEventsMatchingMask_handler(
+            NSEventMask::KeyDown,
+            &*block,
+        );
+        std::mem::forget(_monitor);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_popover_key_monitor(_app: &tauri::App) {}
 
 fn wire_settings_close(app: &tauri::App) {
     if let Some(settings_win) = app.get_webview_window("settings") {
@@ -551,6 +650,12 @@ fn setup_handler(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
         eprintln!("[localbar] fatal: could not create tray icon: {e}");
         std::process::exit(1);
     }
+    {
+        let handle = app.handle().clone();
+        app.listen("phase-changed", move |_| sync_tray_icon(&handle));
+    }
+    wire_popover_autohide(app);
+    install_popover_key_monitor(app);
     wire_settings_close(app);
     on_startup(app);
     Ok(())
