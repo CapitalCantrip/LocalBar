@@ -203,6 +203,50 @@ async fn run_health_poll(app: AppHandle, id: Uuid) {
 
 fn adopt_running(app: &AppHandle, config: &ServerInstanceConfig) {
     set_phase_emit(app, config.id, InstancePhase::Running);
+    // Adopted instances have no process to watch, so spin up a health poller so the
+    // phase self-corrects if the external server goes down.
+    tauri::async_runtime::spawn(run_adopted_health_poll(app.clone(), config.id));
+}
+
+/// Polls health every 10 s for an externally-adopted (unmanaged) instance.
+/// Transitions to Error if the server becomes unreachable, and re-adopts (Running) if it
+/// comes back. Exits when the phase leaves the Running/Error cycle (e.g. user clicks Stop).
+async fn run_adopted_health_poll(app: AppHandle, id: Uuid) {
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+
+        // Stop polling once the instance is no longer in a state we manage here.
+        {
+            let state = app.state::<AppState>();
+            let reg = state.registry.lock().unwrap();
+            match reg.get_phase(id) {
+                Some(InstancePhase::Running) | Some(InstancePhase::Error(_)) => {}
+                _ => return,
+            }
+        }
+
+        let app_clone = app.clone();
+        let healthy = tauri::async_runtime::spawn_blocking(move || check_health_once(&app_clone, id))
+            .await
+            .unwrap_or(false);
+
+        {
+            let state = app.state::<AppState>();
+            let reg = state.registry.lock().unwrap();
+            let current_phase = reg.get_phase(id).cloned();
+            drop(reg);
+            match (healthy, current_phase) {
+                (false, Some(InstancePhase::Running)) => {
+                    set_error_emit(&app, id, InstanceErrorKind::HealthCheckFailed,
+                        "server is no longer reachable");
+                }
+                (true, Some(InstancePhase::Error(_))) => {
+                    set_phase_emit(&app, id, InstancePhase::Running);
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Returns true and sets PortConflict error if the port is occupied by a foreign process.
@@ -429,8 +473,9 @@ async fn stop_instance(state: State<'_, AppState>, app: AppHandle, id: String) -
         .unwrap_or(0.0);
 
     if let Err(e) = do_stop(&app, uuid, child, grace).await {
-        state.registry.lock().unwrap().set_phase(uuid, InstancePhase::Running).ok();
-        app.emit("phase-changed", &id).ok();
+        // Show an error badge so the user knows why Stop didn't work (e.g. adopted server
+        // still running), rather than silently reverting to Running with no indication.
+        set_error_emit(&app, uuid, InstanceErrorKind::StopFailed, &e);
         return Err(e);
     }
 
