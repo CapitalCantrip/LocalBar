@@ -514,9 +514,12 @@ function fmtDate(secs: number | null): string {
   return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
 }
 
-function hfLink(serverType: string, key: string): { href: string; label: string } {
-  if (serverType === 'mlx-lm') return { href: `https://huggingface.co/${key}`, label: 'HuggingFace ↗' }
-  const name = key.split(':')[0]
+function hfLink(m: DiscoveredModel): { href: string; label: string } {
+  if (m.server_type === 'mlx-lm') {
+    const slug = m.publisher ? `${m.publisher}/${m.display_name}` : m.key.split('/').slice(-2).join('/')
+    return { href: `https://huggingface.co/${slug}`, label: 'HuggingFace ↗' }
+  }
+  const name = m.key.split(':')[0]
   return { href: `https://huggingface.co/models?search=${encodeURIComponent(name)}`, label: 'Search HF ↗' }
 }
 
@@ -573,7 +576,7 @@ function DiscoveredModelsSection() {
             <span style={colHdr} />
           </div>
           {rows.map(m => {
-            const link = hfLink(m.server_type, m.key)
+            const link = hfLink(m)
             const paramsQuant = [m.parameter_count, m.quantization].filter(Boolean).join(' · ') || '—'
             return (
               <div key={m.key} style={{ ...colGrid, borderBottom: '1px solid #f0f0f0' }}>
