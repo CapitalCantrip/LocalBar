@@ -48,6 +48,9 @@ export const ipc = {
   listModels: (id: string): Promise<ModelRef[]> =>
     invoke('list_models_cmd', { id }),
 
+  listModelsForType: (serverType: string): Promise<ModelRef[]> =>
+    invoke('list_models_for_type', { serverType }),
+
   switchModel: (id: string, modelKey: string): Promise<void> =>
     invoke('switch_model_cmd', { id, modelKey }),
 

@@ -106,6 +106,74 @@ const s = {
   refreshNote: { fontSize: 11, color: '#aaa', fontStyle: 'italic' as const },
 }
 
+// ─── Add-instance model picker ───────────────────────────────────────────────
+
+function AddModelPicker({ serverType, selectedModelKey, onSelect }: {
+  serverType: ServerTypeOption
+  selectedModelKey: string | null
+  onSelect: (key: string | null) => void
+}) {
+  const [models, setModels] = useState<ModelRef[] | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [scanError, setScanError] = useState<string | null>(null)
+  const scanRef = useRef(0)
+
+  useEffect(() => {
+    if (serverType !== 'mlx-lm') { setModels(null); setScanError(null); return }
+    const seq = ++scanRef.current
+    setLoading(true)
+    setModels(null)
+    setScanError(null)
+    ipc.listModelsForType('mlx-lm')
+      .then(list => { if (seq === scanRef.current) { setModels(list); setLoading(false) } })
+      .catch(e => { if (seq === scanRef.current) { setScanError(String(e)); setLoading(false) } })
+  }, [serverType])
+
+  if (serverType !== 'mlx-lm') return null
+
+  if (loading) return (
+    <div style={s.field}>
+      <span style={s.fieldLabel}>Model</span>
+      <span style={{ ...s.fieldValue, color: '#aaa', fontSize: 11 }}>Scanning…</span>
+    </div>
+  )
+
+  if (scanError) return (
+    <div style={s.field}>
+      <span style={s.fieldLabel}>Model</span>
+      <span style={{ ...s.fieldValue, color: '#ef4444', fontSize: 11 }}>Scan failed: {scanError}</span>
+    </div>
+  )
+
+  if (models !== null && models.length === 0) return (
+    <div style={s.field}>
+      <span style={s.fieldLabel}>Model</span>
+      <span style={{ ...s.fieldValue, color: '#aaa', fontSize: 11 }}>
+        No models found — configure model paths in Settings → Discovery.
+      </span>
+    </div>
+  )
+
+  if (!models) return null
+
+  return (
+    <div style={s.field}>
+      <span style={s.fieldLabel}>Model</span>
+      <div style={s.modelList}>
+        {models.map(m => (
+          <div
+            key={m.key}
+            style={s.modelRow(m.key === selectedModelKey)}
+            onClick={() => onSelect(m.key === selectedModelKey ? null : m.key)}
+          >
+            <span style={s.modelName} title={m.key}>{m.display_name}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 // ─── Add-instance sheet ───────────────────────────────────────────────────────
 
 type ServerTypeOption = 'ollama' | 'mlx-lm' | 'external'
@@ -117,27 +185,30 @@ const DEFAULTS: Record<ServerTypeOption, { port: string; execPath: string; nameP
 }
 
 function AddInstanceSheet({ onAdd, onCancel }: {
-  onAdd: (name: string, serverType: string, port: number, execPath: string) => Promise<void>
+  onAdd: (name: string, serverType: string, port: number, execPath: string, selectedModelKey: string | null) => Promise<void>
   onCancel: () => void
 }) {
   const [name, setName] = useState('')
   const [serverType, setServerType] = useState<ServerTypeOption>('ollama')
   const [port, setPort] = useState(DEFAULTS.ollama.port)
   const [execPath, setExecPath] = useState(DEFAULTS.ollama.execPath)
+  const [selectedModelKey, setSelectedModelKey] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
   const selectType = (t: ServerTypeOption) => {
     setServerType(t)
     setPort(DEFAULTS[t].port)
     setExecPath(DEFAULTS[t].execPath)
+    setSelectedModelKey(null)
   }
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!name.trim() || (serverType !== 'external' && !execPath.trim())) return
     setBusy(true)
-    try { await onAdd(name.trim(), serverType, parseInt(port, 10) || parseInt(DEFAULTS[serverType].port, 10), execPath.trim()) }
-    finally { setBusy(false) }
+    try {
+      await onAdd(name.trim(), serverType, parseInt(port, 10) || parseInt(DEFAULTS[serverType].port, 10), execPath.trim(), selectedModelKey)
+    } finally { setBusy(false) }
   }
 
   return (
@@ -169,6 +240,7 @@ function AddInstanceSheet({ onAdd, onCancel }: {
             <input style={s.input} value={execPath} onChange={e => setExecPath(e.target.value)} />
           </div>
         )}
+        <AddModelPicker serverType={serverType} selectedModelKey={selectedModelKey} onSelect={setSelectedModelKey} />
         <div style={s.sheetBtns}>
           <button type="button" style={s.btn()} onClick={onCancel}>Cancel</button>
           <button type="submit" style={s.primaryBtn} disabled={busy || !name.trim()}>
@@ -406,7 +478,11 @@ function DetailPanel({ instance, phase, onRefresh }: {
             <button style={s.btn()} onClick={handleStop}>Stop</button>
           )}
           {!active && !transitioning && (
-            <button style={s.primaryBtn} onClick={handleStart}>Start</button>
+            <button
+              style={s.primaryBtn}
+              onClick={handleStart}
+              disabled={instance.server_type === 'mlx-lm' && instance.selected_model_key === null}
+            >Start</button>
           )}
         </div>
         <div style={s.field}>
@@ -447,8 +523,13 @@ export default function SettingsApp() {
   const { instances, phases, refresh } = useInstances(clearSelected)
   const [showAddSheet, setShowAddSheet] = useState(false)
 
-  const handleAdd = async (name: string, serverType: string, port: number, execPath: string) => {
+  const handleAdd = async (name: string, serverType: string, port: number, execPath: string, selectedModelKey: string | null) => {
     const id = await ipc.addInstance(name, serverType, port, execPath)
+    try {
+      if (selectedModelKey) await ipc.setSelectedModel(id, selectedModelKey)
+    } catch {
+      // Instance created; model selection failed. Continue — user can pick in the detail panel.
+    }
     setShowAddSheet(false)
     await refresh()
     setSelectedId(id)

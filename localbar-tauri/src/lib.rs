@@ -754,6 +754,15 @@ fn set_active_profile_cmd(
 }
 
 #[tauri::command]
+async fn list_models_for_type(server_type: String) -> Result<Vec<ModelRef>, String> {
+    let stype = parse_server_type(&server_type)?;
+    let probe = ServerInstanceConfig::new("probe", stype, 0, "");
+    tauri::async_runtime::spawn_blocking(move || driver_for_type(probe.server_type).list_models(&probe))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn list_models_cmd(state: State<'_, AppState>, id: String) -> Result<Vec<ModelRef>, String> {
     let uuid = parse_uuid(&id)?;
     let config = state.registry.lock().unwrap().get_config(uuid).cloned();
@@ -1086,7 +1095,7 @@ pub fn run() {
             get_start_warning, check_memory_warning, start_instance, stop_instance,
             set_start_on_launch, set_selected_model,
             switch_model_cmd, update_instance_params, set_active_profile_cmd,
-            list_models_cmd, fetch_model_metadata_cmd, get_resolved_params, get_param_schema,
+            list_models_cmd, list_models_for_type, fetch_model_metadata_cmd, get_resolved_params, get_param_schema,
             adopt_as_external_instance,
             open_settings, quit_app,
         ])
