@@ -12,7 +12,7 @@ use uuid::Uuid;
 use localbar_core::driver::{HealthStatus, ModelMetadata, ServerDriver};
 use localbar_core::drivers::external::ExternalDriver;
 use localbar_core::drivers::mlx_lm::MLXLMDriver;
-use localbar_core::drivers::ollama::OllamaDriver;
+use localbar_core::drivers::ollama::{self, OllamaDriver};
 use localbar_core::persistence::FilePersistence;
 use localbar_core::registry::InstanceRegistry;
 use localbar_core::types::{
@@ -771,17 +771,34 @@ fn set_active_profile_cmd(
     ensure_managed_model(&mut reg, uuid, &*driver)
 }
 
+fn list_non_ollama_models(stype: ServerType, discovery: &DiscoveryConfig) -> Result<Vec<ModelRef>, String> {
+    let probe = ServerInstanceConfig::new("probe", stype, 0, "");
+    let driver: Box<dyn ServerDriver> = match stype {
+        ServerType::MlxLm => mlx_driver_with_paths(discovery.mlx_lm_search_paths.clone()),
+        _ => driver_for_type(stype),
+    };
+    driver.list_models(&probe)
+}
+
+/// Try Ollama HTTP first, then CLI. Returns `Err("OLLAMA_UNREACHABLE")` when
+/// both fail — the UI uses this sentinel to show a free-text model entry field.
+fn list_ollama_models_with_fallback(discovery: &DiscoveryConfig) -> Result<Vec<ModelRef>, String> {
+    let probe = ServerInstanceConfig::new("probe", ServerType::Ollama, 11434, "");
+    if let Ok(models) = driver_for_type(ServerType::Ollama).list_models(&probe) {
+        return Ok(models);
+    }
+    let raw_exe = discovery.ollama_executable_path.as_deref().unwrap_or("");
+    let exe = if raw_exe.is_empty() { "ollama" } else { raw_exe };
+    ollama::list_models_cli(exe).map_err(|_| "OLLAMA_UNREACHABLE".to_string())
+}
+
 #[tauri::command]
 async fn list_models_for_type(state: State<'_, AppState>, server_type: String) -> Result<Vec<ModelRef>, String> {
     let stype = parse_server_type(&server_type)?;
     let discovery = state.registry.lock().unwrap().get_discovery_config().clone();
-    let probe = ServerInstanceConfig::new("probe", stype, 0, "");
-    tauri::async_runtime::spawn_blocking(move || {
-        let driver: Box<dyn ServerDriver> = match stype {
-            ServerType::MlxLm => mlx_driver_with_paths(discovery.mlx_lm_search_paths),
-            _ => driver_for_type(stype),
-        };
-        driver.list_models(&probe)
+    tauri::async_runtime::spawn_blocking(move || match stype {
+        ServerType::Ollama => list_ollama_models_with_fallback(&discovery),
+        _ => list_non_ollama_models(stype, &discovery),
     })
     .await
     .map_err(|e| e.to_string())?

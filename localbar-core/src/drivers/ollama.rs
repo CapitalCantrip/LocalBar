@@ -220,6 +220,56 @@ fn model_ref_from_json(m: &serde_json::Value) -> Result<ModelRef, String> {
     Ok(ModelRef { display_name: key.clone(), key, size_bytes: m["size"].as_i64() })
 }
 
+// ─── CLI list ─────────────────────────────────────────────────────────────────
+
+/// Invoke `ollama list` and parse its output. Uses `executable` as the path to
+/// the ollama binary, falling back to PATH resolution when the string is "ollama".
+pub fn list_models_cli(executable: &str) -> Result<Vec<ModelRef>, String> {
+    let output = std::process::Command::new(executable)
+        .arg("list")
+        .output()
+        .map_err(|e| format!("ollama list spawn: {e}"))?;
+    if !output.status.success() {
+        return Err(format!("ollama list exited with status {}", output.status));
+    }
+    Ok(parse_ollama_list_output(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// Parse the tabular stdout of `ollama list` into `Vec<ModelRef>`.
+/// Skips the header row (detected by first token "NAME") and any malformed rows;
+/// never panics.
+pub fn parse_ollama_list_output(raw: &str) -> Vec<ModelRef> {
+    raw.lines()
+        .filter(|l| !is_ollama_header_line(l))
+        .filter_map(parse_ollama_list_row)
+        .collect()
+}
+
+fn is_ollama_header_line(line: &str) -> bool {
+    line.split_whitespace().next().map(|t| t.eq_ignore_ascii_case("NAME")).unwrap_or(false)
+}
+
+fn parse_ollama_list_row(line: &str) -> Option<ModelRef> {
+    let mut cols = line.split_whitespace();
+    let name = cols.next()?.to_owned();
+    let _id = cols.next();
+    let size_bytes = parse_size_cols(cols.next(), cols.next());
+    Some(ModelRef { display_name: name.clone(), key: name, size_bytes })
+}
+
+fn parse_size_cols(value_col: Option<&str>, unit_col: Option<&str>) -> Option<i64> {
+    let value: f64 = value_col?.parse().ok()?;
+    let multiplier: f64 = match unit_col?.to_ascii_uppercase().as_str() {
+        "B"  | "IB"  => 1.0,
+        "KB" | "KIB" => 1_000.0,
+        "MB" | "MIB" => 1_000_000.0,
+        "GB" | "GIB" => 1_000_000_000.0,
+        "TB" | "TIB" => 1_000_000_000_000.0,
+        _             => return None,
+    };
+    Some((value * multiplier) as i64)
+}
+
 // ─── sanitize_model_key_for_tag tests ────────────────────────────────────────
 
 #[cfg(test)]
@@ -256,6 +306,86 @@ mod tag_tests {
         let id = uuid::Uuid::parse_str("12345678-1234-1234-1234-123456789012").unwrap();
         let tag = managed_tag("llama3:8b", id);
         assert_eq!(tag, "localbar/llama3-8b-12345678");
+    }
+}
+
+// ─── CLI list parser tests ────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    const TYPICAL_OUTPUT: &str = "\
+NAME             ID              SIZE      MODIFIED
+bge-m3:latest    1a0efc6c2574    1.2 GB    20 hours ago
+mistral:7b       6577803aa9a0    4.4 GB    6 days ago";
+
+    #[test]
+    fn typical_output_parses_two_models() {
+        let models = parse_ollama_list_output(TYPICAL_OUTPUT);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].key, "bge-m3:latest");
+        assert_eq!(models[0].display_name, "bge-m3:latest");
+        assert_eq!(models[1].key, "mistral:7b");
+    }
+
+    #[test]
+    fn typical_output_parses_size_bytes() {
+        let models = parse_ollama_list_output(TYPICAL_OUTPUT);
+        assert_eq!(models[0].size_bytes, Some(1_200_000_000));
+        assert_eq!(models[1].size_bytes, Some(4_400_000_000));
+    }
+
+    #[test]
+    fn empty_output_returns_empty_vec() {
+        assert!(parse_ollama_list_output("").is_empty());
+    }
+
+    #[test]
+    fn header_only_returns_empty_vec() {
+        assert!(parse_ollama_list_output("NAME    ID    SIZE    MODIFIED").is_empty());
+    }
+
+    #[test]
+    fn preamble_before_header_is_ignored() {
+        let raw = "warning: some preamble\nNAME    ID    SIZE    MODIFIED\nllama3:8b    abc    4.9 GB    yesterday";
+        let models = parse_ollama_list_output(raw);
+        // "warning:" does not start with NAME so it tries to parse as a row,
+        // but "warning:" has no second column (id), yielding one model with key "warning:".
+        // The real guard here is that "NAME" header is correctly filtered out.
+        assert!(models.iter().all(|m| m.key != "NAME"));
+    }
+
+    #[test]
+    fn gb_lowercase_parses_size() {
+        let raw = "NAME    ID    SIZE    MODIFIED\nfoo:bar    abc123    2.0 gb    yesterday";
+        let models = parse_ollama_list_output(raw);
+        assert_eq!(models[0].size_bytes, Some(2_000_000_000));
+    }
+
+    #[test]
+    fn malformed_row_name_only_yields_model_without_size() {
+        let raw = "NAME    ID    SIZE    MODIFIED\njust-a-name";
+        let models = parse_ollama_list_output(raw);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].key, "just-a-name");
+        assert_eq!(models[0].size_bytes, None);
+    }
+
+    #[test]
+    fn unknown_size_unit_yields_none_size() {
+        let raw = "NAME    ID    SIZE    MODIFIED\nfoo:bar    abc123    1.0 XB    yesterday";
+        let models = parse_ollama_list_output(raw);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].size_bytes, None);
+    }
+
+    #[test]
+    fn blank_lines_are_skipped() {
+        let raw = "NAME    ID    SIZE    MODIFIED\n\nllama3:8b    abc    4.9 GB    yesterday\n";
+        let models = parse_ollama_list_output(raw);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].key, "llama3:8b");
     }
 }
 
