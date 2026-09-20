@@ -718,7 +718,7 @@ async fn warm_load_model(app: &AppHandle, id: Uuid, old_key: Option<String>) -> 
         return warm_load_model_restart(app, id, old_key).await;
     }
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let model = ModelRef { key: model_key.clone(), display_name: model_key, publisher: None, size_bytes: None };
+        let model = ModelRef { key: model_key.clone(), display_name: model_key, publisher: None, architecture: None, modified_secs: None, size_bytes: None };
         driver.switch_model(&model, &config.instance_params, &config)
     }).await.map_err(|e| e.to_string())?;
     match result {
@@ -824,9 +824,11 @@ struct DiscoveredModel {
     key: String,
     display_name: String,
     publisher: Option<String>,
+    architecture: Option<String>,
     parameter_count: Option<String>,
     quantization: Option<String>,
     size_bytes: Option<i64>,
+    modified_secs: Option<i64>,
 }
 
 fn model_to_discovered(stype: &str, m: ModelRef, meta: Option<ModelMetadata>) -> DiscoveredModel {
@@ -835,9 +837,11 @@ fn model_to_discovered(stype: &str, m: ModelRef, meta: Option<ModelMetadata>) ->
         key: m.key,
         display_name: m.display_name,
         publisher: m.publisher,
+        architecture: m.architecture,
         parameter_count: meta.as_ref().and_then(|md| md.parameter_count.clone()),
         quantization: meta.as_ref().and_then(|md| md.quantization.clone()),
         size_bytes: m.size_bytes,
+        modified_secs: m.modified_secs,
     }
 }
 
@@ -850,8 +854,12 @@ fn discover_mlx_models(discovery: &DiscoveryConfig) -> Vec<DiscoveredModel> {
     }).collect()
 }
 
-fn discover_ollama_models(discovery: &DiscoveryConfig) -> Vec<DiscoveredModel> {
-    list_ollama_models_with_fallback(discovery)
+fn discover_ollama_models(_discovery: &DiscoveryConfig) -> Vec<DiscoveredModel> {
+    // HTTP-only: no CLI fallback here. Spawning `ollama list` activates the
+    // Ollama.app on macOS via launch services and steals window focus.
+    let probe = ServerInstanceConfig::new("probe", ServerType::Ollama, 11434, "");
+    driver_for_type(ServerType::Ollama)
+        .list_models(&probe)
         .unwrap_or_default()
         .into_iter()
         .map(|m| model_to_discovered("ollama", m, None))
