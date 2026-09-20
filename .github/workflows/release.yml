@@ -59,6 +59,10 @@ jobs:
         working-directory: localbar-tauri/ui
         run: npm ci
 
+      - name: Build frontend
+        working-directory: localbar-tauri/ui
+        run: npm run build
+
       - name: Sync tauri.conf.json version from Cargo.toml
         run: |
           VERSION=$(grep '^version = ' localbar-tauri/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
@@ -118,6 +122,10 @@ jobs:
         working-directory: localbar-tauri/ui
         run: npm ci
 
+      - name: Build frontend
+        working-directory: localbar-tauri/ui
+        run: npm run build
+
       - name: Sync tauri.conf.json version from Cargo.toml
         run: |
           VERSION=$(grep '^version = ' localbar-tauri/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
@@ -170,6 +178,10 @@ jobs:
       - name: Install frontend dependencies
         working-directory: localbar-tauri/ui
         run: npm ci
+
+      - name: Build frontend
+        working-directory: localbar-tauri/ui
+        run: npm run build
 
       - name: Sync tauri.conf.json version from Cargo.toml
         run: |
