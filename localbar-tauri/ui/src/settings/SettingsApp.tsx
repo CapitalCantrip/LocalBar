@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ipc, type ParamSchemaEntry } from '../ipc'
 import {
+  type DiscoveredModel,
   type DiscoveryConfig,
   type InstancePhase,
   type ModelMetadata,
@@ -464,6 +465,87 @@ function ModelPathOverrideField({ instance, onRefresh }: {
   )
 }
 
+// ─── Discovered models section ────────────────────────────────────────────────
+
+function fmtBytes(b: number | null): string {
+  if (b === null) return '—'
+  if (b >= 1e9) return `${(b / 1e9).toFixed(1)} GB`
+  if (b >= 1e6) return `${(b / 1e6).toFixed(0)} MB`
+  if (b >= 1e3) return `${(b / 1e3).toFixed(0)} KB`
+  return `${b} B`
+}
+
+function hfLink(serverType: string, key: string): { href: string; label: string } {
+  if (serverType === 'mlx-lm') return { href: `https://huggingface.co/${key}`, label: 'HuggingFace ↗' }
+  const name = key.split(':')[0]
+  return { href: `https://huggingface.co/models?search=${encodeURIComponent(name)}`, label: 'Search HF ↗' }
+}
+
+function DiscoveredModelsSection() {
+  const [models, setModels] = useState<DiscoveredModel[] | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const seqRef = useRef(0)
+
+  const scan = useCallback(async () => {
+    const seq = ++seqRef.current
+    setLoading(true)
+    setError(null)
+    try {
+      const list = await ipc.listAllDiscoveredModels()
+      if (seq === seqRef.current) setModels(list)
+    } catch (e) {
+      if (seq === seqRef.current) setError(String(e))
+    } finally {
+      if (seq === seqRef.current) setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { void scan() }, [scan])
+
+  const grouped = (models ?? []).reduce<Record<string, DiscoveredModel[]>>((acc, m) => {
+    ;(acc[m.server_type] ??= []).push(m)
+    return acc
+  }, {})
+
+  return (
+    <div style={s.field}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span style={s.fieldLabel}>Discovered Models</span>
+        {loading && <span style={s.refreshNote}>scanning…</span>}
+        {!loading && (
+          <button style={{ ...s.btn(), padding: '1px 6px', fontSize: 11 }} onClick={() => void scan()}>↺</button>
+        )}
+      </div>
+      {error && <span style={{ fontSize: 11, color: '#ef4444' }}>{error}</span>}
+      {models !== null && models.length === 0 && !loading && (
+        <span style={{ fontSize: 11, color: '#aaa' }}>No models found</span>
+      )}
+      {Object.entries(grouped).map(([stype, rows]) => (
+        <div key={stype} style={{ marginTop: 8 }}>
+          <span style={{ ...s.fieldLabel, marginBottom: 4, display: 'block' }}>{stype}</span>
+          {rows.map(m => {
+            const link = hfLink(m.server_type, m.key)
+            const meta = [m.parameter_count, m.quantization].filter(Boolean).join(' · ') || null
+            return (
+              <div key={m.key} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', borderBottom: '1px solid #f0f0f0' }}>
+                <span style={{ flex: 1, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }} title={m.key}>
+                  {m.display_name}
+                </span>
+                {meta && <span style={s.modelMeta}>{meta}</span>}
+                <span style={s.modelMeta}>{fmtBytes(m.size_bytes)}</span>
+                <a href={link.href} target="_blank" rel="noreferrer" style={{ fontSize: 11, color: '#1d4ed8', textDecoration: 'none', flexShrink: 0 }}>
+                  {link.label}
+                </a>
+              </div>
+            )
+          })}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 // ─── Discovery tab ────────────────────────────────────────────────────────────
 
 function MlxPathList({ paths, onRemove, busy }: {
@@ -492,17 +574,21 @@ function MlxPathList({ paths, onRemove, busy }: {
 
 function DiscoveryTab() {
   const [config, setConfig] = useState<DiscoveryConfig | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [newPath, setNewPath] = useState('')
   const [ollamaExe, setOllamaExe] = useState('')
   const [busy, setBusy] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
 
-  useEffect(() => {
+  const loadConfig = () => {
+    setLoadError(null)
     ipc.getDiscoveryConfig().then(c => {
       setConfig(c)
       setOllamaExe(c.ollama_executable_path ?? '')
-    }).catch(() => {})
-  }, [])
+    }).catch(e => setLoadError(String(e)))
+  }
+
+  useEffect(() => { loadConfig() }, [])
 
   const persist = async (updated: DiscoveryConfig): Promise<boolean> => {
     setBusy(true)
@@ -527,6 +613,13 @@ function DiscoveryTab() {
     if (!config) return
     await persist({ ...config, ollama_executable_path: ollamaExe.trim() || null })
   }
+
+  if (loadError) return (
+    <div style={{ padding: '14px 18px', display: 'flex', flexDirection: 'column' as const, gap: 8 }}>
+      <span style={{ fontSize: 12, color: '#ef4444' }}>Failed to load discovery config: {loadError}</span>
+      <button style={s.btn()} onClick={loadConfig}>Retry</button>
+    </div>
+  )
 
   if (!config) return <p style={s.placeholder}>Loading…</p>
 
@@ -559,6 +652,7 @@ function DiscoveryTab() {
           <button style={s.btn()} onClick={() => void saveOllamaExe()} disabled={busy}>Save</button>
         </div>
       </div>
+      <DiscoveredModelsSection />
     </div>
   )
 }

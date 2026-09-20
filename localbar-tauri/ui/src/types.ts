@@ -45,6 +45,15 @@ export interface DiscoveryConfig {
   ollama_executable_path: string | null
 }
 
+export interface DiscoveredModel {
+  server_type: string
+  key: string
+  display_name: string
+  parameter_count: string | null
+  quantization: string | null
+  size_bytes: number | null
+}
+
 export type InstancePhase =
   | { type: 'stopped' }
   | { type: 'starting' }

@@ -816,6 +816,60 @@ async fn list_models_for_type(state: State<'_, AppState>, server_type: String) -
     .map_err(|e| e.to_string())?
 }
 
+// ─── IPC: discovered models ───────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+struct DiscoveredModel {
+    server_type: String,
+    key: String,
+    display_name: String,
+    parameter_count: Option<String>,
+    quantization: Option<String>,
+    size_bytes: Option<i64>,
+}
+
+fn model_to_discovered(stype: &str, m: ModelRef, meta: Option<ModelMetadata>) -> DiscoveredModel {
+    DiscoveredModel {
+        server_type: stype.to_string(),
+        key: m.key,
+        display_name: m.display_name,
+        parameter_count: meta.as_ref().and_then(|md| md.parameter_count.clone()),
+        quantization: meta.as_ref().and_then(|md| md.quantization.clone()),
+        size_bytes: m.size_bytes,
+    }
+}
+
+fn discover_mlx_models(discovery: &DiscoveryConfig) -> Vec<DiscoveredModel> {
+    let driver = mlx_driver_with_paths(discovery.mlx_lm_search_paths.clone());
+    let probe = ServerInstanceConfig::new("probe", ServerType::MlxLm, 0, "");
+    driver.list_models(&probe).unwrap_or_default().into_iter().map(|m| {
+        let meta = driver.fetch_model_metadata(&m.key, &probe);
+        model_to_discovered("mlx-lm", m, meta)
+    }).collect()
+}
+
+fn discover_ollama_models(discovery: &DiscoveryConfig) -> Vec<DiscoveredModel> {
+    list_ollama_models_with_fallback(discovery)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| model_to_discovered("ollama", m, None))
+        .collect()
+}
+
+fn discover_all_models(discovery: &DiscoveryConfig) -> Vec<DiscoveredModel> {
+    let mut result = discover_mlx_models(discovery);
+    result.extend(discover_ollama_models(discovery));
+    result
+}
+
+#[tauri::command]
+async fn list_all_discovered_models(state: State<'_, AppState>) -> Result<Vec<DiscoveredModel>, String> {
+    let discovery = state.registry.lock().unwrap().get_discovery_config().clone();
+    tauri::async_runtime::spawn_blocking(move || discover_all_models(&discovery))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn get_discovery_config(state: State<'_, AppState>) -> DiscoveryConfig {
     state.registry.lock().unwrap().get_discovery_config().clone()
@@ -1168,6 +1222,7 @@ pub fn run() {
             set_start_on_launch, set_selected_model,
             switch_model_cmd, update_instance_params, set_active_profile_cmd,
             list_models_cmd, list_models_for_type, fetch_model_metadata_cmd, get_resolved_params, get_param_schema,
+            list_all_discovered_models,
             get_discovery_config, set_discovery_config, set_model_search_path_override,
             adopt_as_external_instance,
             open_settings, quit_app,

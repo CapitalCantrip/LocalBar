@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { DiscoveryConfig, InstancePhase, ModelMetadata, ModelRef, ParamValues, ServerInstanceConfig } from './types'
+import type { DiscoveredModel, DiscoveryConfig, InstancePhase, ModelMetadata, ModelRef, ParamValues, ServerInstanceConfig } from './types'
 
 export interface ParamSchemaEntry {
   key: string
@@ -65,6 +65,9 @@ export const ipc = {
 
   getParamSchema: (serverType: string): Promise<ParamSchemaEntry[]> =>
     invoke('get_param_schema', { serverType }),
+
+  listAllDiscoveredModels: (): Promise<DiscoveredModel[]> =>
+    invoke('list_all_discovered_models'),
 
   getDiscoveryConfig: (): Promise<DiscoveryConfig> =>
     invoke('get_discovery_config'),
