@@ -830,7 +830,10 @@ fn open_settings(app: AppHandle) {
         let _ = popover.hide();
     }
     #[cfg(target_os = "macos")]
-    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    {
+        let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+        set_dock_icon();
+    }
     if let Some(win) = app.get_webview_window("settings") {
         let _ = win.show();
         let _ = win.set_focus();
