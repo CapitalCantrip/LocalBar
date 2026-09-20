@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ipc, type ParamSchemaEntry } from '../ipc'
 import {
+  type DiscoveryConfig,
   type InstancePhase,
   type ModelMetadata,
   type ModelRef,
@@ -418,6 +419,150 @@ function ModelList({ instance, phase, onRefresh }: {
   )
 }
 
+// ─── Model path override field ────────────────────────────────────────────────
+
+function ModelPathOverrideField({ instance, onRefresh }: {
+  instance: ServerInstanceConfig
+  onRefresh: () => void
+}) {
+  const [value, setValue] = useState(instance.model_search_path_override ?? '')
+  const [busy, setBusy] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+
+  useEffect(() => {
+    setValue(instance.model_search_path_override ?? '')
+  }, [instance.id, instance.model_search_path_override])
+
+  const save = async () => {
+    setBusy(true)
+    setSaveError(null)
+    try {
+      await ipc.setModelSearchPathOverride(instance.id, value.trim() || null)
+      onRefresh()
+    } catch (e) {
+      setSaveError(String(e))
+    } finally { setBusy(false) }
+  }
+
+  return (
+    <div style={s.field}>
+      <span style={s.fieldLabel}>Model path override</span>
+      <div style={{ display: 'flex', gap: 6 }}>
+        <input
+          style={{ ...s.input, flex: 1 }}
+          value={value}
+          onChange={e => setValue(e.target.value)}
+          placeholder="Optional — overrides global search paths"
+        />
+        <button style={s.btn()} onClick={() => void save()} disabled={busy}>Save</button>
+      </div>
+      {saveError && <span style={{ fontSize: 11, color: '#ef4444' }}>{saveError}</span>}
+      {!saveError && !value.trim() && (
+        <span style={{ fontSize: 11, color: '#aaa' }}>Using global discovery paths</span>
+      )}
+    </div>
+  )
+}
+
+// ─── Discovery tab ────────────────────────────────────────────────────────────
+
+function MlxPathList({ paths, onRemove, busy }: {
+  paths: string[]
+  onRemove: (i: number) => void
+  busy: boolean
+}) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 4 }}>
+      {paths.length === 0 && (
+        <span style={{ fontSize: 11, color: '#aaa' }}>HF cache default (~/.cache/huggingface/hub)</span>
+      )}
+      {paths.map((p, i) => (
+        <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ flex: 1, fontSize: 11, wordBreak: 'break-all' as const }}>{p}</span>
+          <button
+            style={{ ...s.btn(true), padding: '2px 8px', fontSize: 11 }}
+            onClick={() => onRemove(i)}
+            disabled={busy}
+          >✕</button>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function DiscoveryTab() {
+  const [config, setConfig] = useState<DiscoveryConfig | null>(null)
+  const [newPath, setNewPath] = useState('')
+  const [ollamaExe, setOllamaExe] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+
+  useEffect(() => {
+    ipc.getDiscoveryConfig().then(c => {
+      setConfig(c)
+      setOllamaExe(c.ollama_executable_path ?? '')
+    }).catch(() => {})
+  }, [])
+
+  const persist = async (updated: DiscoveryConfig): Promise<boolean> => {
+    setBusy(true)
+    setSaveError(null)
+    try { await ipc.setDiscoveryConfig(updated); setConfig(updated); return true }
+    catch (e) { setSaveError(String(e)); return false }
+    finally { setBusy(false) }
+  }
+
+  const addPath = async () => {
+    if (!config || !newPath.trim()) return
+    const ok = await persist({ ...config, mlx_lm_search_paths: [...config.mlx_lm_search_paths, newPath.trim()] })
+    if (ok) setNewPath('')
+  }
+
+  const removePath = async (i: number) => {
+    if (!config) return
+    await persist({ ...config, mlx_lm_search_paths: config.mlx_lm_search_paths.filter((_, idx) => idx !== i) })
+  }
+
+  const saveOllamaExe = async () => {
+    if (!config) return
+    await persist({ ...config, ollama_executable_path: ollamaExe.trim() || null })
+  }
+
+  if (!config) return <p style={s.placeholder}>Loading…</p>
+
+  return (
+    <div style={{ padding: '14px 18px', display: 'flex', flexDirection: 'column' as const, gap: 20 }}>
+      {saveError && <span style={{ fontSize: 11, color: '#ef4444' }}>{saveError}</span>}
+      <div style={s.field}>
+        <span style={s.fieldLabel}>mlx-lm — Model search directories</span>
+        <MlxPathList paths={config.mlx_lm_search_paths} onRemove={i => void removePath(i)} busy={busy} />
+        <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+          <input
+            style={{ ...s.input, flex: 1 }}
+            value={newPath}
+            onChange={e => setNewPath(e.target.value)}
+            placeholder="/path/to/models"
+            onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); void addPath() } }}
+          />
+          <button style={s.btn()} onClick={() => void addPath()} disabled={busy || !newPath.trim()}>Add</button>
+        </div>
+      </div>
+      <div style={s.field}>
+        <span style={s.fieldLabel}>Ollama — Executable path</span>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <input
+            style={{ ...s.input, flex: 1 }}
+            value={ollamaExe}
+            onChange={e => setOllamaExe(e.target.value)}
+            placeholder="ollama (uses system PATH)"
+          />
+          <button style={s.btn()} onClick={() => void saveOllamaExe()} disabled={busy}>Save</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Detail panel ─────────────────────────────────────────────────────────────
 
 function DetailPanel({ instance, phase, onRefresh }: {
@@ -497,6 +642,9 @@ function DetailPanel({ instance, phase, onRefresh }: {
           <span style={s.fieldLabel}>Executable</span>
           <span style={{ ...s.fieldValue, wordBreak: 'break-all', fontSize: 11 }}>{instance.executable_path}</span>
         </div>
+        {instance.server_type === 'mlx-lm' && (
+          <ModelPathOverrideField instance={instance} onRefresh={onRefresh} />
+        )}
         <ModelList instance={instance} phase={phase} onRefresh={onRefresh} />
         <ParamEditor instance={instance} onRefresh={onRefresh} />
         <label style={s.checkbox}>
@@ -517,7 +665,10 @@ function DetailPanel({ instance, phase, onRefresh }: {
 
 // ─── SettingsApp ──────────────────────────────────────────────────────────────
 
+type SettingsTab = 'servers' | 'discovery'
+
 export default function SettingsApp() {
+  const [activeTab, setActiveTab] = useState<SettingsTab>('servers')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const clearSelected = useCallback(() => setSelectedId(null), [])
   const { instances, phases, refresh } = useInstances(clearSelected)
@@ -543,40 +694,45 @@ export default function SettingsApp() {
         <AddInstanceSheet onAdd={handleAdd} onCancel={() => setShowAddSheet(false)} />
       )}
       <div style={s.toolbar}>
-        <button style={s.tabBtn(true)}>Servers</button>
+        <button style={s.tabBtn(activeTab === 'servers')} onClick={() => setActiveTab('servers')}>Servers</button>
+        <button style={s.tabBtn(activeTab === 'discovery')} onClick={() => setActiveTab('discovery')}>Discovery</button>
       </div>
-      <div style={s.body}>
-        <div style={s.masterPane}>
-          <div style={s.masterHeader}>
-            <span style={{ fontWeight: 600, fontSize: 12, color: '#444' }}>Instances</span>
-            <button style={s.addBtn} onClick={() => setShowAddSheet(true)}>+ Add</button>
+      {activeTab === 'discovery' ? (
+        <DiscoveryTab />
+      ) : (
+        <div style={s.body}>
+          <div style={s.masterPane}>
+            <div style={s.masterHeader}>
+              <span style={{ fontWeight: 600, fontSize: 12, color: '#444' }}>Instances</span>
+              <button style={s.addBtn} onClick={() => setShowAddSheet(true)}>+ Add</button>
+            </div>
+            <div style={s.masterList}>
+              {instances.length === 0 && (
+                <p style={s.placeholder}>No servers configured</p>
+              )}
+              {instances.map(inst => (
+                <div
+                  key={inst.id}
+                  style={s.masterRow(inst.id === selectedId)}
+                  onClick={() => setSelectedId(inst.id)}
+                >
+                  <div style={s.dot(phaseColor(phases[inst.id]))} />
+                  <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {inst.name}
+                  </span>
+                </div>
+              ))}
+            </div>
           </div>
-          <div style={s.masterList}>
-            {instances.length === 0 && (
-              <p style={s.placeholder}>No servers configured</p>
+          <div style={s.detailPane}>
+            {selected ? (
+              <DetailPanel instance={selected} phase={phases[selected.id]} onRefresh={refresh} />
+            ) : (
+              <p style={s.placeholder}>Select a server to configure it</p>
             )}
-            {instances.map(inst => (
-              <div
-                key={inst.id}
-                style={s.masterRow(inst.id === selectedId)}
-                onClick={() => setSelectedId(inst.id)}
-              >
-                <div style={s.dot(phaseColor(phases[inst.id]))} />
-                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {inst.name}
-                </span>
-              </div>
-            ))}
           </div>
         </div>
-        <div style={s.detailPane}>
-          {selected ? (
-            <DetailPanel instance={selected} phase={phases[selected.id]} onRefresh={refresh} />
-          ) : (
-            <p style={s.placeholder}>Select a server to configure it</p>
-          )}
-        </div>
-      </div>
+      )}
     </div>
   )
 }

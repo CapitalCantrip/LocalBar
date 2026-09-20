@@ -37,6 +37,12 @@ export interface ServerInstanceConfig {
   managed_model_tag: string | null
   start_on_launch: boolean
   was_running_when_quit: boolean
+  model_search_path_override: string | null
+}
+
+export interface DiscoveryConfig {
+  mlx_lm_search_paths: string[]
+  ollama_executable_path: string | null
 }
 
 export type InstancePhase =

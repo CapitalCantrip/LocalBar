@@ -612,6 +612,18 @@ fn set_selected_model(
     reg.save()
 }
 
+#[tauri::command]
+fn set_model_search_path_override(
+    state: State<'_, AppState>,
+    id: String,
+    path: Option<String>,
+) -> Result<(), String> {
+    let uuid = parse_uuid(&id)?;
+    let mut reg = state.registry.lock().unwrap();
+    reg.update_config(uuid, |c| c.model_search_path_override = path)?;
+    reg.save()
+}
+
 // ─── IPC: lifecycle ───────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -1156,7 +1168,7 @@ pub fn run() {
             set_start_on_launch, set_selected_model,
             switch_model_cmd, update_instance_params, set_active_profile_cmd,
             list_models_cmd, list_models_for_type, fetch_model_metadata_cmd, get_resolved_params, get_param_schema,
-            get_discovery_config, set_discovery_config,
+            get_discovery_config, set_discovery_config, set_model_search_path_override,
             adopt_as_external_instance,
             open_settings, quit_app,
         ])
