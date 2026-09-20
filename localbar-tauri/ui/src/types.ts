@@ -6,6 +6,7 @@ export type ServerType = 'mlx-lm' | 'ollama' | 'external'
 export interface ModelRef {
   key: string
   display_name: string
+  publisher: string | null
   size_bytes: number | null
 }
 
@@ -49,6 +50,7 @@ export interface DiscoveredModel {
   server_type: string
   key: string
   display_name: string
+  publisher: string | null
   parameter_count: string | null
   quantization: string | null
   size_bytes: number | null

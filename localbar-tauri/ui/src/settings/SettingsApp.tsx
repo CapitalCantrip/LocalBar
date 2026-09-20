@@ -199,6 +199,7 @@ function AddModelPicker({ serverType, selectedModelKey, onSelect }: {
             style={s.modelRow(m.key === selectedModelKey)}
             onClick={() => onSelect(m.key === selectedModelKey ? null : m.key)}
           >
+            {m.publisher && <span style={{ ...s.modelMeta, marginRight: 4 }}>{m.publisher}</span>}
             <span style={s.modelName} title={m.key}>{m.display_name}</span>
           </div>
         ))}
@@ -442,6 +443,7 @@ function ModelList({ instance, phase, onRefresh }: {
             style={s.modelRow(m.key === instance.selected_model_key)}
             onClick={() => handleSelect(m.key)}
           >
+            {m.publisher && <span style={{ ...s.modelMeta, marginRight: 4 }}>{m.publisher}</span>}
             <span style={s.modelName} title={m.key}>{m.display_name}</span>
             {metaLabel(m.key) && <span style={s.modelMeta}>{metaLabel(m.key)}</span>}
           </div>
@@ -560,6 +562,11 @@ function DiscoveredModelsSection() {
             const meta = [m.parameter_count, m.quantization].filter(Boolean).join(' · ') || null
             return (
               <div key={m.key} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', borderBottom: '1px solid #f0f0f0' }}>
+                {m.publisher && (
+                  <span style={{ ...s.modelMeta, width: 90, flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }} title={m.publisher}>
+                    {m.publisher}
+                  </span>
+                )}
                 <span style={{ flex: 1, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }} title={m.key}>
                   {m.display_name}
                 </span>

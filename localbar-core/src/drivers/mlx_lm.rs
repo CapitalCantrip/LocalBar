@@ -89,7 +89,7 @@ impl ServerDriver for MLXLMDriver {
         for root in &search_paths {
             let p = Path::new(root);
             scan_hf_root(p, &mut models, &mut seen_keys);
-            scan_flat_root(p, &mut models, &mut seen_keys);
+            scan_flat_recursive(p, "", 3, &mut models, &mut seen_keys);
         }
         Ok(models)
     }
@@ -155,6 +155,37 @@ fn append_param_arg(flag: &str, value: &ParamValue, args: &mut Vec<String>) {
 
 // ─── List-models helper ───────────────────────────────────────────────────────
 
+fn push_model(
+    key: &str,
+    display_name: &str,
+    publisher: Option<&str>,
+    models: &mut Vec<ModelRef>,
+    seen_keys: &mut std::collections::HashSet<String>,
+) {
+    if seen_keys.contains(key) { return; }
+    seen_keys.insert(key.to_string());
+    models.push(ModelRef {
+        key: key.to_string(),
+        display_name: display_name.to_string(),
+        publisher: publisher.map(str::to_owned),
+        size_bytes: None,
+    });
+}
+
+/// Splits `"org/model"` or `"category/org/model"` into `(model_name, publisher)`.
+/// Publisher is the second-to-last path component; absent when there is only one.
+fn split_display_publisher(rel: &str) -> (&str, Option<&str>) {
+    match rel.rfind('/') {
+        Some(pos) => {
+            let model_name = &rel[pos + 1..];
+            let parent = &rel[..pos];
+            let publisher = parent.split('/').next_back();
+            (model_name, publisher)
+        }
+        None => (rel, None),
+    }
+}
+
 fn scan_hf_root(
     root_path: &Path,
     models: &mut Vec<ModelRef>,
@@ -172,44 +203,42 @@ fn scan_hf_root(
         let Some(snapshot_dir) = canonical_snapshot(&model_dir, &snapshots_dir) else { continue };
         if !snapshot_dir.join("config.json").exists() { continue; }
         let model_key = hf_dir_to_model_key(&dir_name_str);
-        if seen_keys.contains(&model_key) { continue; }
-        seen_keys.insert(model_key.clone());
-        models.push(ModelRef { display_name: model_key.clone(), key: model_key, size_bytes: None });
+        let (display, publisher) = split_display_publisher(&model_key);
+        push_model(&model_key, display, publisher, models, seen_keys);
     }
 }
 
-/// Scans a flat `<root>/<org>/<model>/config.json` layout (e.g. ~/SharedModels/mlx-community/gemma-4/).
-fn scan_flat_root(
-    root_path: &Path,
+/// Recursively scans for flat-layout models up to `depth` levels from `dir`.
+/// key   = absolute path to the model dir (used as --model arg for mlx-lm)
+/// display_name = path relative to the search root (human-readable)
+/// Stops recursing into a dir once it finds config.json (treats it as a leaf).
+/// Skips HF-cache dirs (models--*) and hidden dirs (.*).
+fn scan_flat_recursive(
+    dir: &Path,
+    rel: &str,
+    depth: u8,
     models: &mut Vec<ModelRef>,
     seen_keys: &mut std::collections::HashSet<String>,
 ) {
-    if !root_path.is_dir() { return; }
-    let Ok(org_entries) = fs::read_dir(root_path) else { return };
-    for org_entry in org_entries.flatten() {
-        let org_path = org_entry.path();
-        let org_name = org_entry.file_name();
-        let org_str = org_name.to_string_lossy();
-        if !org_path.is_dir() || org_str.starts_with("models--") { continue; }
-        scan_flat_org(&org_path, &org_str, models, seen_keys);
+    if !dir.is_dir() { return; }
+    if !rel.is_empty() && dir.join("config.json").exists() {
+        let (display, publisher) = split_display_publisher(rel);
+        push_model(&dir.to_string_lossy(), display, publisher, models, seen_keys);
+        return;
     }
-}
-
-fn scan_flat_org(
-    org_path: &Path,
-    org_name: &str,
-    models: &mut Vec<ModelRef>,
-    seen_keys: &mut std::collections::HashSet<String>,
-) {
-    let Ok(model_entries) = fs::read_dir(org_path) else { return };
-    for model_entry in model_entries.flatten() {
-        let model_path = model_entry.path();
-        if !model_path.is_dir() { continue; }
-        if !model_path.join("config.json").exists() { continue; }
-        let model_key = format!("{}/{}", org_name, model_entry.file_name().to_string_lossy());
-        if seen_keys.contains(&model_key) { continue; }
-        seen_keys.insert(model_key.clone());
-        models.push(ModelRef { display_name: model_key.clone(), key: model_key, size_bytes: None });
+    if depth == 0 { return; }
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with("models--") || name_str.starts_with('.') { continue; }
+        if !entry.path().is_dir() { continue; }
+        let child_rel = if rel.is_empty() {
+            name_str.into_owned()
+        } else {
+            format!("{}/{}", rel, name_str)
+        };
+        scan_flat_recursive(&entry.path(), &child_rel, depth - 1, models, seen_keys);
     }
 }
 
@@ -253,14 +282,10 @@ pub fn canonical_snapshot(model_dir: &Path, snapshots_dir: &Path) -> Option<Path
 }
 
 fn effective_search_paths(configured: &[String]) -> Vec<String> {
-    let mut paths = configured.to_vec();
-    let hf_default = hf_cache_default();
-    if let Some(default) = hf_default {
-        if !paths.contains(&default) {
-            paths.push(default);
-        }
+    if !configured.is_empty() {
+        return configured.to_vec();
     }
-    paths
+    hf_cache_default().into_iter().collect()
 }
 
 /// Returns `$HF_HOME` if set, or `$HOME/.cache/huggingface/hub` if HOME is set,
@@ -284,12 +309,13 @@ fn hf_config_json(root: &Path, hf_dir_name: &str) -> Option<PathBuf> {
 }
 
 fn locate_config_json(model_key: &str, search_paths: &[String]) -> Option<PathBuf> {
+    if Path::new(model_key).is_absolute() {
+        let p = Path::new(model_key).join("config.json");
+        return p.exists().then_some(p);
+    }
     let hf_dir_name = format!("models--{}", model_key.replace('/', "--"));
     for root in effective_search_paths(search_paths) {
-        let root_path = Path::new(&root);
-        if let Some(p) = hf_config_json(root_path, &hf_dir_name) { return Some(p); }
-        let flat = root_path.join(model_key).join("config.json");
-        if flat.exists() { return Some(flat); }
+        if let Some(p) = hf_config_json(Path::new(&root), &hf_dir_name) { return Some(p); }
     }
     None
 }
@@ -471,35 +497,41 @@ mod tests {
         let models = driver.list_models(&config).unwrap();
         assert_eq!(models.len(), 1, "two snapshots must yield one model entry");
         assert_eq!(models[0].key, "mlx-community/Qwen2.5-7B-Instruct-4bit");
-        assert_eq!(models[0].display_name, "mlx-community/Qwen2.5-7B-Instruct-4bit");
+        assert_eq!(models[0].display_name, "Qwen2.5-7B-Instruct-4bit");
+        assert_eq!(models[0].publisher.as_deref(), Some("mlx-community"));
     }
 
-    // ── Non-model directories with config.json are excluded ──────────────────
+    // ── Hidden dirs are excluded; depth-1 flat dirs with config.json ARE found ─
 
     #[test]
-    fn list_models_spurious_config_json_excluded() {
+    fn list_models_flat_excludes_hidden_dirs() {
         let tmp = TempDir::new().unwrap();
-        let hub_root = tmp.path().to_str().unwrap().to_string();
+        let root = tmp.path();
+        // Hidden dir must be skipped by flat scan
+        let hidden = root.join(".hidden-model");
+        fs::create_dir_all(&hidden).unwrap();
+        fs::write(hidden.join("config.json"), r#"{"model_type":"llama"}"#).unwrap();
 
-        // A directory that has config.json but is NOT inside models--*/snapshots/*
-        let spurious = tmp.path().join("my-project");
-        fs::create_dir_all(&spurious).unwrap();
-        fs::write(spurious.join("config.json"), r#"{"model_type":"llama"}"#).unwrap();
+        let driver = driver_for(root.to_str().unwrap().to_string());
+        let models = driver.list_models(&dummy_config()).unwrap();
+        assert_eq!(models.len(), 0, "hidden dirs must be excluded");
+    }
 
-        // A proper HF model alongside
-        let model_dir = tmp.path().join("models--org--model");
-        let snapshots_dir = model_dir.join("snapshots");
-        let refs_dir = model_dir.join("refs");
-        fs::create_dir_all(&snapshots_dir).unwrap();
-        fs::create_dir_all(&refs_dir).unwrap();
-        make_snapshot(&snapshots_dir, "abc123");
-        fs::write(refs_dir.join("main"), "abc123").unwrap();
+    #[test]
+    fn list_models_depth1_flat_found_as_model() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // A dir at depth 1 with config.json is a valid flat-layout model
+        let model_dir = root.join("my-local-model");
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(model_dir.join("config.json"), r#"{"model_type":"llama"}"#).unwrap();
 
-        let driver = driver_for(hub_root);
-        let config = dummy_config();
-        let models = driver.list_models(&config).unwrap();
-        assert_eq!(models.len(), 1, "spurious dir must not appear as a model");
-        assert_eq!(models[0].key, "org/model");
+        let driver = driver_for(root.to_str().unwrap().to_string());
+        let models = driver.list_models(&dummy_config()).unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].key, model_dir.to_str().unwrap());
+        assert_eq!(models[0].display_name, "my-local-model");
+        assert_eq!(models[0].publisher, None);
     }
 
     // ── Metadata parsing ──────────────────────────────────────────────────────
@@ -536,7 +568,9 @@ mod tests {
         let driver = driver_for(root.to_str().unwrap().to_string());
         let models = driver.list_models(&dummy_config()).unwrap();
         assert_eq!(models.len(), 1);
-        assert_eq!(models[0].key, "mlx-community/gemma-4-e4b-it-4bit");
+        assert_eq!(models[0].key, model_dir.to_str().unwrap());
+        assert_eq!(models[0].display_name, "gemma-4-e4b-it-4bit");
+        assert_eq!(models[0].publisher.as_deref(), Some("mlx-community"));
     }
 
     #[test]
@@ -562,21 +596,43 @@ mod tests {
         let models = driver.list_models(&dummy_config()).unwrap();
         assert_eq!(models.len(), 2);
         let keys: Vec<_> = models.iter().map(|m| m.key.as_str()).collect();
+        // HF key is the repo id; flat key is the absolute path
         assert!(keys.contains(&"org/model"));
-        assert!(keys.contains(&"froggeric/Qwen3-35B-4bit"));
+        assert!(keys.contains(&flat_dir.to_str().unwrap()));
+        // Check publishers
+        let flat = models.iter().find(|m| m.key == flat_dir.to_str().unwrap()).unwrap();
+        assert_eq!(flat.publisher.as_deref(), Some("froggeric"));
+        assert_eq!(flat.display_name, "Qwen3-35B-4bit");
     }
 
     #[test]
     fn list_models_flat_ignores_dir_without_config_json() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-        // Org dir exists but model subdir has no config.json
+        // Dir tree with no config.json at any leaf
         let model_dir = root.join("someorg").join("incomplete-model");
         fs::create_dir_all(&model_dir).unwrap();
 
         let driver = driver_for(root.to_str().unwrap().to_string());
         let models = driver.list_models(&dummy_config()).unwrap();
         assert_eq!(models.len(), 0);
+    }
+
+    #[test]
+    fn list_models_flat_depth3_layout() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // category/org/model — depth 3 from root
+        let deep_dir = root.join("quantized").join("mlx-community").join("Llama-3-8B-4bit");
+        fs::create_dir_all(&deep_dir).unwrap();
+        fs::write(deep_dir.join("config.json"), r#"{"model_type":"llama"}"#).unwrap();
+
+        let driver = driver_for(root.to_str().unwrap().to_string());
+        let models = driver.list_models(&dummy_config()).unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].key, deep_dir.to_str().unwrap());
+        assert_eq!(models[0].display_name, "Llama-3-8B-4bit");
+        assert_eq!(models[0].publisher.as_deref(), Some("mlx-community"));
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────

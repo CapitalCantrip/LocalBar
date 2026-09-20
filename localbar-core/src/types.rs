@@ -159,6 +159,7 @@ impl ModelMemory {
 pub struct ModelRef {
     pub key: String,
     pub display_name: String,
+    pub publisher: Option<String>,
     pub size_bytes: Option<i64>,
 }
 

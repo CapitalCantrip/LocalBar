@@ -718,7 +718,7 @@ async fn warm_load_model(app: &AppHandle, id: Uuid, old_key: Option<String>) -> 
         return warm_load_model_restart(app, id, old_key).await;
     }
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let model = ModelRef { key: model_key.clone(), display_name: model_key, size_bytes: None };
+        let model = ModelRef { key: model_key.clone(), display_name: model_key, publisher: None, size_bytes: None };
         driver.switch_model(&model, &config.instance_params, &config)
     }).await.map_err(|e| e.to_string())?;
     match result {
@@ -823,6 +823,7 @@ struct DiscoveredModel {
     server_type: String,
     key: String,
     display_name: String,
+    publisher: Option<String>,
     parameter_count: Option<String>,
     quantization: Option<String>,
     size_bytes: Option<i64>,
@@ -833,6 +834,7 @@ fn model_to_discovered(stype: &str, m: ModelRef, meta: Option<ModelMetadata>) ->
         server_type: stype.to_string(),
         key: m.key,
         display_name: m.display_name,
+        publisher: m.publisher,
         parameter_count: meta.as_ref().and_then(|md| md.parameter_count.clone()),
         quantization: meta.as_ref().and_then(|md| md.quantization.clone()),
         size_bytes: m.size_bytes,
