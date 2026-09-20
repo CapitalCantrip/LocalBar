@@ -508,6 +508,12 @@ function fmtBytes(b: number | null): string {
   return `${b} B`
 }
 
+function fmtDate(secs: number | null): string {
+  if (secs === null) return ''
+  const d = new Date(secs * 1000)
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
 function hfLink(serverType: string, key: string): { href: string; label: string } {
   if (serverType === 'mlx-lm') return { href: `https://huggingface.co/${key}`, label: 'HuggingFace ↗' }
   const name = key.split(':')[0]
@@ -559,7 +565,8 @@ function DiscoveredModelsSection() {
           <span style={{ ...s.fieldLabel, marginBottom: 4, display: 'block' }}>{stype}</span>
           {rows.map(m => {
             const link = hfLink(m.server_type, m.key)
-            const meta = [m.parameter_count, m.quantization].filter(Boolean).join(' · ') || null
+            const meta = [m.architecture, m.parameter_count, m.quantization].filter(Boolean).join(' · ') || null
+            const dateStr = fmtDate(m.modified_secs)
             return (
               <div key={m.key} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', borderBottom: '1px solid #f0f0f0' }}>
                 {m.publisher && (
@@ -572,6 +579,7 @@ function DiscoveredModelsSection() {
                 </span>
                 {meta && <span style={s.modelMeta}>{meta}</span>}
                 <span style={s.modelMeta}>{fmtBytes(m.size_bytes)}</span>
+                {dateStr && <span style={s.modelMeta}>{dateStr}</span>}
                 <a href={link.href} target="_blank" rel="noreferrer" style={{ fontSize: 11, color: '#1d4ed8', textDecoration: 'none', flexShrink: 0 }}>
                   {link.label}
                 </a>
