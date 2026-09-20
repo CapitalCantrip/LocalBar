@@ -1194,13 +1194,13 @@ fn set_dock_icon() {
 fn wire_settings_close(app: &tauri::App) {
     if let Some(settings_win) = app.get_webview_window("settings") {
         let win = settings_win.clone();
-        let handle = app.handle().clone();
+        let _handle = app.handle().clone();
         settings_win.on_window_event(move |event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = win.hide();
                 #[cfg(target_os = "macos")]
-                let _ = handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                let _ = _handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
         });
     }
