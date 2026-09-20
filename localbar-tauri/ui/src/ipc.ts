@@ -89,4 +89,7 @@ export const ipc = {
 
   quitApp: (): Promise<void> =>
     invoke('quit_app'),
+
+  openUrl: (url: string): Promise<void> =>
+    invoke('open_url', { url }),
 }

@@ -1007,6 +1007,11 @@ fn quit_app(app: AppHandle) {
     app.exit(0);
 }
 
+#[tauri::command]
+fn open_url(url: String) {
+    let _ = std::process::Command::new("open").arg(&url).spawn();
+}
+
 // ─── App lifecycle helpers ────────────────────────────────────────────────────
 
 fn mark_running_instances_for_reconnect(app: &AppHandle) {
@@ -1253,7 +1258,7 @@ pub fn run() {
             list_all_discovered_models,
             get_discovery_config, set_discovery_config, set_model_search_path_override,
             adopt_as_external_instance,
-            open_settings, quit_app,
+            open_settings, quit_app, open_url,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

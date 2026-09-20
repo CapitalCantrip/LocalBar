@@ -583,9 +583,10 @@ function DiscoveredModelsSection() {
                 <span style={colCell}>{paramsQuant}</span>
                 <span style={{ ...colCell, textAlign: 'right' as const }}>{fmtBytes(m.size_bytes)}</span>
                 <span style={colCell}>{fmtDate(m.modified_secs) || '—'}</span>
-                <a href={link.href} target="_blank" rel="noreferrer" style={{ fontSize: 11, color: '#1d4ed8', textDecoration: 'none', alignSelf: 'center' }}>
-                  {link.label}
-                </a>
+                <button
+                  style={{ fontSize: 11, color: '#1d4ed8', background: 'none', border: 'none', cursor: 'pointer', padding: 0, alignSelf: 'center', textDecoration: 'underline' }}
+                  onClick={() => void ipc.openUrl(link.href)}
+                >{link.label}</button>
               </div>
             )
           })}
