@@ -42,6 +42,12 @@ export const ipc = {
   setStartOnLaunch: (id: string, value: boolean): Promise<void> =>
     invoke('set_start_on_launch', { id, value }),
 
+  renameInstance: (id: string, name: string): Promise<void> =>
+    invoke('rename_instance', { id, name }),
+
+  setInstancePort: (id: string, port: number): Promise<void> =>
+    invoke('set_instance_port', { id, port }),
+
   setSelectedModel: (id: string, modelKey: string | null): Promise<void> =>
     invoke('set_selected_model', { id, modelKey }),
 

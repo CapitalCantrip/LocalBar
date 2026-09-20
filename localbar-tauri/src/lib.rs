@@ -601,6 +601,24 @@ fn set_start_on_launch(state: State<'_, AppState>, id: String, value: bool) -> R
 }
 
 #[tauri::command]
+fn rename_instance(state: State<'_, AppState>, id: String, name: String) -> Result<(), String> {
+    let name = name.trim().to_owned();
+    if name.is_empty() { return Err("name cannot be empty".into()); }
+    let uuid = parse_uuid(&id)?;
+    let mut reg = state.registry.lock().unwrap();
+    reg.update_config(uuid, |c| c.name = name)?;
+    reg.save()
+}
+
+#[tauri::command]
+fn set_instance_port(state: State<'_, AppState>, id: String, port: u16) -> Result<(), String> {
+    let uuid = parse_uuid(&id)?;
+    let mut reg = state.registry.lock().unwrap();
+    reg.update_config(uuid, |c| c.port = port)?;
+    reg.save()
+}
+
+#[tauri::command]
 fn set_selected_model(
     state: State<'_, AppState>,
     id: String,
@@ -1229,7 +1247,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_instances, list_instance_phases, add_instance, remove_instance,
             get_start_warning, check_memory_warning, start_instance, stop_instance,
-            set_start_on_launch, set_selected_model,
+            set_start_on_launch, rename_instance, set_instance_port, set_selected_model,
             switch_model_cmd, update_instance_params, set_active_profile_cmd,
             list_models_cmd, list_models_for_type, fetch_model_metadata_cmd, get_resolved_params, get_param_schema,
             list_all_discovered_models,

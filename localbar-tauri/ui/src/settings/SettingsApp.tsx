@@ -736,6 +736,38 @@ function DiscoveryTab() {
   )
 }
 
+// ─── Inline editable field ────────────────────────────────────────────────────
+
+function InlineEdit({ value, onSave, style: extraStyle, inputStyle, placeholder }: {
+  value: string
+  onSave: (v: string) => Promise<void>
+  style?: React.CSSProperties
+  inputStyle?: React.CSSProperties
+  placeholder?: string
+}) {
+  const [draft, setDraft] = useState(value)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => { setDraft(value) }, [value])
+
+  const commit = async () => {
+    if (draft.trim() === value) return
+    setSaving(true)
+    try { await onSave(draft.trim()) } finally { setSaving(false) }
+  }
+
+  return (
+    <input
+      style={{ ...s.input, ...extraStyle, ...inputStyle, opacity: saving ? 0.5 : 1 }}
+      value={draft}
+      placeholder={placeholder}
+      onChange={e => setDraft(e.target.value)}
+      onBlur={() => void commit()}
+      onKeyDown={e => { if (e.key === 'Enter') { e.currentTarget.blur() } }}
+    />
+  )
+}
+
 // ─── Detail panel ─────────────────────────────────────────────────────────────
 
 function DetailPanel({ instance, phase, onRefresh }: {
@@ -746,12 +778,12 @@ function DetailPanel({ instance, phase, onRefresh }: {
   const active = isActive(phase)
   const transitioning = phase?.type === 'starting' || phase?.type === 'stopping'
   const [confirmingRemove, setConfirmingRemove] = useState(false)
+  const [modelsOpen, setModelsOpen] = useState(false)
 
   const handleStart = async () => {
     await startWithWarnings(instance.id, async msg => {
       setConfirmingRemove(false)
       return new Promise(resolve => {
-        // Use inline state for start warnings too — avoids confirm() suppression
         const ok = window.confirm(msg + '\n\nStart anyway?')
         resolve(ok)
       })
@@ -769,10 +801,16 @@ function DetailPanel({ instance, phase, onRefresh }: {
     await ipc.removeInstance(instance.id)
   }
 
+  const endpoint = `http://localhost:${instance.port}`
+
   return (
     <div style={s.detailPane}>
       <div style={s.detailHeader}>
-        <span style={s.detailTitle}>{instance.name}</span>
+        <InlineEdit
+          value={instance.name}
+          onSave={async v => { await ipc.renameInstance(instance.id, v); onRefresh() }}
+          style={{ fontWeight: 600, fontSize: 15, border: 'none', padding: '2px 4px', borderRadius: 4, background: 'transparent', width: 'auto', flex: 1 }}
+        />
         {confirmingRemove ? (
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
             <span style={{ fontSize: 12, color: '#c00' }}>Remove?</span>
@@ -804,21 +842,48 @@ function DetailPanel({ instance, phase, onRefresh }: {
           )}
         </div>
         <div style={s.field}>
-          <span style={s.fieldLabel}>Server type</span>
-          <span style={s.fieldValue}>{instance.server_type}</span>
+          <span style={s.fieldLabel}>Port</span>
+          <InlineEdit
+            value={String(instance.port)}
+            onSave={async v => {
+              const n = parseInt(v, 10)
+              if (!isNaN(n) && n > 0 && n < 65536) { await ipc.setInstancePort(instance.id, n); onRefresh() }
+            }}
+            inputStyle={{ width: 90 }}
+          />
         </div>
         <div style={s.field}>
-          <span style={s.fieldLabel}>Port</span>
-          <span style={s.fieldValue}>{instance.port}</span>
+          <span style={s.fieldLabel}>Endpoint</span>
+          <span style={{ ...s.fieldValue, fontSize: 11, color: '#555', fontFamily: 'monospace' }}>{endpoint}</span>
+        </div>
+        <div style={s.field}>
+          <span style={s.fieldLabel}>Model</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ ...s.fieldValue, fontSize: 11, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {instance.selected_model_key ?? <span style={{ color: '#aaa' }}>None selected</span>}
+            </span>
+            <button
+              style={{ ...s.btn(), padding: '2px 8px', fontSize: 11 }}
+              onClick={() => setModelsOpen(o => !o)}
+            >{modelsOpen ? '▲ Models' : '▼ Models'}</button>
+          </div>
+          {modelsOpen && (
+            <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {instance.server_type === 'mlx-lm' && (
+                <ModelPathOverrideField instance={instance} onRefresh={onRefresh} />
+              )}
+              <ModelList instance={instance} phase={phase} onRefresh={onRefresh} />
+            </div>
+          )}
+        </div>
+        <div style={s.field}>
+          <span style={s.fieldLabel}>Server type</span>
+          <span style={s.fieldValue}>{instance.server_type}</span>
         </div>
         <div style={s.field}>
           <span style={s.fieldLabel}>Executable</span>
           <span style={{ ...s.fieldValue, wordBreak: 'break-all', fontSize: 11 }}>{instance.executable_path}</span>
         </div>
-        {instance.server_type === 'mlx-lm' && (
-          <ModelPathOverrideField instance={instance} onRefresh={onRefresh} />
-        )}
-        <ModelList instance={instance} phase={phase} onRefresh={onRefresh} />
         <ParamEditor instance={instance} onRefresh={onRefresh} />
         <label style={s.checkbox}>
           <input
