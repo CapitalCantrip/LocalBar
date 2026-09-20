@@ -918,7 +918,9 @@ fn compute_tray_state(app: &AppHandle) -> TrayIconState {
 fn sync_tray_icon(app: &AppHandle) {
     let state = compute_tray_state(app);
     if let Ok(icon) = tauri::image::Image::from_bytes(icon_bytes(state)) {
-        app.state::<tauri::tray::TrayIcon>().set_icon(Some(icon)).ok();
+        let tray = app.state::<tauri::tray::TrayIcon>();
+        tray.set_icon(Some(icon)).ok();
+        tray.set_icon_as_template(true).ok();
     }
 }
 
@@ -1004,6 +1006,21 @@ fn install_popover_key_monitor(app: &tauri::App) {
 #[cfg(not(target_os = "macos"))]
 fn install_popover_key_monitor(_app: &tauri::App) {}
 
+#[cfg(target_os = "macos")]
+fn set_dock_icon() {
+    use objc2::{AnyThread, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
+    // SAFETY: called from setup_handler which runs on the main thread.
+    let mtm = unsafe { MainThreadMarker::new_unchecked() };
+    unsafe {
+        let data = NSData::with_bytes(include_bytes!("../icons/icon.png"));
+        if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {
+            NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&*image));
+        }
+    }
+}
+
 fn wire_settings_close(app: &tauri::App) {
     if let Some(settings_win) = app.get_webview_window("settings") {
         let win = settings_win.clone();
@@ -1037,7 +1054,10 @@ fn setup_handler(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
     load_persisted_state(&mut state);
     app.manage(state);
     #[cfg(target_os = "macos")]
-    app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+    {
+        app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+        set_dock_icon();
+    }
     // Propagating Err here would cause Tauri to panic!() inside applicationDidFinishLaunching,
     // which cannot unwind through ObjC and aborts. Use process::exit for fatal tray failures.
     if let Err(e) = build_tray(app) {
