@@ -563,24 +563,27 @@ function DiscoveredModelsSection() {
       {Object.entries(grouped).map(([stype, rows]) => (
         <div key={stype} style={{ marginTop: 8 }}>
           <span style={{ ...s.fieldLabel, marginBottom: 4, display: 'block' }}>{stype}</span>
+          <div style={colGrid}>
+            <span style={colHdr}>Publisher</span>
+            <span style={colHdr}>Model</span>
+            <span style={colHdr}>Arch</span>
+            <span style={colHdr}>Params · Quant</span>
+            <span style={{ ...colHdr, textAlign: 'right' as const }}>Size</span>
+            <span style={colHdr}>Modified</span>
+            <span style={colHdr} />
+          </div>
           {rows.map(m => {
             const link = hfLink(m.server_type, m.key)
-            const meta = [m.architecture, m.parameter_count, m.quantization].filter(Boolean).join(' · ') || null
-            const dateStr = fmtDate(m.modified_secs)
+            const paramsQuant = [m.parameter_count, m.quantization].filter(Boolean).join(' · ') || '—'
             return (
-              <div key={m.key} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', borderBottom: '1px solid #f0f0f0' }}>
-                {m.publisher && (
-                  <span style={{ ...s.modelMeta, width: 90, flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }} title={m.publisher}>
-                    {m.publisher}
-                  </span>
-                )}
-                <span style={{ flex: 1, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }} title={m.key}>
-                  {m.display_name}
-                </span>
-                {meta && <span style={s.modelMeta}>{meta}</span>}
-                <span style={s.modelMeta}>{fmtBytes(m.size_bytes)}</span>
-                {dateStr && <span style={s.modelMeta}>{dateStr}</span>}
-                <a href={link.href} target="_blank" rel="noreferrer" style={{ fontSize: 11, color: '#1d4ed8', textDecoration: 'none', flexShrink: 0 }}>
+              <div key={m.key} style={{ ...colGrid, borderBottom: '1px solid #f0f0f0' }}>
+                <span style={colCell} title={m.publisher ?? ''}>{m.publisher ?? '—'}</span>
+                <span style={{ ...colCell, color: '#222', fontWeight: 500, fontSize: 12 }} title={m.key}>{m.display_name}</span>
+                <span style={colCell}>{m.architecture ?? '—'}</span>
+                <span style={colCell}>{paramsQuant}</span>
+                <span style={{ ...colCell, textAlign: 'right' as const }}>{fmtBytes(m.size_bytes)}</span>
+                <span style={colCell}>{fmtDate(m.modified_secs) || '—'}</span>
+                <a href={link.href} target="_blank" rel="noreferrer" style={{ fontSize: 11, color: '#1d4ed8', textDecoration: 'none', alignSelf: 'center' }}>
                   {link.label}
                 </a>
               </div>
@@ -590,6 +593,36 @@ function DiscoveredModelsSection() {
       ))}
     </div>
   )
+}
+
+// ─── Discovery model table layout ─────────────────────────────────────────────
+
+const colGrid: React.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: '90px 1fr 70px 120px 65px 90px 30px',
+  alignItems: 'center',
+  gap: '0 8px',
+  padding: '3px 0',
+}
+
+const colHdr: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 600,
+  color: '#aaa',
+  textTransform: 'uppercase' as const,
+  letterSpacing: '0.04em',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap' as const,
+  paddingBottom: 2,
+}
+
+const colCell: React.CSSProperties = {
+  fontSize: 11,
+  color: '#666',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap' as const,
 }
 
 // ─── Discovery tab ────────────────────────────────────────────────────────────
