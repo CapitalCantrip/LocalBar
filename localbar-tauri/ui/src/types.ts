@@ -7,7 +7,9 @@ export interface ModelRef {
   key: string
   display_name: string
   publisher: string | null
+  architecture: string | null
   size_bytes: number | null
+  modified_secs: number | null
 }
 
 export interface ModelMetadata {
@@ -51,9 +53,11 @@ export interface DiscoveredModel {
   key: string
   display_name: string
   publisher: string | null
+  architecture: string | null
   parameter_count: string | null
   quantization: string | null
   size_bytes: number | null
+  modified_secs: number | null
 }
 
 export type InstancePhase =

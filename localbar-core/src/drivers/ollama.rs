@@ -217,7 +217,7 @@ fn parse_tags_response(json: &serde_json::Value) -> Result<Vec<ModelRef>, String
 
 fn model_ref_from_json(m: &serde_json::Value) -> Result<ModelRef, String> {
     let key = m["name"].as_str().ok_or("missing model name")?.to_owned();
-    Ok(ModelRef { display_name: key.clone(), key, publisher: None, size_bytes: m["size"].as_i64() })
+    Ok(ModelRef { display_name: key.clone(), key, publisher: None, architecture: None, size_bytes: m["size"].as_i64(), modified_secs: None })
 }
 
 // ─── CLI list ─────────────────────────────────────────────────────────────────
@@ -254,7 +254,7 @@ fn parse_ollama_list_row(line: &str) -> Option<ModelRef> {
     let name = cols.next()?.to_owned();
     let _id = cols.next();
     let size_bytes = parse_size_cols(cols.next(), cols.next());
-    Some(ModelRef { display_name: name.clone(), key: name, publisher: None, size_bytes })
+    Some(ModelRef { display_name: name.clone(), key: name, publisher: None, architecture: None, size_bytes, modified_secs: None })
 }
 
 fn parse_size_cols(value_col: Option<&str>, unit_col: Option<&str>) -> Option<i64> {

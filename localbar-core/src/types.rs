@@ -160,7 +160,9 @@ pub struct ModelRef {
     pub key: String,
     pub display_name: String,
     pub publisher: Option<String>,
+    pub architecture: Option<String>,
     pub size_bytes: Option<i64>,
+    pub modified_secs: Option<i64>,
 }
 
 // ─── ServerType ──────────────────────────────────────────────────────────────

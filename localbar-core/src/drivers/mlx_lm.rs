@@ -155,10 +155,24 @@ fn append_param_arg(flag: &str, value: &ParamValue, args: &mut Vec<String>) {
 
 // ─── List-models helper ───────────────────────────────────────────────────────
 
+fn read_architecture(config_json: &Path) -> Option<String> {
+    let text = fs::read_to_string(config_json).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    v["model_type"].as_str().map(str::to_owned)
+}
+
+fn dir_mtime_secs(path: &Path) -> Option<i64> {
+    fs::metadata(path).ok()?.modified().ok()?
+        .duration_since(std::time::UNIX_EPOCH).ok()
+        .map(|d| d.as_secs() as i64)
+}
+
 fn push_model(
     key: &str,
     display_name: &str,
     publisher: Option<&str>,
+    config_json: &Path,
+    model_dir: &Path,
     models: &mut Vec<ModelRef>,
     seen_keys: &mut std::collections::HashSet<String>,
 ) {
@@ -168,7 +182,9 @@ fn push_model(
         key: key.to_string(),
         display_name: display_name.to_string(),
         publisher: publisher.map(str::to_owned),
+        architecture: read_architecture(config_json),
         size_bytes: None,
+        modified_secs: dir_mtime_secs(model_dir),
     });
 }
 
@@ -201,10 +217,11 @@ fn scan_hf_root(
         let snapshots_dir = model_dir.join("snapshots");
         if !snapshots_dir.is_dir() { continue; }
         let Some(snapshot_dir) = canonical_snapshot(&model_dir, &snapshots_dir) else { continue };
-        if !snapshot_dir.join("config.json").exists() { continue; }
+        let config_json = snapshot_dir.join("config.json");
+        if !config_json.exists() { continue; }
         let model_key = hf_dir_to_model_key(&dir_name_str);
         let (display, publisher) = split_display_publisher(&model_key);
-        push_model(&model_key, display, publisher, models, seen_keys);
+        push_model(&model_key, display, publisher, &config_json, &snapshot_dir, models, seen_keys);
     }
 }
 
@@ -221,9 +238,10 @@ fn scan_flat_recursive(
     seen_keys: &mut std::collections::HashSet<String>,
 ) {
     if !dir.is_dir() { return; }
-    if !rel.is_empty() && dir.join("config.json").exists() {
+    let config_json = dir.join("config.json");
+    if !rel.is_empty() && config_json.exists() {
         let (display, publisher) = split_display_publisher(rel);
-        push_model(&dir.to_string_lossy(), display, publisher, models, seen_keys);
+        push_model(&dir.to_string_lossy(), display, publisher, &config_json, dir, models, seen_keys);
         return;
     }
     if depth == 0 { return; }

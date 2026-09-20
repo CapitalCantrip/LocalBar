@@ -108,7 +108,7 @@ fn parse_openai_models(json: &serde_json::Value) -> Vec<ModelRef> {
 
 fn model_ref_from_openai(m: &serde_json::Value) -> Option<ModelRef> {
     let key = m["id"].as_str()?.to_owned();
-    Some(ModelRef { display_name: key.clone(), key, publisher: None, size_bytes: None })
+    Some(ModelRef { display_name: key.clone(), key, publisher: None, architecture: None, size_bytes: None, modified_secs: None })
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -207,7 +207,7 @@ mod tests {
     fn switch_model_is_noop() {
         let driver = ExternalDriver;
         let config = dummy_config();
-        let model = ModelRef { key: "m".to_string(), display_name: "m".to_string(), publisher: None, size_bytes: None };
+        let model = ModelRef { key: "m".to_string(), display_name: "m".to_string(), publisher: None, architecture: None, size_bytes: None, modified_secs: None };
         assert!(driver.switch_model(&model, &ParamValues::default(), &config).is_ok());
     }
 }
