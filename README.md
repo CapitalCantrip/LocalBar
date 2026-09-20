@@ -1,6 +1,6 @@
 # LocalBar
 
-A macOS menu bar app that manages local LLM inference servers — start, stop, switch models, and tune generation parameters without touching a terminal.
+A menu bar app for managing local LLM inference servers — start, stop, switch models, and tune generation parameters without touching a terminal. Built on a cross-platform Rust core; macOS now, Linux next.
 
 ---
 
