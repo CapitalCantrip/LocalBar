@@ -110,6 +110,8 @@ const s = {
 
 // ─── Add-instance model picker ───────────────────────────────────────────────
 
+const PICKER_TYPES: ServerTypeOption[] = ['mlx-lm', 'ollama']
+
 function AddModelPicker({ serverType, selectedModelKey, onSelect }: {
   serverType: ServerTypeOption
   selectedModelKey: string | null
@@ -118,20 +120,34 @@ function AddModelPicker({ serverType, selectedModelKey, onSelect }: {
   const [models, setModels] = useState<ModelRef[] | null>(null)
   const [loading, setLoading] = useState(false)
   const [scanError, setScanError] = useState<string | null>(null)
+  const [ollamaUnreachable, setOllamaUnreachable] = useState(false)
+  const [freeText, setFreeText] = useState('')
   const scanRef = useRef(0)
 
   useEffect(() => {
-    if (serverType !== 'mlx-lm') { setModels(null); setScanError(null); return }
+    if (!PICKER_TYPES.includes(serverType)) {
+      setModels(null); setScanError(null); setOllamaUnreachable(false); setFreeText(''); return
+    }
     const seq = ++scanRef.current
     setLoading(true)
     setModels(null)
     setScanError(null)
-    ipc.listModelsForType('mlx-lm')
+    setOllamaUnreachable(false)
+    setFreeText('')
+    ipc.listModelsForType(serverType)
       .then(list => { if (seq === scanRef.current) { setModels(list); setLoading(false) } })
-      .catch(e => { if (seq === scanRef.current) { setScanError(String(e)); setLoading(false) } })
+      .catch(e => {
+        if (seq !== scanRef.current) return
+        if (serverType === 'ollama' && String(e) === 'OLLAMA_UNREACHABLE') {
+          setOllamaUnreachable(true)
+        } else {
+          setScanError(String(e))
+        }
+        setLoading(false)
+      })
   }, [serverType])
 
-  if (serverType !== 'mlx-lm') return null
+  if (!PICKER_TYPES.includes(serverType)) return null
 
   if (loading) return (
     <div style={s.field}>
@@ -147,11 +163,26 @@ function AddModelPicker({ serverType, selectedModelKey, onSelect }: {
     </div>
   )
 
+  if (ollamaUnreachable) return (
+    <div style={s.field}>
+      <span style={s.fieldLabel}>Model</span>
+      <input
+        style={s.input}
+        value={freeText}
+        onChange={e => { setFreeText(e.target.value); onSelect(e.target.value.trim() || null) }}
+        placeholder="llama3:8b"
+      />
+      <span style={{ fontSize: 11, color: '#aaa' }}>Ollama not reachable — enter tag name manually</span>
+    </div>
+  )
+
   if (models !== null && models.length === 0) return (
     <div style={s.field}>
       <span style={s.fieldLabel}>Model</span>
       <span style={{ ...s.fieldValue, color: '#aaa', fontSize: 11 }}>
-        No models found — configure model paths in Settings → Discovery.
+        {serverType === 'mlx-lm'
+          ? 'No models found — configure model paths in Settings → Discovery.'
+          : 'No models found'}
       </span>
     </div>
   )
@@ -720,7 +751,7 @@ function DetailPanel({ instance, phase, onRefresh }: {
             <button
               style={s.primaryBtn}
               onClick={handleStart}
-              disabled={instance.server_type === 'mlx-lm' && instance.selected_model_key === null}
+              disabled={(instance.server_type === 'mlx-lm' || instance.server_type === 'ollama') && instance.selected_model_key === null}
             >Start</button>
           )}
         </div>
