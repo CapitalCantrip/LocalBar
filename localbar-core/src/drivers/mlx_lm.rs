@@ -167,6 +167,14 @@ fn dir_mtime_secs(path: &Path) -> Option<i64> {
         .map(|d| d.as_secs() as i64)
 }
 
+fn dir_size_bytes(path: &Path) -> Option<i64> {
+    let mut total: i64 = 0;
+    for entry in fs::read_dir(path).ok()?.flatten() {
+        total += entry.metadata().map(|m| m.len() as i64).unwrap_or(0);
+    }
+    Some(total)
+}
+
 fn push_model(
     key: &str,
     display_name: &str,
@@ -183,7 +191,7 @@ fn push_model(
         display_name: display_name.to_string(),
         publisher: publisher.map(str::to_owned),
         architecture: read_architecture(config_json),
-        size_bytes: None,
+        size_bytes: dir_size_bytes(model_dir),
         modified_secs: dir_mtime_secs(model_dir),
     });
 }
