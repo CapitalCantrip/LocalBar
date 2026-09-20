@@ -55,8 +55,12 @@ _Avoid_: default params, remembered params
 **Tray popover (A-mode)**: The menu bar popover — the operational surface for users whose configuration is settled. Start/stop instances, switch models, view status.
 _Avoid_: menu, dropdown, popover
 
-**Settings window (B-mode)**: The dedicated Settings window — the configuration surface for active experimentation. Add/remove instances, tune params, manage profiles.
+**Settings window (B-mode)**: The dedicated Settings window — the configuration surface for active experimentation. Add/remove instances, tune params, manage profiles. Contains two top-level tabs: Servers and Discovery.
 _Avoid_: preferences, config window
+
+**Servers tab**: The first tab in the Settings window. Master/detail list of instances with phase status, param editing, model selection, and start-on-launch controls.
+
+**Discovery tab**: The second tab in the Settings window. Global configuration for how LocalBar finds models — driver-specific path and executable settings, plus a read-only list of all discovered models grouped by driver type. The canonical home for any path or executable configuration that affects model discovery across drivers.
 
 **Phase**: The current lifecycle state of an instance: stopped, starting, running, stopping, switchingModel, error.
 _Avoid_: state, status, mode

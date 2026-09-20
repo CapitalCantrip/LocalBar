@@ -157,6 +157,12 @@ mod tests {
         fn upsert_model_memory(&mut self, entry: ModelMemory) -> Result<(), String> {
             self.0.lock().unwrap().upsert_model_memory(entry)
         }
+        fn save_discovery_config(&mut self, config: &crate::types::DiscoveryConfig) -> Result<(), String> {
+            self.0.lock().unwrap().save_discovery_config(config)
+        }
+        fn load_discovery_config(&self) -> Result<crate::types::DiscoveryConfig, String> {
+            self.0.lock().unwrap().load_discovery_config()
+        }
     }
     unsafe impl Send for SharedPersistence {}
     unsafe impl Sync for SharedPersistence {}

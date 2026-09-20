@@ -16,7 +16,7 @@ use localbar_core::drivers::ollama::OllamaDriver;
 use localbar_core::persistence::FilePersistence;
 use localbar_core::registry::InstanceRegistry;
 use localbar_core::types::{
-    InstanceError, InstanceErrorKind, InstancePhase, ModelMemoryKey, ModelRef,
+    DiscoveryConfig, InstanceError, InstanceErrorKind, InstancePhase, ModelMemoryKey, ModelRef,
     ParamValues, ServerInstanceConfig, ServerType,
 };
 use localbar_core::{adopt_external_as_new_instance, ensure_managed_model, push_restart_duration_sample, update_model_memory};
@@ -76,8 +76,23 @@ impl AppState {
 fn driver_for_type(server_type: ServerType) -> Box<dyn ServerDriver> {
     match server_type {
         ServerType::Ollama => Box::new(OllamaDriver),
-        ServerType::MlxLm => Box::new(MLXLMDriver::default()),
+        ServerType::MlxLm => Box::new(MLXLMDriver::new(Vec::new())),
         ServerType::External => Box::new(ExternalDriver),
+    }
+}
+
+fn mlx_driver_with_paths(search_paths: Vec<String>) -> Box<dyn ServerDriver> {
+    Box::new(MLXLMDriver::new(search_paths))
+}
+
+/// Build the right driver for a specific instance, resolving mlx-lm search paths.
+fn driver_for_instance(config: &ServerInstanceConfig, discovery: &DiscoveryConfig) -> Box<dyn ServerDriver> {
+    match config.server_type {
+        ServerType::MlxLm => {
+            let paths = discovery.resolved_mlx_paths(config.model_search_path_override.as_deref());
+            mlx_driver_with_paths(paths)
+        }
+        _ => driver_for_type(config.server_type),
     }
 }
 
@@ -457,11 +472,14 @@ fn get_start_warning(state: State<'_, AppState>, id: String) -> Option<String> {
 #[tauri::command]
 async fn check_memory_warning(state: State<'_, AppState>, id: String) -> Result<Option<String>, String> {
     let uuid = parse_uuid(&id)?;
-    let config = state.registry.lock().unwrap().get_config(uuid).cloned();
+    let (config, discovery) = {
+        let reg = state.registry.lock().unwrap();
+        (reg.get_config(uuid).cloned(), reg.get_discovery_config().clone())
+    };
     let Some(config) = config else { return Ok(None) };
     let Some(model_key) = config.selected_model_key.clone() else { return Ok(None) };
     let models = tauri::async_runtime::spawn_blocking(move || {
-        driver_for_type(config.server_type).list_models(&config)
+        driver_for_instance(&config, &discovery).list_models(&config)
     }).await.map_err(|e| e.to_string())??;
     let size_bytes = match models.iter().find(|m| m.key == model_key).and_then(|m| m.size_bytes) {
         Some(s) => s as u64,
@@ -754,21 +772,41 @@ fn set_active_profile_cmd(
 }
 
 #[tauri::command]
-async fn list_models_for_type(server_type: String) -> Result<Vec<ModelRef>, String> {
+async fn list_models_for_type(state: State<'_, AppState>, server_type: String) -> Result<Vec<ModelRef>, String> {
     let stype = parse_server_type(&server_type)?;
+    let discovery = state.registry.lock().unwrap().get_discovery_config().clone();
     let probe = ServerInstanceConfig::new("probe", stype, 0, "");
-    tauri::async_runtime::spawn_blocking(move || driver_for_type(probe.server_type).list_models(&probe))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let driver: Box<dyn ServerDriver> = match stype {
+            ServerType::MlxLm => mlx_driver_with_paths(discovery.mlx_lm_search_paths),
+            _ => driver_for_type(stype),
+        };
+        driver.list_models(&probe)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn get_discovery_config(state: State<'_, AppState>) -> DiscoveryConfig {
+    state.registry.lock().unwrap().get_discovery_config().clone()
+}
+
+#[tauri::command]
+fn set_discovery_config(state: State<'_, AppState>, config: DiscoveryConfig) -> Result<(), String> {
+    state.registry.lock().unwrap().set_discovery_config(config)
 }
 
 #[tauri::command]
 async fn list_models_cmd(state: State<'_, AppState>, id: String) -> Result<Vec<ModelRef>, String> {
     let uuid = parse_uuid(&id)?;
-    let config = state.registry.lock().unwrap().get_config(uuid).cloned();
+    let (config, discovery) = {
+        let reg = state.registry.lock().unwrap();
+        (reg.get_config(uuid).cloned(), reg.get_discovery_config().clone())
+    };
     let Some(config) = config else { return Err(format!("instance {id} not found")) };
     tauri::async_runtime::spawn_blocking(move || {
-        driver_for_type(config.server_type).list_models(&config)
+        driver_for_instance(&config, &discovery).list_models(&config)
     }).await.map_err(|e| e.to_string())?
 }
 
@@ -779,10 +817,14 @@ async fn fetch_model_metadata_cmd(
     model_key: String,
 ) -> Result<Option<ModelMetadata>, String> {
     let uuid = parse_uuid(&id)?;
-    let config = state.registry.lock().unwrap().get_config(uuid)
-        .ok_or_else(|| format!("instance {id} not found"))?.clone();
+    let (config, discovery) = {
+        let reg = state.registry.lock().unwrap();
+        let config = reg.get_config(uuid)
+            .ok_or_else(|| format!("instance {id} not found"))?.clone();
+        (config, reg.get_discovery_config().clone())
+    };
     tauri::async_runtime::spawn_blocking(move || {
-        Ok(driver_for_type(config.server_type).fetch_model_metadata(&model_key, &config))
+        Ok(driver_for_instance(&config, &discovery).fetch_model_metadata(&model_key, &config))
     }).await.map_err(|e| e.to_string())?
 }
 
@@ -1057,6 +1099,7 @@ fn load_persisted_state(state: &mut AppState) {
     } else {
         reg.load_model_memory().ok();
         reg.load_profiles().ok();
+        reg.load_discovery_config().ok();
     }
 }
 
@@ -1096,6 +1139,7 @@ pub fn run() {
             set_start_on_launch, set_selected_model,
             switch_model_cmd, update_instance_params, set_active_profile_cmd,
             list_models_cmd, list_models_for_type, fetch_model_metadata_cmd, get_resolved_params, get_param_schema,
+            get_discovery_config, set_discovery_config,
             adopt_as_external_instance,
             open_settings, quit_app,
         ])
