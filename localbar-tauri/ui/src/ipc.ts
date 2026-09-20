@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { InstancePhase, ModelMetadata, ModelRef, ParamValues, ServerInstanceConfig } from './types'
+import type { DiscoveredModel, DiscoveryConfig, InstancePhase, ModelMetadata, ModelRef, ParamValues, ServerInstanceConfig } from './types'
 
 export interface ParamSchemaEntry {
   key: string
@@ -42,11 +42,20 @@ export const ipc = {
   setStartOnLaunch: (id: string, value: boolean): Promise<void> =>
     invoke('set_start_on_launch', { id, value }),
 
+  renameInstance: (id: string, name: string): Promise<void> =>
+    invoke('rename_instance', { id, name }),
+
+  setInstancePort: (id: string, port: number): Promise<void> =>
+    invoke('set_instance_port', { id, port }),
+
   setSelectedModel: (id: string, modelKey: string | null): Promise<void> =>
     invoke('set_selected_model', { id, modelKey }),
 
   listModels: (id: string): Promise<ModelRef[]> =>
     invoke('list_models_cmd', { id }),
+
+  listModelsForType: (serverType: string): Promise<ModelRef[]> =>
+    invoke('list_models_for_type', { serverType }),
 
   switchModel: (id: string, modelKey: string): Promise<void> =>
     invoke('switch_model_cmd', { id, modelKey }),
@@ -63,9 +72,24 @@ export const ipc = {
   getParamSchema: (serverType: string): Promise<ParamSchemaEntry[]> =>
     invoke('get_param_schema', { serverType }),
 
+  listAllDiscoveredModels: (): Promise<DiscoveredModel[]> =>
+    invoke('list_all_discovered_models'),
+
+  getDiscoveryConfig: (): Promise<DiscoveryConfig> =>
+    invoke('get_discovery_config'),
+
+  setDiscoveryConfig: (config: DiscoveryConfig): Promise<void> =>
+    invoke('set_discovery_config', { config }),
+
+  setModelSearchPathOverride: (id: string, path: string | null): Promise<void> =>
+    invoke('set_model_search_path_override', { id, path }),
+
   openSettings: (): Promise<void> =>
     invoke('open_settings'),
 
   quitApp: (): Promise<void> =>
     invoke('quit_app'),
+
+  openUrl: (url: string): Promise<void> =>
+    invoke('open_url', { url }),
 }

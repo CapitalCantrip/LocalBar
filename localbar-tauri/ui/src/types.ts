@@ -6,7 +6,10 @@ export type ServerType = 'mlx-lm' | 'ollama' | 'external'
 export interface ModelRef {
   key: string
   display_name: string
+  publisher: string | null
+  architecture: string | null
   size_bytes: number | null
+  modified_secs: number | null
 }
 
 export interface ModelMetadata {
@@ -37,6 +40,24 @@ export interface ServerInstanceConfig {
   managed_model_tag: string | null
   start_on_launch: boolean
   was_running_when_quit: boolean
+  model_search_path_override: string | null
+}
+
+export interface DiscoveryConfig {
+  mlx_lm_search_paths: string[]
+  ollama_executable_path: string | null
+}
+
+export interface DiscoveredModel {
+  server_type: string
+  key: string
+  display_name: string
+  publisher: string | null
+  architecture: string | null
+  parameter_count: string | null
+  quantization: string | null
+  size_bytes: number | null
+  modified_secs: number | null
 }
 
 export type InstancePhase =

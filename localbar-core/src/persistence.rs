@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::types::{ModelMemory, ModelMemoryKey, NamedProfile, ServerInstanceConfig};
+use crate::types::{DiscoveryConfig, ModelMemory, ModelMemoryKey, NamedProfile, ServerInstanceConfig};
 
 // ─── Persistence trait ───────────────────────────────────────────────────────
 
@@ -12,6 +12,8 @@ pub trait Persistence: Send + Sync {
     fn load_profiles(&self) -> Result<Vec<NamedProfile>, String>;
     fn load_model_memory(&self) -> Result<HashMap<ModelMemoryKey, ModelMemory>, String>;
     fn upsert_model_memory(&mut self, entry: ModelMemory) -> Result<(), String>;
+    fn save_discovery_config(&mut self, config: &DiscoveryConfig) -> Result<(), String>;
+    fn load_discovery_config(&self) -> Result<DiscoveryConfig, String>;
 }
 
 // ─── InMemoryPersistence ─────────────────────────────────────────────────────
@@ -22,6 +24,7 @@ pub struct InMemoryPersistence {
     instances: Vec<ServerInstanceConfig>,
     profiles: Vec<NamedProfile>,
     model_memory: HashMap<ModelMemoryKey, ModelMemory>,
+    discovery_config: DiscoveryConfig,
 }
 
 impl Persistence for InMemoryPersistence {
@@ -51,6 +54,15 @@ impl Persistence for InMemoryPersistence {
         self.model_memory.insert(entry.key(), entry);
         Ok(())
     }
+
+    fn save_discovery_config(&mut self, config: &DiscoveryConfig) -> Result<(), String> {
+        self.discovery_config = config.clone();
+        Ok(())
+    }
+
+    fn load_discovery_config(&self) -> Result<DiscoveryConfig, String> {
+        Ok(self.discovery_config.clone())
+    }
 }
 
 // ─── FilePersistence ─────────────────────────────────────────────────────────
@@ -69,6 +81,8 @@ struct StorageFile {
     profiles: Vec<NamedProfile>,
     #[serde(default)]
     model_memory: HashMap<ModelMemoryKey, ModelMemory>,
+    #[serde(default)]
+    discovery: DiscoveryConfig,
 }
 
 impl FilePersistence {
@@ -123,6 +137,16 @@ impl Persistence for FilePersistence {
         let mut file = self.read()?;
         file.model_memory.insert(entry.key(), entry);
         self.write(&file)
+    }
+
+    fn save_discovery_config(&mut self, config: &DiscoveryConfig) -> Result<(), String> {
+        let mut file = self.read()?;
+        file.discovery = config.clone();
+        self.write(&file)
+    }
+
+    fn load_discovery_config(&self) -> Result<DiscoveryConfig, String> {
+        Ok(self.read()?.discovery)
     }
 }
 
@@ -183,5 +207,49 @@ mod tests {
         let mut p = FilePersistence::new(dir.path().join("sub/dir/state.json"));
         p.save_instances(&[ollama_config()]).unwrap();
         assert_eq!(p.load_instances().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn file_persistence_discovery_config_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = FilePersistence::new(dir.path().join("state.json"));
+        let cfg = crate::types::DiscoveryConfig {
+            mlx_lm_search_paths: vec!["/models".into()],
+            ollama_executable_path: Some("/usr/local/bin/ollama".into()),
+        };
+        p.save_discovery_config(&cfg).unwrap();
+        assert_eq!(p.load_discovery_config().unwrap(), cfg);
+    }
+
+    #[test]
+    fn file_persistence_missing_discovery_key_gives_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, r#"{"instances":[]}"#).unwrap();
+        let p = FilePersistence::new(path);
+        assert_eq!(p.load_discovery_config().unwrap(), crate::types::DiscoveryConfig::default());
+    }
+
+    #[test]
+    fn file_persistence_save_discovery_preserves_instances() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = FilePersistence::new(dir.path().join("state.json"));
+        p.save_instances(&[ollama_config()]).unwrap();
+        p.save_discovery_config(&crate::types::DiscoveryConfig {
+            mlx_lm_search_paths: vec!["/x".into()],
+            ollama_executable_path: None,
+        }).unwrap();
+        assert_eq!(p.load_instances().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn in_memory_persistence_discovery_round_trip() {
+        let mut p = InMemoryPersistence::default();
+        let cfg = crate::types::DiscoveryConfig {
+            mlx_lm_search_paths: vec!["/tmp/models".into()],
+            ollama_executable_path: None,
+        };
+        p.save_discovery_config(&cfg).unwrap();
+        assert_eq!(p.load_discovery_config().unwrap(), cfg);
     }
 }

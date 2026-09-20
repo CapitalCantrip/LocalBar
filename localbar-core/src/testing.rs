@@ -26,12 +26,18 @@ impl MockDriver {
                 ModelRef {
                     key: "model-a".to_string(),
                     display_name: "Model A".to_string(),
+                    publisher: None,
+                    architecture: None,
                     size_bytes: None,
+                    modified_secs: None,
                 },
                 ModelRef {
                     key: "model-b".to_string(),
                     display_name: "Model B".to_string(),
+                    publisher: None,
+                    architecture: None,
                     size_bytes: None,
+                    modified_secs: None,
                 },
             ],
             managed_config_calls: Arc::new(Mutex::new(Vec::new())),

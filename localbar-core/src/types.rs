@@ -159,7 +159,10 @@ impl ModelMemory {
 pub struct ModelRef {
     pub key: String,
     pub display_name: String,
+    pub publisher: Option<String>,
+    pub architecture: Option<String>,
     pub size_bytes: Option<i64>,
+    pub modified_secs: Option<i64>,
 }
 
 // ─── ServerType ──────────────────────────────────────────────────────────────
@@ -170,6 +173,33 @@ pub enum ServerType {
     MlxLm,
     Ollama,
     External,
+}
+
+// ─── DiscoveryConfig ──────────────────────────────────────────────────────────
+
+/// Global user-configurable model discovery settings, persisted under the
+/// `discovery` key in state.json. Supersedes the Swift-era UserDefaults
+/// approach from ADR D10 — see ADR D11 for the Tauri-era decision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct DiscoveryConfig {
+    /// Ordered list of directories to scan for mlx-lm HF-cached models.
+    /// Empty = fall back to $HF_HOME / ~/.cache/huggingface/hub at scan time.
+    #[serde(default)]
+    pub mlx_lm_search_paths: Vec<String>,
+    /// Path to the ollama executable. None = resolve via system PATH.
+    #[serde(default)]
+    pub ollama_executable_path: Option<String>,
+}
+
+impl DiscoveryConfig {
+    /// Resolve the mlx-lm search paths for one instance.
+    /// If the instance has an override, it replaces the global list entirely.
+    pub fn resolved_mlx_paths(&self, override_path: Option<&str>) -> Vec<String> {
+        match override_path {
+            Some(p) => vec![p.to_owned()],
+            None => self.mlx_lm_search_paths.clone(),
+        }
+    }
 }
 
 // ─── ServerInstanceConfig ────────────────────────────────────────────────────
@@ -190,6 +220,11 @@ pub struct ServerInstanceConfig {
     pub managed_model_tag: Option<String>,
     pub start_on_launch: bool,
     pub was_running_when_quit: bool,
+    /// mlx-lm only: when set, overrides the global discovery search list for
+    /// this instance. A single directory that is used instead of
+    /// `DiscoveryConfig::mlx_lm_search_paths` when scanning models.
+    #[serde(default)]
+    pub model_search_path_override: Option<String>,
 }
 
 impl ServerInstanceConfig {
@@ -212,6 +247,7 @@ impl ServerInstanceConfig {
             managed_model_tag: None,
             start_on_launch: false,
             was_running_when_quit: false,
+            model_search_path_override: None,
         }
     }
 }
@@ -264,4 +300,42 @@ pub enum InstanceErrorKind {
     StopFailed,
     ModelSwitchFailed,
     Unexpected,
+}
+
+// ─── DiscoveryConfig tests ────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::DiscoveryConfig;
+
+    #[test]
+    fn global_paths_only_when_no_override() {
+        let cfg = DiscoveryConfig {
+            mlx_lm_search_paths: vec!["/a".into(), "/b".into()],
+            ollama_executable_path: None,
+        };
+        assert_eq!(cfg.resolved_mlx_paths(None), vec!["/a", "/b"]);
+    }
+
+    #[test]
+    fn override_replaces_global_list() {
+        let cfg = DiscoveryConfig {
+            mlx_lm_search_paths: vec!["/a".into(), "/b".into()],
+            ollama_executable_path: None,
+        };
+        assert_eq!(cfg.resolved_mlx_paths(Some("/override")), vec!["/override"]);
+    }
+
+    #[test]
+    fn empty_global_paths_returns_empty_vec_for_driver_fallback() {
+        // Empty -> driver's effective_search_paths adds the HF cache default.
+        let cfg = DiscoveryConfig::default();
+        assert!(cfg.resolved_mlx_paths(None).is_empty());
+    }
+
+    #[test]
+    fn default_deserialises_from_empty_json_object() {
+        let cfg: DiscoveryConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg, DiscoveryConfig::default());
+    }
 }

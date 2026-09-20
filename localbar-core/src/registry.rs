@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::persistence::Persistence;
-use crate::types::{InstancePhase, ModelMemory, ModelMemoryKey, NamedProfile, ParamValues, ServerInstanceConfig, ServerType};
+use crate::types::{DiscoveryConfig, InstancePhase, ModelMemory, ModelMemoryKey, NamedProfile, ParamValues, ServerInstanceConfig, ServerType};
 
 // ─── InstanceRecord ──────────────────────────────────────────────────────────
 
@@ -18,6 +18,7 @@ pub struct InstanceRegistry {
     instances: Vec<InstanceRecord>,
     profiles: Vec<NamedProfile>,
     model_memory: HashMap<ModelMemoryKey, ModelMemory>,
+    discovery_config: DiscoveryConfig,
     persistence: Box<dyn Persistence>,
 }
 
@@ -27,6 +28,7 @@ impl InstanceRegistry {
             instances: Vec::new(),
             profiles: Vec::new(),
             model_memory: HashMap::new(),
+            discovery_config: DiscoveryConfig::default(),
             persistence,
         }
     }
@@ -142,6 +144,23 @@ impl InstanceRegistry {
     pub fn upsert_model_memory(&mut self, entry: ModelMemory) -> Result<(), String> {
         self.persistence.upsert_model_memory(entry.clone())?;
         self.model_memory.insert(entry.key(), entry);
+        Ok(())
+    }
+
+    pub fn get_discovery_config(&self) -> &DiscoveryConfig {
+        &self.discovery_config
+    }
+
+    /// Persist and cache the discovery config.
+    pub fn set_discovery_config(&mut self, config: DiscoveryConfig) -> Result<(), String> {
+        self.persistence.save_discovery_config(&config)?;
+        self.discovery_config = config;
+        Ok(())
+    }
+
+    /// Load discovery config from the backing store into the in-memory cache.
+    pub fn load_discovery_config(&mut self) -> Result<(), String> {
+        self.discovery_config = self.persistence.load_discovery_config()?;
         Ok(())
     }
 
@@ -274,5 +293,25 @@ mod tests {
             message: "test".into(),
         })).unwrap();
         assert!(!reg.any_running());
+    }
+
+    #[test]
+    fn discovery_config_default_on_new_registry() {
+        let reg = make_registry();
+        assert_eq!(*reg.get_discovery_config(), crate::types::DiscoveryConfig::default());
+    }
+
+    #[test]
+    fn set_discovery_config_persists_and_caches() {
+        let mut reg = make_registry();
+        let cfg = crate::types::DiscoveryConfig {
+            mlx_lm_search_paths: vec!["/models".into()],
+            ollama_executable_path: None,
+        };
+        reg.set_discovery_config(cfg.clone()).unwrap();
+        assert_eq!(*reg.get_discovery_config(), cfg);
+        // Verify it was written through to persistence by loading fresh.
+        reg.load_discovery_config().unwrap();
+        assert_eq!(*reg.get_discovery_config(), cfg);
     }
 }
