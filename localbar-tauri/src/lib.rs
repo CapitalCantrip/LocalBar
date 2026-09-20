@@ -812,7 +812,7 @@ fn param_schema_entry(d: &localbar_core::types::ParamDescriptor) -> Option<Param
         RepeatPenalty   => ("repeatPenalty",   "Repeat penalty",    "double"),
         PresencePenalty => ("presencePenalty", "Presence penalty",  "double"),
         Seed            => ("seed",            "Seed",              "int"),
-        ContextLength   => ("contextLength",   "Context length",    "int"),
+        ContextLength   => ("contextLength",   if d.server_flag_name == "--max-kv-size" { "KV cache size" } else { "Context length" },   "int"),
         SystemPrompt    => return None,
     };
     Some(ParamSchemaEntry { key, label, kind, server_flag: d.server_flag_name, default_value: d.default_value.clone() })
