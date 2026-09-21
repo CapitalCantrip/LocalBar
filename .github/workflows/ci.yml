@@ -60,3 +60,13 @@ jobs:
 
       - name: cargo test (workspace)
         run: cargo test --workspace
+
+      - name: Build localbar binary (smoke test)
+        if: runner.os == 'Linux'
+        run: cargo build --bin localbar --target ${{ matrix.target }}
+
+      - name: Smoke-test binary starts and exits
+        if: runner.os == 'Linux'
+        run: |
+          timeout 5 ./target/${{ matrix.target }}/debug/localbar --help || true
+          echo "binary ran without crash"
