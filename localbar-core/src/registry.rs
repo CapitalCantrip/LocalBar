@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Instant;
 
 use uuid::Uuid;
 
@@ -20,6 +21,9 @@ pub struct InstanceRegistry {
     model_memory: HashMap<ModelMemoryKey, ModelMemory>,
     discovery_config: DiscoveryConfig,
     persistence: Box<dyn Persistence>,
+    /// Wall-clock instants for instances in Starting or SwitchingModel phase.
+    /// Consumed by lifecycle::poll_once when the instance reaches Running.
+    start_times: HashMap<Uuid, Instant>,
 }
 
 impl InstanceRegistry {
@@ -30,6 +34,7 @@ impl InstanceRegistry {
             model_memory: HashMap::new(),
             discovery_config: DiscoveryConfig::default(),
             persistence,
+            start_times: HashMap::new(),
         }
     }
 
@@ -166,6 +171,17 @@ impl InstanceRegistry {
 
     pub fn instance_count(&self) -> usize {
         self.instances.len()
+    }
+
+    /// Record the wall-clock start of a Starting or SwitchingModel transition.
+    pub fn record_start_time(&mut self, id: Uuid) {
+        self.start_times.insert(id, Instant::now());
+    }
+
+    /// Remove and return the recorded start instant, if any.
+    /// Called by lifecycle::poll_once when the instance reaches Running or Error.
+    pub fn consume_start_time(&mut self, id: Uuid) -> Option<Instant> {
+        self.start_times.remove(&id)
     }
 }
 

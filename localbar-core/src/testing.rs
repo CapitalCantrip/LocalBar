@@ -12,6 +12,11 @@ use crate::types::{
 pub struct MockDriver {
     pub server_type: ServerType,
     pub models: Vec<ModelRef>,
+    pub health_status: HealthStatus,
+    /// When false, `manages_lifecycle()` returns false (External-style driver).
+    pub manages_lifecycle: bool,
+    /// When true, `switch_requires_restart()` returns true (mlx-lm-style driver).
+    pub switch_requires_restart: bool,
     /// Captures (tag, content) pairs from `apply_managed_config` calls.
     pub managed_config_calls: Arc<Mutex<Vec<(String, String)>>>,
     /// Captures tag strings from `delete_managed_config` calls.
@@ -22,27 +27,43 @@ impl MockDriver {
     pub fn new(server_type: ServerType) -> Self {
         Self {
             server_type,
-            models: vec![
-                ModelRef {
-                    key: "model-a".to_string(),
-                    display_name: "Model A".to_string(),
-                    publisher: None,
-                    architecture: None,
-                    size_bytes: None,
-                    modified_secs: None,
-                },
-                ModelRef {
-                    key: "model-b".to_string(),
-                    display_name: "Model B".to_string(),
-                    publisher: None,
-                    architecture: None,
-                    size_bytes: None,
-                    modified_secs: None,
-                },
-            ],
+            models: Self::default_models(),
+            health_status: HealthStatus::Healthy,
+            manages_lifecycle: true,
+            switch_requires_restart: false,
             managed_config_calls: Arc::new(Mutex::new(Vec::new())),
             delete_config_calls: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    fn default_models() -> Vec<ModelRef> {
+        fn mk(key: &str, name: &str) -> ModelRef {
+            ModelRef { key: key.into(), display_name: name.into(), publisher: None, architecture: None, size_bytes: None, modified_secs: None }
+        }
+        vec![mk("model-a", "Model A"), mk("model-b", "Model B")]
+    }
+
+    /// A driver that reports Unhealthy but still manages its own process.
+    pub fn new_unhealthy(server_type: ServerType) -> Self {
+        Self {
+            health_status: HealthStatus::Unhealthy("not ready".into()),
+            ..Self::new(server_type)
+        }
+    }
+
+    /// A driver that reports Unhealthy AND does not manage its own lifecycle
+    /// (External-style: LocalBar cannot spawn it).
+    pub fn new_unmanaged_unhealthy(server_type: ServerType) -> Self {
+        Self {
+            health_status: HealthStatus::Unhealthy("not ready".into()),
+            manages_lifecycle: false,
+            ..Self::new(server_type)
+        }
+    }
+
+    /// A driver that requires a full process restart for model switches (mlx-lm-style).
+    pub fn new_restart(server_type: ServerType) -> Self {
+        Self { switch_requires_restart: true, ..Self::new(server_type) }
     }
 
     pub fn default_schema() -> Vec<ParamDescriptor> {
@@ -110,7 +131,15 @@ impl ServerDriver for MockDriver {
     }
 
     fn health_check(&self, _config: &ServerInstanceConfig) -> HealthStatus {
-        HealthStatus::Healthy
+        self.health_status.clone()
+    }
+
+    fn manages_lifecycle(&self) -> bool {
+        self.manages_lifecycle
+    }
+
+    fn switch_requires_restart(&self) -> bool {
+        self.switch_requires_restart
     }
 
     // ── Managed-config methods (Ollama-like behaviour when server_type == Ollama) ──
