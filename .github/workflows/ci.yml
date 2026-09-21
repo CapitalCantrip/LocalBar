@@ -61,12 +61,12 @@ jobs:
       - name: cargo test (workspace)
         run: cargo test --workspace
 
-      - name: Build localbar binary (smoke test)
+      - name: Build localbar-tauri binary (smoke test)
         if: runner.os == 'Linux'
-        run: cargo build --bin localbar --target ${{ matrix.target }}
+        run: cargo build --bin localbar-tauri --target ${{ matrix.target }}
 
       - name: Smoke-test binary starts and exits
         if: runner.os == 'Linux'
         run: |
-          timeout 5 ./target/${{ matrix.target }}/debug/localbar --help || true
+          timeout 5 ./target/${{ matrix.target }}/debug/localbar-tauri --help || true
           echo "binary ran without crash"
