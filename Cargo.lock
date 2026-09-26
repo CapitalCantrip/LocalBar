@@ -1812,6 +1812,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "socket2",
  "tempfile",
  "ureq",
  "uuid",

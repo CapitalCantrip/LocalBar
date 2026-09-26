@@ -6,6 +6,7 @@
 pub mod driver;
 pub mod drivers;
 pub mod lifecycle;
+pub mod net;
 pub mod persistence;
 pub mod registry;
 pub mod testing;

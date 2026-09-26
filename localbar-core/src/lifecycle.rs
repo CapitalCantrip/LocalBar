@@ -1,9 +1,9 @@
-use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use uuid::Uuid;
 
 use crate::driver::{HealthStatus, LaunchPlan, ServerDriver};
+use crate::net::port_is_open;
 use crate::registry::InstanceRegistry;
 use crate::types::{InstanceError, InstanceErrorKind, InstancePhase, ModelMemoryKey, ModelRef, ParamValues};
 
@@ -208,12 +208,6 @@ pub fn poll_adopted(reg: &mut InstanceRegistry, id: Uuid, health: bool) -> Vec<L
 }
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
-
-fn port_is_open(host: &str, port: u16) -> bool {
-    let Ok(mut addrs) = (host, port).to_socket_addrs() else { return false };
-    let Some(addr) = addrs.next() else { return false };
-    TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
-}
 
 fn phase_events(reg: &mut InstanceRegistry, id: Uuid, phase: InstancePhase) -> Vec<LifecycleEvent> {
     reg.set_phase(id, phase.clone()).ok();

@@ -19,6 +19,7 @@ use localbar_core::types::{
     DiscoveryConfig, InstanceError, InstanceErrorKind, InstancePhase, ModelMemoryKey, ModelRef,
     ParamValues, ServerInstanceConfig, ServerType,
 };
+use localbar_core::net::port_is_open;
 use localbar_core::{adopt_external_as_new_instance, ensure_managed_model, push_restart_duration_sample, update_model_memory};
 
 // ─── DTO ─────────────────────────────────────────────────────────────────────
@@ -148,13 +149,6 @@ fn spawn_from_plan(plan: &localbar_core::driver::LaunchPlan) -> Result<Child, St
     cmd.spawn().map_err(|e| format!("spawn failed: {e}"))
 }
 
-fn port_is_open(host: &str, port: u16) -> bool {
-    use std::net::{TcpStream, ToSocketAddrs};
-    use std::time::Duration;
-    let Ok(mut addrs) = (host, port).to_socket_addrs() else { return false };
-    let Some(addr) = addrs.next() else { return false };
-    TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
-}
 
 /// Send SIGTERM on Unix, then wait up to `grace_secs`, then SIGKILL.
 fn graceful_kill(mut child: Child, grace_secs: f64) {
