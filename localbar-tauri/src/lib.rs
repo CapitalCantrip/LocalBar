@@ -1156,8 +1156,11 @@ fn install_popover_key_monitor(app: &tauri::App) {
         event.as_ptr()
     });
 
+    // SAFETY: addLocalMonitorForEventsMatchingMask_handler is called on the main
+    // thread with a valid mask and block, as required by AppKit. The returned
+    // monitor is forgotten rather than dropped so it keeps intercepting events
+    // for the lifetime of the app, matching the installed handler's lifetime.
     unsafe {
-        // Leak the monitor intentionally: it must live as long as the app.
         let _monitor = NSEvent::addLocalMonitorForEventsMatchingMask_handler(
             NSEventMask::KeyDown,
             &block,
@@ -1176,6 +1179,9 @@ fn set_dock_icon() {
     use objc2_foundation::NSData;
     // SAFETY: called from setup_handler which runs on the main thread.
     let mtm = unsafe { MainThreadMarker::new_unchecked() };
+    // SAFETY: NSData::with_bytes copies the embedded icon bytes into a new
+    // NSData, and mtm proves this runs on the main thread as required by
+    // NSApplication::sharedApplication.
     unsafe {
         let data = NSData::with_bytes(include_bytes!("../icons/icon.png"));
         if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {

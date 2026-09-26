@@ -166,8 +166,6 @@ mod tests {
             self.0.lock().unwrap().load_discovery_config()
         }
     }
-    unsafe impl Send for SharedPersistence {}
-    unsafe impl Sync for SharedPersistence {}
 
     fn make_registry() -> InstanceRegistry {
         InstanceRegistry::new(Box::new(InMemoryPersistence::default()))
