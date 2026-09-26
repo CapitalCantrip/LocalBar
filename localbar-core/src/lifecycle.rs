@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::driver::{HealthStatus, LaunchPlan, ServerDriver};
 use crate::net::port_is_open;
 use crate::registry::InstanceRegistry;
-use crate::types::{InstanceError, InstanceErrorKind, InstancePhase, ModelMemoryKey, ModelRef, ParamValues};
+use crate::types::{InstanceError, InstanceErrorKind, InstancePhase, ModelMemoryKey, ModelRef, ParamValues, ServerType};
 
 #[derive(Debug, Clone)]
 pub enum LifecycleEvent {
@@ -29,7 +29,6 @@ pub enum PollOutcome {
     Done,
 }
 
-/// Precondition: instance is in Starting phase with start time recorded.
 pub fn start(
     reg: &mut InstanceRegistry,
     id: Uuid,
@@ -38,8 +37,33 @@ pub fn start(
     let Some(config) = reg.get_config(id).cloned() else {
         return (None, vec![]);
     };
+    if !start_should_proceed(reg, id, &config) {
+        return (None, vec![]);
+    }
 
-    let health = driver.health_check(&config);
+    reg.record_start_time(id);
+    let mut events = phase_events(reg, id, InstancePhase::Starting);
+
+    let (plan, rest) = start_from_stopped_config(reg, id, driver, &config);
+    events.extend(rest);
+    (plan, events)
+}
+
+fn start_should_proceed(reg: &InstanceRegistry, id: Uuid, config: &crate::types::ServerInstanceConfig) -> bool {
+    match reg.get_phase(id) {
+        Some(InstancePhase::Starting | InstancePhase::Stopping) => false,
+        Some(InstancePhase::Running) => config.server_type == ServerType::External,
+        _ => true,
+    }
+}
+
+fn start_from_stopped_config(
+    reg: &mut InstanceRegistry,
+    id: Uuid,
+    driver: &dyn ServerDriver,
+    config: &crate::types::ServerInstanceConfig,
+) -> (Option<LaunchPlan>, Vec<LifecycleEvent>) {
+    let health = driver.health_check(config);
 
     if health == HealthStatus::Healthy {
         return (None, phase_events(reg, id, InstancePhase::Running));
@@ -61,7 +85,7 @@ pub fn start(
         ));
     }
 
-    match driver.launch(&config, None, &config.instance_params) {
+    match driver.launch(config, None, &config.instance_params) {
         Ok(plan) => (Some(plan), vec![]),
         Err(e) => (None, error_events(reg, id, InstanceErrorKind::LaunchFailed, &e)),
     }
@@ -80,51 +104,99 @@ pub fn stop(
     (StopPlan { grace_secs }, events)
 }
 
-/// Precondition: config already updated with new model key and managed model ensured.
+#[derive(Debug, Clone)]
+pub enum SwitchPlan {
+    KeyOnly,
+    Restart { plan: LaunchPlan, old_key: Option<String> },
+    WarmLoad { model: ModelRef, old_key: Option<String> },
+    Failed { message: String },
+}
+
 pub fn switch_model(
     reg: &mut InstanceRegistry,
     id: Uuid,
+    model_key: &str,
     driver: &dyn ServerDriver,
-) -> (Option<LaunchPlan>, Vec<LifecycleEvent>) {
-    let events = phase_events(reg, id, InstancePhase::SwitchingModel);
-    let Some(config) = reg.get_config(id).cloned() else { return (None, events) };
-    if driver.switch_requires_restart() {
-        reg.record_start_time(id);
-        return switch_model_restart(reg, id, driver, &config, events);
+) -> (SwitchPlan, Vec<LifecycleEvent>) {
+    let old_key = reg.get_config(id).and_then(|c| c.selected_model_key.clone());
+
+    if let Err(e) = crate::select_model(reg, id, model_key, driver) {
+        return (SwitchPlan::Failed { message: e.clone() }, error_events(reg, id, InstanceErrorKind::ModelSwitchFailed, &e));
     }
-    switch_model_sync(reg, id, driver, &config, events)
+
+    if !matches!(reg.get_phase(id), Some(InstancePhase::Running)) {
+        return (SwitchPlan::KeyOnly, vec![]);
+    }
+
+    reg.record_start_time(id);
+    let events = phase_events(reg, id, InstancePhase::SwitchingModel);
+
+    let Some(config) = reg.get_config(id).cloned() else { return (SwitchPlan::KeyOnly, events) };
+
+    if driver.switch_requires_restart() {
+        switch_model_restart_plan(reg, id, driver, &config, old_key, events)
+    } else {
+        switch_model_warm_load_plan(&config, old_key, events)
+    }
 }
 
-fn switch_model_restart(
+fn switch_model_restart_plan(
     reg: &mut InstanceRegistry,
     id: Uuid,
     driver: &dyn ServerDriver,
     config: &crate::types::ServerInstanceConfig,
+    old_key: Option<String>,
     mut events: Vec<LifecycleEvent>,
-) -> (Option<LaunchPlan>, Vec<LifecycleEvent>) {
+) -> (SwitchPlan, Vec<LifecycleEvent>) {
     match driver.launch(config, None, &config.instance_params) {
-        Ok(plan) => (Some(plan), events),
+        Ok(plan) => (SwitchPlan::Restart { plan, old_key }, events),
         Err(e) => {
             reg.consume_start_time(id);
+            restore_old_key(reg, id, &old_key);
             events.extend(error_events(reg, id, InstanceErrorKind::ModelSwitchFailed, &e));
-            (None, events)
+            (SwitchPlan::Failed { message: e }, events)
         }
     }
 }
 
-fn switch_model_sync(
+fn switch_model_warm_load_plan(
+    config: &crate::types::ServerInstanceConfig,
+    old_key: Option<String>,
+    events: Vec<LifecycleEvent>,
+) -> (SwitchPlan, Vec<LifecycleEvent>) {
+    let key = config.selected_model_key.clone().unwrap_or_default();
+    let model = ModelRef { key: key.clone(), display_name: key, publisher: None, architecture: None, size_bytes: None, modified_secs: None };
+    (SwitchPlan::WarmLoad { model, old_key }, events)
+}
+
+fn restore_old_key(reg: &mut InstanceRegistry, id: Uuid, old_key: &Option<String>) {
+    reg.update_config(id, |c| c.selected_model_key = old_key.clone()).ok();
+    reg.save().ok();
+}
+
+pub fn finish_warm_load(
     reg: &mut InstanceRegistry,
     id: Uuid,
     driver: &dyn ServerDriver,
-    config: &crate::types::ServerInstanceConfig,
-    mut events: Vec<LifecycleEvent>,
-) -> (Option<LaunchPlan>, Vec<LifecycleEvent>) {
-    let key = config.selected_model_key.clone().unwrap_or_default();
-    let model = ModelRef { key: key.clone(), display_name: key, publisher: None, architecture: None, size_bytes: None, modified_secs: None };
-    match driver.switch_model(&model, &config.instance_params, config) {
-        Ok(()) => { events.extend(phase_events(reg, id, InstancePhase::Running)); (None, events) }
-        Err(e) => { events.extend(error_events(reg, id, InstanceErrorKind::ModelSwitchFailed, &e)); (None, events) }
+    result: Result<(), String>,
+    old_key: Option<String>,
+) -> Vec<LifecycleEvent> {
+    match result {
+        Ok(()) => finish_warm_load_ok(reg, id, driver),
+        Err(e) => finish_warm_load_err(reg, id, &old_key, &e),
     }
+}
+
+fn finish_warm_load_ok(reg: &mut InstanceRegistry, id: Uuid, driver: &dyn ServerDriver) -> Vec<LifecycleEvent> {
+    let elapsed = reg.consume_start_time(id).map(|t| t.elapsed()).unwrap_or_default();
+    persist_startup_metrics(reg, id, driver, elapsed);
+    phase_events(reg, id, InstancePhase::Running)
+}
+
+fn finish_warm_load_err(reg: &mut InstanceRegistry, id: Uuid, old_key: &Option<String>, msg: &str) -> Vec<LifecycleEvent> {
+    restore_old_key(reg, id, old_key);
+    reg.consume_start_time(id);
+    error_events(reg, id, InstanceErrorKind::ModelSwitchFailed, msg)
 }
 
 pub fn adopt(reg: &mut InstanceRegistry, id: Uuid) -> Vec<LifecycleEvent> {
@@ -243,7 +315,10 @@ mod tests {
     use crate::testing::MockDriver;
     use crate::types::{InstancePhase, ServerInstanceConfig, ServerType};
 
-    use super::{adopt, poll_adopted, poll_once, start, stop, switch_model, LifecycleEvent, PollContext, PollOutcome};
+    use super::{
+        adopt, finish_warm_load, poll_adopted, poll_once, start, stop, switch_model, LifecycleEvent,
+        PollContext, PollOutcome, SwitchPlan,
+    };
 
     fn make_registry() -> InstanceRegistry {
         InstanceRegistry::new(Box::new(InMemoryPersistence::default()))
@@ -275,21 +350,19 @@ mod tests {
     fn start_returns_launch_plan_for_unhealthy_managed_instance() {
         let mut reg = make_registry();
         let id = reg.add_instance(ollama_config("a"));
-        reg.set_phase(id, InstancePhase::Starting).unwrap();
-        reg.record_start_time(id);
         let driver = MockDriver::new_unhealthy(ServerType::Ollama);
 
         let (plan, events) = start(&mut reg, id, &driver);
         assert!(plan.is_some(), "should return a LaunchPlan");
-        assert!(events.is_empty(), "no phase events yet when spawning");
+        assert_eq!(events.first().map(|e| match e {
+            LifecycleEvent::PhaseChanged(_, p) => p.clone(),
+        }), Some(InstancePhase::Starting), "must emit Starting first");
     }
 
     #[test]
     fn start_adopts_healthy_instance_as_running() {
         let mut reg = make_registry();
         let id = reg.add_instance(ollama_config("a"));
-        reg.set_phase(id, InstancePhase::Starting).unwrap();
-        reg.record_start_time(id);
         let driver = MockDriver::new(ServerType::Ollama);
 
         let (plan, events) = start(&mut reg, id, &driver);
@@ -302,8 +375,6 @@ mod tests {
     fn start_external_not_reachable_gives_health_check_failed() {
         let mut reg = make_registry();
         let id = reg.add_instance(external_config("ext"));
-        reg.set_phase(id, InstancePhase::Starting).unwrap();
-        reg.record_start_time(id);
         let driver = MockDriver::new_unmanaged_unhealthy(ServerType::External);
 
         let (plan, events) = start(&mut reg, id, &driver);
@@ -312,6 +383,63 @@ mod tests {
             phase_of(&events),
             Some(InstancePhase::Error(e)) if matches!(e.kind, crate::types::InstanceErrorKind::HealthCheckFailed)
         ));
+    }
+
+    #[test]
+    fn start_from_stopped_never_leaves_stopped_and_records_start_time() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(ollama_config("a"));
+        assert_eq!(reg.get_phase(id), Some(&InstancePhase::Stopped));
+        let driver = MockDriver::new_unhealthy(ServerType::Ollama);
+
+        start(&mut reg, id, &driver);
+
+        assert_ne!(reg.get_phase(id), Some(&InstancePhase::Stopped), "start must move the instance out of Stopped");
+        assert!(reg.consume_start_time(id).is_some(), "start must record the start time");
+    }
+
+    #[test]
+    fn start_noop_when_starting_or_stopping() {
+        for in_progress_phase in [InstancePhase::Starting, InstancePhase::Stopping] {
+            let mut reg = make_registry();
+            let id = reg.add_instance(ollama_config("a"));
+            reg.set_phase(id, in_progress_phase.clone()).unwrap();
+            let driver = MockDriver::new(ServerType::Ollama);
+
+            let (plan, events) = start(&mut reg, id, &driver);
+
+            assert!(plan.is_none());
+            assert!(events.is_empty(), "must not emit events for {in_progress_phase:?}");
+            assert_eq!(reg.get_phase(id), Some(&in_progress_phase));
+            assert!(reg.consume_start_time(id).is_none(), "must not record a start time for {in_progress_phase:?}");
+        }
+    }
+
+    #[test]
+    fn start_noop_when_managed_instance_already_running() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(ollama_config("a"));
+        reg.set_phase(id, InstancePhase::Running).unwrap();
+        let driver = MockDriver::new(ServerType::Ollama);
+
+        let (plan, events) = start(&mut reg, id, &driver);
+
+        assert!(plan.is_none());
+        assert!(events.is_empty());
+        assert_eq!(reg.get_phase(id), Some(&InstancePhase::Running));
+        assert!(reg.consume_start_time(id).is_none());
+    }
+
+    #[test]
+    fn start_proceeds_when_external_instance_already_running() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(external_config("lm-studio"));
+        reg.set_phase(id, InstancePhase::Running).unwrap();
+        let driver = MockDriver::new_unhealthy(ServerType::External);
+
+        let (_, events) = start(&mut reg, id, &driver);
+
+        assert_eq!(phase_of(&events), Some(InstancePhase::Starting));
     }
 
     #[test]
@@ -327,93 +455,123 @@ mod tests {
         assert_eq!(reg.get_phase(id), Some(&InstancePhase::Stopping));
     }
 
-    #[test]
-    fn switch_model_sync_driver_transitions_to_running() {
-        let mut reg = make_registry();
-        let id = reg.add_instance(ollama_config("a"));
-        reg.set_phase(id, InstancePhase::Running).unwrap();
-        let driver = MockDriver::new(ServerType::Ollama);
-
-        let (plan, events) = switch_model(&mut reg, id, &driver);
-        assert!(plan.is_none());
-        assert_eq!(phase_of(&events), Some(InstancePhase::Running));
-        assert_eq!(reg.get_phase(id), Some(&InstancePhase::Running));
-    }
-
-    #[test]
-    fn switch_model_sets_switching_model_phase_first() {
-        let mut reg = make_registry();
-        let id = reg.add_instance(ollama_config("a"));
-        reg.set_phase(id, InstancePhase::Running).unwrap();
-        let driver = MockDriver::new(ServerType::Ollama);
-
-        let (_, events) = switch_model(&mut reg, id, &driver);
-        let phases: Vec<_> = events.iter().map(|e| match e {
-            LifecycleEvent::PhaseChanged(_, p) => p.clone(),
-        }).collect();
-        assert!(phases.contains(&InstancePhase::SwitchingModel), "must pass through SwitchingModel");
-    }
-
-    #[test]
-    fn switch_model_restart_driver_returns_launch_plan() {
-        let mut reg = make_registry();
-        let id = reg.add_instance(ollama_config("a"));
-        reg.set_phase(id, InstancePhase::Running).unwrap();
-        let driver = MockDriver::new_restart(ServerType::MlxLm);
-
-        let (plan, events) = switch_model(&mut reg, id, &driver);
-        assert!(plan.is_some(), "restart driver must return a LaunchPlan");
-        assert_eq!(phase_of(&events), Some(InstancePhase::SwitchingModel));
-    }
-
-    #[test]
-    fn switch_model_records_start_time() {
-        let mut reg = make_registry();
-        let id = reg.add_instance(ollama_config("a"));
-        reg.set_phase(id, InstancePhase::Running).unwrap();
-        let driver = MockDriver::new_restart(ServerType::MlxLm);
-
-        switch_model(&mut reg, id, &driver);
-        assert!(reg.consume_start_time(id).is_some(), "start time must be recorded");
-    }
-
-    #[test]
-    fn switch_model_restart_launch_failure_does_not_leak_start_time() {
-        struct FailLaunchDriver;
-        impl crate::driver::ServerDriver for FailLaunchDriver {
-            fn server_type(&self) -> crate::types::ServerType { crate::types::ServerType::MlxLm }
-            fn param_schema(&self) -> Vec<crate::types::ParamDescriptor> { vec![] }
-            fn switch_requires_restart(&self) -> bool { true }
-            fn launch(&self, _: &crate::types::ServerInstanceConfig, _: Option<&crate::types::ModelRef>, _: &crate::types::ParamValues) -> Result<crate::driver::LaunchPlan, String> {
-                Err("launch failed".into())
-            }
-            fn stop(&self, _: &crate::types::ServerInstanceConfig) -> crate::driver::ShutdownPlan {
-                crate::driver::ShutdownPlan { grace_period_secs: 0.0 }
-            }
-            fn list_models(&self, _: &crate::types::ServerInstanceConfig) -> Result<Vec<crate::types::ModelRef>, String> { Ok(vec![]) }
-            fn switch_model(&self, _: &crate::types::ModelRef, _: &crate::types::ParamValues, _: &crate::types::ServerInstanceConfig) -> Result<(), String> { Ok(()) }
-            fn health_check(&self, _: &crate::types::ServerInstanceConfig) -> crate::driver::HealthStatus {
-                crate::driver::HealthStatus::Unhealthy("not ready".into())
-            }
+    struct FailLaunchDriver;
+    impl crate::driver::ServerDriver for FailLaunchDriver {
+        fn server_type(&self) -> crate::types::ServerType { crate::types::ServerType::MlxLm }
+        fn param_schema(&self) -> Vec<crate::types::ParamDescriptor> { vec![] }
+        fn switch_requires_restart(&self) -> bool { true }
+        fn launch(&self, _: &crate::types::ServerInstanceConfig, _: Option<&crate::types::ModelRef>, _: &crate::types::ParamValues) -> Result<crate::driver::LaunchPlan, String> {
+            Err("launch failed".into())
         }
+        fn stop(&self, _: &crate::types::ServerInstanceConfig) -> crate::driver::ShutdownPlan {
+            crate::driver::ShutdownPlan { grace_period_secs: 0.0 }
+        }
+        fn list_models(&self, _: &crate::types::ServerInstanceConfig) -> Result<Vec<crate::types::ModelRef>, String> { Ok(vec![]) }
+        fn switch_model(&self, _: &crate::types::ModelRef, _: &crate::types::ParamValues, _: &crate::types::ServerInstanceConfig) -> Result<(), String> { Ok(()) }
+        fn health_check(&self, _: &crate::types::ServerInstanceConfig) -> crate::driver::HealthStatus {
+            crate::driver::HealthStatus::Unhealthy("not ready".into())
+        }
+    }
 
+    #[test]
+    fn switch_model_not_running_returns_key_only() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(ollama_config("a"));
+        let driver = MockDriver::new(ServerType::Ollama);
+
+        let (plan, events) = switch_model(&mut reg, id, "new-model", &driver);
+
+        assert!(matches!(plan, SwitchPlan::KeyOnly));
+        assert!(events.is_empty(), "no phase change when instance is not running");
+        assert_eq!(reg.get_config(id).unwrap().selected_model_key.as_deref(), Some("new-model"));
+    }
+
+    #[test]
+    fn switch_model_restart_driver_returns_restart_plan() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(ollama_config("a"));
+        reg.set_phase(id, InstancePhase::Running).unwrap();
+        let driver = MockDriver::new_restart(ServerType::MlxLm);
+
+        let (plan, events) = switch_model(&mut reg, id, "new-model", &driver);
+
+        match plan {
+            SwitchPlan::Restart { old_key, .. } => assert_eq!(old_key.as_deref(), Some("llama3:8b")),
+            other => panic!("expected Restart, got {other:?}"),
+        }
+        assert_eq!(phase_of(&events), Some(InstancePhase::SwitchingModel));
+        assert!(reg.consume_start_time(id).is_some(), "start time must be recorded before a restart");
+    }
+
+    #[test]
+    fn switch_model_sync_driver_returns_warm_load_plan() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(ollama_config("a"));
+        reg.set_phase(id, InstancePhase::Running).unwrap();
+        let driver = MockDriver::new(ServerType::Ollama);
+
+        let (plan, events) = switch_model(&mut reg, id, "new-model", &driver);
+
+        match plan {
+            SwitchPlan::WarmLoad { model, old_key } => {
+                assert_eq!(model.key, "new-model");
+                assert_eq!(old_key.as_deref(), Some("llama3:8b"));
+            }
+            other => panic!("expected WarmLoad, got {other:?}"),
+        }
+        assert_eq!(phase_of(&events), Some(InstancePhase::SwitchingModel));
+        assert_eq!(reg.get_phase(id), Some(&InstancePhase::SwitchingModel), "must not resolve to Running until finish_warm_load");
+    }
+
+    #[test]
+    fn switch_model_restart_launch_failure_restores_old_key_and_fails() {
         let mut reg = make_registry();
         let id = reg.add_instance(ollama_config("a"));
         reg.set_phase(id, InstancePhase::Running).unwrap();
 
-        switch_model(&mut reg, id, &FailLaunchDriver);
+        let (plan, events) = switch_model(&mut reg, id, "new-model", &FailLaunchDriver);
+
+        assert!(matches!(plan, SwitchPlan::Failed { .. }));
+        assert!(matches!(
+            phase_of(&events),
+            Some(InstancePhase::Error(e)) if matches!(e.kind, crate::types::InstanceErrorKind::ModelSwitchFailed)
+        ));
+        assert_eq!(reg.get_config(id).unwrap().selected_model_key.as_deref(), Some("llama3:8b"), "old key must be restored");
         assert!(reg.consume_start_time(id).is_none(), "restart launch failure must not leak start time");
     }
 
     #[test]
-    fn switch_model_sync_does_not_leak_start_time() {
+    fn finish_warm_load_ok_sets_running_and_persists_metrics() {
         let mut reg = make_registry();
         let id = reg.add_instance(ollama_config("a"));
-        reg.set_phase(id, InstancePhase::Running).unwrap();
+        reg.set_phase(id, InstancePhase::SwitchingModel).unwrap();
+        reg.record_start_time(id);
         let driver = MockDriver::new(ServerType::Ollama);
 
-        switch_model(&mut reg, id, &driver);
-        assert!(reg.consume_start_time(id).is_none(), "sync path must not leave a start time in the registry");
+        let events = finish_warm_load(&mut reg, id, &driver, Ok(()), None);
+
+        assert_eq!(phase_of(&events), Some(InstancePhase::Running));
+        assert_eq!(reg.get_phase(id), Some(&InstancePhase::Running));
+        assert!(reg.consume_start_time(id).is_none(), "start time must be consumed");
+    }
+
+    #[test]
+    fn finish_warm_load_err_restores_old_key_and_sets_error() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(ollama_config("a"));
+        reg.set_phase(id, InstancePhase::SwitchingModel).unwrap();
+        reg.record_start_time(id);
+        let driver = MockDriver::new(ServerType::Ollama);
+        let old_key = Some("old-model".to_string());
+
+        let events = finish_warm_load(&mut reg, id, &driver, Err("driver switch failed".into()), old_key.clone());
+
+        assert!(matches!(
+            phase_of(&events),
+            Some(InstancePhase::Error(e)) if matches!(e.kind, crate::types::InstanceErrorKind::ModelSwitchFailed)
+        ));
+        assert_eq!(reg.get_config(id).unwrap().selected_model_key, old_key, "must roll back to the old key");
+        assert!(reg.consume_start_time(id).is_none(), "start time must be consumed");
     }
 
     #[test]
@@ -591,8 +749,6 @@ mod tests {
         cfg.host = "127.0.0.1".into();
         cfg.selected_model_key = Some("llama3:8b".into());
         let id = reg.add_instance(cfg);
-        reg.set_phase(id, InstancePhase::Starting).unwrap();
-        reg.record_start_time(id);
         let driver = MockDriver::new_unhealthy(ServerType::Ollama);
 
         let (plan, events) = start(&mut reg, id, &driver);
@@ -601,43 +757,6 @@ mod tests {
             phase_of(&events),
             Some(InstancePhase::Error(e)) if matches!(e.kind, crate::types::InstanceErrorKind::PortConflict { .. })
         ));
-    }
-
-    struct SwitchFailDriver;
-    impl crate::driver::ServerDriver for SwitchFailDriver {
-        fn server_type(&self) -> crate::types::ServerType { crate::types::ServerType::Ollama }
-        fn param_schema(&self) -> Vec<crate::types::ParamDescriptor> { vec![] }
-        fn launch(&self, c: &crate::types::ServerInstanceConfig, _: Option<&crate::types::ModelRef>, _: &crate::types::ParamValues) -> Result<crate::driver::LaunchPlan, String> {
-            Ok(crate::driver::LaunchPlan { executable: c.executable_path.clone(), arguments: vec![], environment: vec![], working_directory: None })
-        }
-        fn stop(&self, _: &crate::types::ServerInstanceConfig) -> crate::driver::ShutdownPlan {
-            crate::driver::ShutdownPlan { grace_period_secs: 0.0 }
-        }
-        fn list_models(&self, _: &crate::types::ServerInstanceConfig) -> Result<Vec<crate::types::ModelRef>, String> { Ok(vec![]) }
-        fn switch_model(&self, _: &crate::types::ModelRef, _: &crate::types::ParamValues, _: &crate::types::ServerInstanceConfig) -> Result<(), String> {
-            Err("driver switch failed".into())
-        }
-        fn health_check(&self, _: &crate::types::ServerInstanceConfig) -> crate::driver::HealthStatus {
-            crate::driver::HealthStatus::Unhealthy("not ready".into())
-        }
-    }
-
-    #[test]
-    fn switch_model_sync_driver_failure_gives_model_switch_failed() {
-        let mut reg = make_registry();
-        let id = reg.add_instance(ollama_config("a"));
-        reg.set_phase(id, InstancePhase::Running).unwrap();
-
-        let (plan, events) = switch_model(&mut reg, id, &SwitchFailDriver);
-        assert!(plan.is_none());
-        assert!(matches!(
-            phase_of(&events),
-            Some(InstancePhase::Error(e)) if matches!(e.kind, crate::types::InstanceErrorKind::ModelSwitchFailed)
-        ));
-        assert_eq!(reg.get_phase(id), Some(&InstancePhase::Error(crate::types::InstanceError {
-            kind: crate::types::InstanceErrorKind::ModelSwitchFailed,
-            message: "driver switch failed".into(),
-        })));
     }
 
     #[test]

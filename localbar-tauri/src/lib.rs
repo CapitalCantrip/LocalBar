@@ -13,14 +13,14 @@ use localbar_core::driver::{HealthStatus, ModelMetadata, ServerDriver};
 use localbar_core::drivers::external::ExternalDriver;
 use localbar_core::drivers::mlx_lm::MLXLMDriver;
 use localbar_core::drivers::ollama::{self, OllamaDriver};
-use localbar_core::lifecycle::{self, LifecycleEvent, PollContext, PollOutcome};
+use localbar_core::lifecycle::{self, LifecycleEvent, PollContext, PollOutcome, SwitchPlan};
 use localbar_core::persistence::FilePersistence;
 use localbar_core::registry::InstanceRegistry;
 use localbar_core::types::{
     DiscoveryConfig, InstanceError, InstanceErrorKind, InstancePhase, ModelMemoryKey, ModelRef,
     ParamValues, ServerInstanceConfig, ServerType,
 };
-use localbar_core::{adopt_external_as_new_instance, ensure_managed_model};
+use localbar_core::{adopt_external_as_new_instance, set_active_profile, set_instance_params};
 
 // ─── DTO ─────────────────────────────────────────────────────────────────────
 
@@ -208,19 +208,6 @@ fn process_is_alive(app: &AppHandle, id: Uuid) -> bool {
     }
 }
 
-fn rollback_switch_key(app: &AppHandle, id: Uuid, old_key: &Option<String>) {
-    let state = app.state::<AppState>();
-    let mut reg = state.registry.lock().unwrap();
-    reg.update_config(id, |c| c.selected_model_key = old_key.clone()).ok();
-    reg.save().ok();
-}
-
-fn spawn_for_model_switch(config: &ServerInstanceConfig) -> Result<Child, String> {
-    let driver = driver_for(config, &DiscoveryConfig::default());
-    let plan = driver.launch(config, None, &config.instance_params)?;
-    spawn_from_plan(&plan)
-}
-
 fn poll_tick(
     app: &AppHandle,
     id: Uuid,
@@ -260,9 +247,12 @@ async fn run_restart_switch_poll(app: AppHandle, id: Uuid, old_key: Option<Strin
     run_poll_loop(app, id, PollContext::ModelSwitch { old_key }).await;
 }
 
-/// Kill the current process and relaunch with the new model key already set in config.
-/// Returns Ok(false) on success (health poll handles memory recording); Err on spawn failure.
-async fn warm_load_model_restart(app: &AppHandle, id: Uuid, old_key: Option<String>) -> Result<bool, String> {
+async fn switch_model_restart(
+    app: &AppHandle,
+    id: Uuid,
+    plan: &localbar_core::driver::LaunchPlan,
+    old_key: Option<String>,
+) -> Result<(), String> {
     let child = app.state::<AppState>().processes.lock().unwrap().remove(&id);
     let grace = clone_config(app, id)
         .map(|c| driver_for(&c, &DiscoveryConfig::default()).stop(&c).grace_period_secs)
@@ -272,18 +262,27 @@ async fn warm_load_model_restart(app: &AppHandle, id: Uuid, old_key: Option<Stri
             .await
             .map_err(|e| e.to_string())?;
     }
-    let Some(config) = clone_config(app, id) else { return Ok(false) };
-    match spawn_for_model_switch(&config) {
+    match spawn_from_plan(plan) {
         Ok(child) => {
             app.state::<AppState>().processes.lock().unwrap().insert(id, child);
             tauri::async_runtime::spawn(run_restart_switch_poll(app.clone(), id, old_key));
-            Ok(false)
+            Ok(())
         }
-        Err(e) => {
-            set_error_emit(app, id, InstanceErrorKind::ModelSwitchFailed, &e);
-            Err(e)
-        }
+        Err(e) => fail_switch(app, id, old_key, e),
     }
+}
+
+fn fail_switch(app: &AppHandle, id: Uuid, old_key: Option<String>, message: String) -> Result<(), String> {
+    let events = {
+        let state = app.state::<AppState>();
+        let mut reg = state.registry.lock().unwrap();
+        let Some(config) = reg.get_config(id).cloned() else { return Err(message) };
+        let discovery = reg.get_discovery_config().clone();
+        let driver = driver_for(&config, &discovery);
+        lifecycle::finish_warm_load(&mut reg, id, &*driver, Err(message.clone()), old_key)
+    };
+    emit_lifecycle_events(app, events);
+    Err(message)
 }
 
 // ─── Core launch logic (shared by IPC command + startup) ─────────────────────
@@ -572,24 +571,9 @@ fn set_model_search_path_override(
 async fn start_instance(state: State<'_, AppState>, app: AppHandle, id: String) -> Result<(), String> {
     let uuid = parse_uuid(&id)?;
     {
-        let mut reg = state.registry.lock().unwrap();
-        let is_external = reg.get_config(uuid)
-            .ok_or("instance not found")
-            .map(|c| c.server_type == ServerType::External)?;
-        let phase = reg.get_phase(uuid);
-        // Always skip transitions already in progress.
-        if matches!(phase, Some(InstancePhase::Starting | InstancePhase::Stopping)) {
-            return Ok(());
-        }
-        // For managed instances, Running means the server is up — no action needed.
-        // For External instances, allow re-validation: the unmanaged server may have stopped.
-        if !is_external && matches!(phase, Some(InstancePhase::Running)) {
-            return Ok(());
-        }
-        reg.set_phase(uuid, InstancePhase::Starting).ok();
-        reg.record_start_time(uuid);
+        let reg = state.registry.lock().unwrap();
+        reg.get_config(uuid).ok_or("instance not found")?;
     }
-    app.emit("phase-changed", uuid.to_string()).ok();
     // launch_instance does blocking network I/O (health checks); run it off the main thread.
     tauri::async_runtime::spawn_blocking(move || launch_instance(app, uuid));
     Ok(())
@@ -647,39 +631,30 @@ async fn stop_instance(state: State<'_, AppState>, app: AppHandle, id: String) -
 
 // ─── IPC: T8 param tuning + model management ─────────────────────────────────
 
-/// Returns Ok(true) when the caller should call record_model_memory_on_running (sync switch).
-/// Returns Ok(false) for a restart switch — the health poll records memory when healthy.
-async fn warm_load_model(app: &AppHandle, id: Uuid, old_key: Option<String>) -> Result<bool, String> {
-    let Some(config) = clone_config(app, id) else { return Ok(true) };
-    let Some(model_key) = config.selected_model_key.clone() else { return Ok(true) };
-    let phase = app.state::<AppState>().registry.lock().unwrap().get_phase(id).cloned();
-    if !matches!(phase, Some(InstancePhase::Running)) { return Ok(true) }
-    set_phase_emit(app, id, InstancePhase::SwitchingModel);
-    let driver = driver_for(&config, &DiscoveryConfig::default());
-    if driver.switch_requires_restart() {
-        return warm_load_model_restart(app, id, old_key).await;
-    }
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        let model = ModelRef { key: model_key.clone(), display_name: model_key, publisher: None, architecture: None, modified_secs: None, size_bytes: None };
-        driver.switch_model(&model, &config.instance_params, &config)
-    }).await.map_err(|e| e.to_string())?;
-    match result {
-        Ok(()) => Ok(true),
-        Err(e) => { set_error_emit(app, id, InstanceErrorKind::ModelSwitchFailed, &e); Err(e) }
-    }
-}
-
-fn record_switch_running(app: &AppHandle, id: Uuid, old_key: Option<String>) -> Vec<LifecycleEvent> {
-    let state = app.state::<AppState>();
-    let mut reg = state.registry.lock().unwrap();
-    let elapsed = reg.consume_start_time(id).map(|t| t.elapsed()).unwrap_or_default();
-    let Some(config) = reg.get_config(id).cloned() else { return vec![] };
-    let discovery = reg.get_discovery_config().clone();
+async fn switch_model_warm_load(
+    app: &AppHandle,
+    id: Uuid,
+    model: ModelRef,
+    old_key: Option<String>,
+) -> Result<(), String> {
+    let Some(config) = clone_config(app, id) else { return Ok(()) };
+    let discovery = discovery_config(app);
     let driver = driver_for(&config, &discovery);
-    let (_, events) = lifecycle::poll_once(
-        &mut reg, id, &*driver, true, true, elapsed, PollContext::ModelSwitch { old_key },
-    );
-    events
+    let params = config.instance_params.clone();
+    let switch_result = tauri::async_runtime::spawn_blocking(move || {
+        driver.switch_model(&model, &params, &config)
+    }).await.map_err(|e| e.to_string())?;
+
+    let events = {
+        let state = app.state::<AppState>();
+        let mut reg = state.registry.lock().unwrap();
+        let Some(cfg) = reg.get_config(id).cloned() else { return switch_result };
+        let discovery = reg.get_discovery_config().clone();
+        let driver = driver_for(&cfg, &discovery);
+        lifecycle::finish_warm_load(&mut reg, id, &*driver, switch_result.clone(), old_key)
+    };
+    emit_lifecycle_events(app, events);
+    switch_result
 }
 
 #[tauri::command]
@@ -690,26 +665,21 @@ async fn switch_model_cmd(
     model_key: String,
 ) -> Result<(), String> {
     let uuid = parse_uuid(&id)?;
-    let old_key = {
+    let (plan, events) = {
         let mut reg = state.registry.lock().unwrap();
-        let old_key = reg.get_config(uuid).and_then(|c| c.selected_model_key.clone());
-        reg.update_config(uuid, |c| c.selected_model_key = Some(model_key))?;
-        let config = reg.get_config(uuid).unwrap().clone();
-        let driver = driver_for(&config, &DiscoveryConfig::default());
-        ensure_managed_model(&mut reg, uuid, &*driver)?;
-        // Record when the switch begins so its duration can be pushed to ModelMemory.
-        reg.record_start_time(uuid);
-        old_key
+        let config = reg.get_config(uuid).cloned().ok_or("instance not found")?;
+        let discovery = reg.get_discovery_config().clone();
+        let driver = driver_for(&config, &discovery);
+        lifecycle::switch_model(&mut reg, uuid, &model_key, &*driver)
     };
+    emit_lifecycle_events(&app, events);
     app.emit("config-changed", uuid.to_string()).ok();
-    match warm_load_model(&app, uuid, old_key.clone()).await {
-        Ok(true) => {
-            let events = record_switch_running(&app, uuid, old_key);
-            emit_lifecycle_events(&app, events);
-            Ok(())
-        }
-        Ok(false) => Ok(()),  // restart path: poll records memory when healthy
-        Err(e) => { rollback_switch_key(&app, uuid, &old_key); Err(e) }
+
+    match plan {
+        SwitchPlan::KeyOnly => Ok(()),
+        SwitchPlan::Failed { message } => Err(message),
+        SwitchPlan::Restart { plan, old_key } => switch_model_restart(&app, uuid, &plan, old_key).await,
+        SwitchPlan::WarmLoad { model, old_key } => switch_model_warm_load(&app, uuid, model, old_key).await,
     }
 }
 
@@ -721,10 +691,9 @@ fn update_instance_params(
 ) -> Result<(), String> {
     let uuid = parse_uuid(&id)?;
     let mut reg = state.registry.lock().unwrap();
-    reg.update_config(uuid, |c| c.instance_params = params)?;
-    let config = reg.get_config(uuid).unwrap().clone();
+    let config = reg.get_config(uuid).cloned().ok_or("instance not found")?;
     let driver = driver_for(&config, &DiscoveryConfig::default());
-    ensure_managed_model(&mut reg, uuid, &*driver)
+    set_instance_params(&mut reg, uuid, params, &*driver)
 }
 
 #[tauri::command]
@@ -736,10 +705,9 @@ fn set_active_profile_cmd(
     let uuid = parse_uuid(&id)?;
     let pid = profile_id.as_deref().map(parse_uuid).transpose()?;
     let mut reg = state.registry.lock().unwrap();
-    reg.update_config(uuid, |c| c.active_profile_id = pid)?;
-    let config = reg.get_config(uuid).unwrap().clone();
+    let config = reg.get_config(uuid).cloned().ok_or("instance not found")?;
     let driver = driver_for(&config, &DiscoveryConfig::default());
-    ensure_managed_model(&mut reg, uuid, &*driver)
+    set_active_profile(&mut reg, uuid, pid, &*driver)
 }
 
 fn list_non_ollama_models(stype: ServerType, discovery: &DiscoveryConfig) -> Result<Vec<ModelRef>, String> {

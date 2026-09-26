@@ -20,7 +20,11 @@ Concerns 1 and 3 had no test coverage, because the only seam available was the I
 
 ## Decision
 
-**Extract concern 1 into `localbar-core/src/lifecycle.rs` as a deep module with six free functions.**
+**Extract concern 1 into `localbar-core/src/lifecycle.rs` as a deep module of free functions.**
+
+Each function that mutates registry state performs its own preconditions instead of documenting
+them for the caller — `start` sets `Starting` and records the start time itself; `switch_model`
+writes the new model key and re-applies the managed tag itself (via `select_model`, in `lib.rs`).
 
 ```rust
 // localbar-core/src/lifecycle.rs
@@ -29,34 +33,50 @@ pub enum LifecycleEvent { PhaseChanged(Uuid, InstancePhase) }
 pub struct StopPlan      { pub grace_secs: f64 }
 pub enum PollContext      { Startup, ModelSwitch { old_key: Option<String> } }
 pub enum PollOutcome      { Continue, Done }
+pub enum SwitchPlan {
+    KeyOnly,
+    Restart { plan: LaunchPlan, old_key: Option<String> },
+    WarmLoad { model: ModelRef, old_key: Option<String> },
+    Failed { message: String },
+}
 
-/// Precondition: id is in Starting phase, start_time recorded in registry.
-/// Returns a LaunchPlan when the Tauri layer must spawn a process; None on
-/// adoption (phase → Running), port conflict, or error (phase → Error).
+// Sets Starting and records the start time itself, then returns a LaunchPlan when the
+// Tauri layer must spawn a process; None on adoption (phase → Running), port conflict,
+// or error (phase → Error). The first event returned is always PhaseChanged(Starting).
 pub fn start(reg: &mut InstanceRegistry, id: Uuid, driver: &dyn ServerDriver)
     -> (Option<LaunchPlan>, Vec<LifecycleEvent>);
 
-/// Sets Stopping; returns the driver's grace period for the Tauri layer to use.
+// Sets Stopping; returns the driver's grace period for the Tauri layer to use.
 pub fn stop(reg: &mut InstanceRegistry, id: Uuid, driver: &dyn ServerDriver)
     -> (StopPlan, Vec<LifecycleEvent>);
 
-/// Sets SwitchingModel and records start time. For restart drivers returns a
-/// LaunchPlan; for sync drivers completes the switch inline (phase → Running).
-pub fn switch_model(reg: &mut InstanceRegistry, id: Uuid, driver: &dyn ServerDriver)
-    -> (Option<LaunchPlan>, Vec<LifecycleEvent>);
+// Writes model_key and re-applies the managed tag (select_model). If the instance is not
+// Running, returns KeyOnly. Otherwise sets SwitchingModel, records the start time, and
+// returns a plan for the Tauri layer to carry out without holding the registry lock across
+// the driver's warm load (which can take up to 300 s for Ollama).
+pub fn switch_model(reg: &mut InstanceRegistry, id: Uuid, model_key: &str, driver: &dyn ServerDriver)
+    -> (SwitchPlan, Vec<LifecycleEvent>);
 
-/// Sets Running for an already-running adopted/external instance.
+// Completes a WarmLoad plan after the Tauri layer has run driver.switch_model outside the
+// lock. On Ok: persists metrics, consumes the start time, sets Running. On Err: restores
+// old_key and sets Error(ModelSwitchFailed).
+pub fn finish_warm_load(
+    reg: &mut InstanceRegistry, id: Uuid, driver: &dyn ServerDriver,
+    result: Result<(), String>, old_key: Option<String>,
+) -> Vec<LifecycleEvent>;
+
+// Sets Running for an already-running adopted/external instance.
 pub fn adopt(reg: &mut InstanceRegistry, id: Uuid) -> Vec<LifecycleEvent>;
 
-/// Synchronous poll tick for startup and model-switch polls.
-/// On Done + health=true: phase → Running, model memory and restart duration recorded.
+// Synchronous poll tick for startup and model-switch polls.
+// On Done + health=true: phase → Running, model memory and restart duration recorded.
 pub fn poll_once(
     reg: &mut InstanceRegistry, id: Uuid, driver: &dyn ServerDriver,
     health: bool, process_alive: bool, elapsed: Duration, ctx: PollContext,
 ) -> (PollOutcome, Vec<LifecycleEvent>);
 
-/// Ongoing health monitoring for adopted/external instances.
-/// Running → Error on health=false; Error → Running on health=true.
+// Ongoing health monitoring for adopted/external instances.
+// Running → Error on health=false; Error → Running on health=true.
 pub fn poll_adopted(reg: &mut InstanceRegistry, id: Uuid, health: bool)
     -> Vec<LifecycleEvent>;
 ```
