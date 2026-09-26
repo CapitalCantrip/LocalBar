@@ -72,28 +72,14 @@ impl AppState {
     }
 }
 
-// ─── Driver factory ──────────────────────────────────────────────────────────
-
-fn driver_for_type(server_type: ServerType) -> Box<dyn ServerDriver> {
-    match server_type {
-        ServerType::Ollama => Box::new(OllamaDriver),
-        ServerType::MlxLm => Box::new(MLXLMDriver::new(Vec::new())),
-        ServerType::External => Box::new(ExternalDriver),
-    }
-}
-
-fn mlx_driver_with_paths(search_paths: Vec<String>) -> Box<dyn ServerDriver> {
-    Box::new(MLXLMDriver::new(search_paths))
-}
-
-/// Build the right driver for a specific instance, resolving mlx-lm search paths.
-fn driver_for_instance(config: &ServerInstanceConfig, discovery: &DiscoveryConfig) -> Box<dyn ServerDriver> {
+fn driver_for(config: &ServerInstanceConfig, discovery: &DiscoveryConfig) -> Box<dyn ServerDriver> {
     match config.server_type {
+        ServerType::Ollama => Box::new(OllamaDriver),
         ServerType::MlxLm => {
             let paths = discovery.resolved_mlx_paths(config.model_search_path_override.as_deref());
-            mlx_driver_with_paths(paths)
+            Box::new(MLXLMDriver::new(paths))
         }
-        _ => driver_for_type(config.server_type),
+        ServerType::External => Box::new(ExternalDriver),
     }
 }
 
@@ -193,7 +179,7 @@ fn clone_config(app: &AppHandle, id: Uuid) -> Option<ServerInstanceConfig> {
 fn delete_managed_config_if_present(config: Option<&ServerInstanceConfig>) {
     let Some(cfg) = config else { return };
     let Some(tag) = &cfg.managed_model_tag else { return };
-    driver_for_type(cfg.server_type).delete_managed_config(cfg, tag).ok();
+    driver_for(cfg, &DiscoveryConfig::default()).delete_managed_config(cfg, tag).ok();
 }
 
 fn record_model_memory_on_running(app: &AppHandle, id: Uuid) {
@@ -201,7 +187,7 @@ fn record_model_memory_on_running(app: &AppHandle, id: Uuid) {
     let start_time = state.start_times.lock().unwrap().remove(&id);
     let mut reg = state.registry.lock().unwrap();
     let Some(config) = reg.get_config(id).cloned() else { return };
-    let schema = driver_for_type(config.server_type).param_schema();
+    let schema = driver_for(&config, &DiscoveryConfig::default()).param_schema();
     let profile = reg.get_active_profile_params(id).cloned();
     let mem_key = ModelMemoryKey {
         server_type: config.server_type,
@@ -219,7 +205,7 @@ fn record_model_memory_on_running(app: &AppHandle, id: Uuid) {
 
 fn check_health_once(app: &AppHandle, id: Uuid) -> bool {
     let Some(config) = clone_config(app, id) else { return false };
-    driver_for_type(config.server_type).health_check(&config) == HealthStatus::Healthy
+    driver_for(&config, &DiscoveryConfig::default()).health_check(&config) == HealthStatus::Healthy
 }
 
 fn process_is_alive(app: &AppHandle, id: Uuid) -> bool {
@@ -251,7 +237,7 @@ fn rollback_switch_key(app: &AppHandle, id: Uuid, old_key: &Option<String>) {
 }
 
 fn spawn_for_model_switch(config: &ServerInstanceConfig) -> Result<Child, String> {
-    let driver = driver_for_type(config.server_type);
+    let driver = driver_for(config, &DiscoveryConfig::default());
     let plan = driver.launch(config, None, &config.instance_params)?;
     spawn_from_plan(&plan)
 }
@@ -309,7 +295,7 @@ async fn run_restart_switch_poll(app: AppHandle, id: Uuid, old_key: Option<Strin
 async fn warm_load_model_restart(app: &AppHandle, id: Uuid, old_key: Option<String>) -> Result<bool, String> {
     let child = app.state::<AppState>().processes.lock().unwrap().remove(&id);
     let grace = clone_config(app, id)
-        .map(|c| driver_for_type(c.server_type).stop(&c).grace_period_secs)
+        .map(|c| driver_for(&c, &DiscoveryConfig::default()).stop(&c).grace_period_secs)
         .unwrap_or(0.0);
     if let Some(child) = child {
         tauri::async_runtime::spawn_blocking(move || graceful_kill(child, grace))
@@ -396,7 +382,7 @@ fn detect_port_conflict(app: &AppHandle, config: &ServerInstanceConfig, health: 
 
 /// Returns the spawned Child, or None if the instance was adopted/conflicted/errored.
 fn try_spawn_instance(app: &AppHandle, id: Uuid, config: &ServerInstanceConfig) -> Option<Child> {
-    let driver = driver_for_type(config.server_type);
+    let driver = driver_for(config, &DiscoveryConfig::default());
     let first_health = driver.health_check(config);
 
     if first_health == HealthStatus::Healthy {
@@ -472,7 +458,7 @@ async fn check_memory_warning(state: State<'_, AppState>, id: String) -> Result<
     let Some(config) = config else { return Ok(None) };
     let Some(model_key) = config.selected_model_key.clone() else { return Ok(None) };
     let models = tauri::async_runtime::spawn_blocking(move || {
-        driver_for_instance(&config, &discovery).list_models(&config)
+        driver_for(&config, &discovery).list_models(&config)
     }).await.map_err(|e| e.to_string())??;
     let size_bytes = match models.iter().find(|m| m.key == model_key).and_then(|m| m.size_bytes) {
         Some(s) => s as u64,
@@ -570,7 +556,7 @@ fn remove_instance(state: State<'_, AppState>, app: AppHandle, id: String) -> Re
     let (grace, config_snap) = {
         let reg = state.registry.lock().unwrap();
         let grace = reg.get_config(uuid)
-            .map(|c| driver_for_type(c.server_type).stop(c).grace_period_secs)
+            .map(|c| driver_for(c, &DiscoveryConfig::default()).stop(c).grace_period_secs)
             .unwrap_or(0.0);
         (grace, reg.get_config(uuid).cloned())
     };
@@ -675,7 +661,7 @@ async fn do_stop(app: &AppHandle, uuid: Uuid, child: Option<Child>, grace: f64) 
     // Adopted instance — verify it actually stopped.
     let config = clone_config(app, uuid);
     let still_up = tauri::async_runtime::spawn_blocking(move || {
-        config.map(|c| driver_for_type(c.server_type).health_check(&c) == HealthStatus::Healthy)
+        config.map(|c| driver_for(&c, &DiscoveryConfig::default()).health_check(&c) == HealthStatus::Healthy)
               .unwrap_or(false)
     }).await.unwrap_or(false);
     if still_up {
@@ -694,7 +680,7 @@ async fn stop_instance(state: State<'_, AppState>, app: AppHandle, id: String) -
     // Extract child before blocking ops so the mutex is not held during kill/wait.
     let child = state.processes.lock().unwrap().remove(&uuid);
     let grace = clone_config(&app, uuid)
-        .map(|c| driver_for_type(c.server_type).stop(&c).grace_period_secs)
+        .map(|c| driver_for(&c, &DiscoveryConfig::default()).stop(&c).grace_period_secs)
         .unwrap_or(0.0);
 
     if let Err(e) = do_stop(&app, uuid, child, grace).await {
@@ -724,7 +710,7 @@ async fn warm_load_model(app: &AppHandle, id: Uuid, old_key: Option<String>) -> 
     let phase = app.state::<AppState>().registry.lock().unwrap().get_phase(id).cloned();
     if !matches!(phase, Some(InstancePhase::Running)) { return Ok(true) }
     set_phase_emit(app, id, InstancePhase::SwitchingModel);
-    let driver = driver_for_type(config.server_type);
+    let driver = driver_for(&config, &DiscoveryConfig::default());
     if driver.switch_requires_restart() {
         return warm_load_model_restart(app, id, old_key).await;
     }
@@ -750,8 +736,8 @@ async fn switch_model_cmd(
         let mut reg = state.registry.lock().unwrap();
         let old_key = reg.get_config(uuid).and_then(|c| c.selected_model_key.clone());
         reg.update_config(uuid, |c| c.selected_model_key = Some(model_key))?;
-        let server_type = reg.get_config(uuid).unwrap().server_type;
-        let driver = driver_for_type(server_type);
+        let config = reg.get_config(uuid).unwrap().clone();
+        let driver = driver_for(&config, &DiscoveryConfig::default());
         ensure_managed_model(&mut reg, uuid, &*driver)?;
         old_key
     };
@@ -774,8 +760,8 @@ fn update_instance_params(
     let uuid = parse_uuid(&id)?;
     let mut reg = state.registry.lock().unwrap();
     reg.update_config(uuid, |c| c.instance_params = params)?;
-    let server_type = reg.get_config(uuid).unwrap().server_type;
-    let driver = driver_for_type(server_type);
+    let config = reg.get_config(uuid).unwrap().clone();
+    let driver = driver_for(&config, &DiscoveryConfig::default());
     ensure_managed_model(&mut reg, uuid, &*driver)
 }
 
@@ -789,25 +775,21 @@ fn set_active_profile_cmd(
     let pid = profile_id.as_deref().map(parse_uuid).transpose()?;
     let mut reg = state.registry.lock().unwrap();
     reg.update_config(uuid, |c| c.active_profile_id = pid)?;
-    let server_type = reg.get_config(uuid).unwrap().server_type;
-    let driver = driver_for_type(server_type);
+    let config = reg.get_config(uuid).unwrap().clone();
+    let driver = driver_for(&config, &DiscoveryConfig::default());
     ensure_managed_model(&mut reg, uuid, &*driver)
 }
 
 fn list_non_ollama_models(stype: ServerType, discovery: &DiscoveryConfig) -> Result<Vec<ModelRef>, String> {
     let probe = ServerInstanceConfig::new("probe", stype, 0, "");
-    let driver: Box<dyn ServerDriver> = match stype {
-        ServerType::MlxLm => mlx_driver_with_paths(discovery.mlx_lm_search_paths.clone()),
-        _ => driver_for_type(stype),
-    };
-    driver.list_models(&probe)
+    driver_for(&probe, discovery).list_models(&probe)
 }
 
 /// Try Ollama HTTP first, then CLI. Returns `Err("OLLAMA_UNREACHABLE")` when
 /// both fail — the UI uses this sentinel to show a free-text model entry field.
 fn list_ollama_models_with_fallback(discovery: &DiscoveryConfig) -> Result<Vec<ModelRef>, String> {
     let probe = ServerInstanceConfig::new("probe", ServerType::Ollama, 11434, "");
-    if let Ok(models) = driver_for_type(ServerType::Ollama).list_models(&probe) {
+    if let Ok(models) = driver_for(&probe, discovery).list_models(&probe) {
         return Ok(models);
     }
     let raw_exe = discovery.ollama_executable_path.as_deref().unwrap_or("");
@@ -857,8 +839,8 @@ fn model_to_discovered(stype: &str, m: ModelRef, meta: Option<ModelMetadata>) ->
 }
 
 fn discover_mlx_models(discovery: &DiscoveryConfig) -> Vec<DiscoveredModel> {
-    let driver = mlx_driver_with_paths(discovery.mlx_lm_search_paths.clone());
     let probe = ServerInstanceConfig::new("probe", ServerType::MlxLm, 0, "");
+    let driver = driver_for(&probe, discovery);
     driver.list_models(&probe).unwrap_or_default().into_iter().map(|m| {
         let meta = driver.fetch_model_metadata(&m.key, &probe);
         model_to_discovered("mlx-lm", m, meta)
@@ -869,7 +851,7 @@ fn discover_ollama_models(_discovery: &DiscoveryConfig) -> Vec<DiscoveredModel> 
     // HTTP-only: no CLI fallback here. Spawning `ollama list` activates the
     // Ollama.app on macOS via launch services and steals window focus.
     let probe = ServerInstanceConfig::new("probe", ServerType::Ollama, 11434, "");
-    driver_for_type(ServerType::Ollama)
+    driver_for(&probe, &DiscoveryConfig::default())
         .list_models(&probe)
         .unwrap_or_default()
         .into_iter()
@@ -910,7 +892,7 @@ async fn list_models_cmd(state: State<'_, AppState>, id: String) -> Result<Vec<M
     };
     let Some(config) = config else { return Err(format!("instance {id} not found")) };
     tauri::async_runtime::spawn_blocking(move || {
-        driver_for_instance(&config, &discovery).list_models(&config)
+        driver_for(&config, &discovery).list_models(&config)
     }).await.map_err(|e| e.to_string())?
 }
 
@@ -928,7 +910,7 @@ async fn fetch_model_metadata_cmd(
         (config, reg.get_discovery_config().clone())
     };
     tauri::async_runtime::spawn_blocking(move || {
-        Ok(driver_for_instance(&config, &discovery).fetch_model_metadata(&model_key, &config))
+        Ok(driver_for(&config, &discovery).fetch_model_metadata(&model_key, &config))
     }).await.map_err(|e| e.to_string())?
 }
 
@@ -943,7 +925,7 @@ fn get_resolved_params(state: State<'_, AppState>, id: String) -> Result<ParamVa
         model_key: config.selected_model_key.clone().unwrap_or_default(),
     };
     let memory = reg.get_model_memory(&mem_key);
-    let schema = driver_for_type(config.server_type).param_schema();
+    let schema = driver_for(config, &DiscoveryConfig::default()).param_schema();
     Ok(ParamValues::resolve(profile, memory, &schema).0)
 }
 
@@ -976,7 +958,8 @@ fn param_schema_entry(d: &localbar_core::types::ParamDescriptor) -> Option<Param
 #[tauri::command]
 fn get_param_schema(server_type: String) -> Result<Vec<ParamSchemaEntry>, String> {
     let stype = parse_server_type(&server_type)?;
-    Ok(driver_for_type(stype).param_schema().iter().filter_map(param_schema_entry).collect())
+    let probe = ServerInstanceConfig::new("probe", stype, 0, "");
+    Ok(driver_for(&probe, &DiscoveryConfig::default()).param_schema().iter().filter_map(param_schema_entry).collect())
 }
 
 #[tauri::command]
