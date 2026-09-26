@@ -1,0 +1,342 @@
+#!/usr/bin/env python3
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(
+    subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+)
+
+FIXTURES_DIR = REPO_ROOT / "scripts" / "fixtures"
+
+EXCLUDED_TOP_LEVEL_DIRS = {"LocalBar"}
+EXCLUDED_PATH_COMPONENTS = {"target", "node_modules"}
+EXCLUDED_PREFIXES = (
+    "localbar-tauri/ui/src/generated/",
+    "scripts/fixtures/",
+)
+
+ESCAPE = r"\\(?:u\{[0-9a-fA-F]+\}|.)"
+CHAR_LITERAL_RE = re.compile(r"'(?:" + ESCAPE + r"|[^'\\\n])'")
+DOUBLE_STRING_RE = re.compile(r'"(?:\\.|[^"\\])*"', re.DOTALL)
+TS_SINGLE_STRING_RE = re.compile(r"'(?:\\.|[^'\\])*'", re.DOTALL)
+RAW_STRING_RE = re.compile(r'b?r(#*)"[\s\S]*?"\1')
+TS_REGEX_RE = re.compile(r"/(?:\\.|\[(?:\\.|[^\]\\])*\]|[^/\\\n])+/[a-zA-Z]*")
+
+REGEX_PRECEDING_SYMBOLS = set("(,=:;!&|?{[+-*%<>^~")
+REGEX_PRECEDING_KEYWORDS = (
+    "return",
+    "typeof",
+    "instanceof",
+    "in",
+    "of",
+    "new",
+    "void",
+    "delete",
+    "case",
+    "yield",
+    "await",
+    "else",
+    "do",
+)
+
+
+def is_excluded(relative_path):
+    parts = Path(relative_path).parts
+    if parts and parts[0] in EXCLUDED_TOP_LEVEL_DIRS:
+        return True
+    if any(part in EXCLUDED_PATH_COMPONENTS for part in parts):
+        return True
+    for prefix in EXCLUDED_PREFIXES:
+        if relative_path.startswith(prefix):
+            return True
+    return False
+
+
+def regex_may_start_here(text, pos):
+    lookback = text[max(0, pos - 40) : pos]
+    stripped = lookback.rstrip()
+    if stripped == "":
+        return True
+    last_char = stripped[-1]
+    if last_char in REGEX_PRECEDING_SYMBOLS:
+        return True
+    for keyword in REGEX_PRECEDING_KEYWORDS:
+        if stripped.endswith(keyword):
+            before = stripped[: -len(keyword)]
+            if before == "" or not (before[-1].isalnum() or before[-1] == "_"):
+                return True
+    return False
+
+
+def advance_line_tracking(state, consumed_text, consumed_start):
+    newline_count = consumed_text.count("\n")
+    if newline_count:
+        last_newline = consumed_text.rfind("\n")
+        state["line"] += newline_count
+        state["line_start"] = consumed_start + last_newline + 1
+
+
+def scan_text(text, is_ts):
+    is_rust = not is_ts
+    n = len(text)
+    frames = [["FILE"]]
+    state = {"line": 1, "line_start": 0}
+    pos = 0
+    events = []
+
+    while pos < n:
+        frame = frames[-1]
+        ch = text[pos]
+
+        if frame[0] == "TEMPLATE":
+            if ch == "\\" and pos + 1 < n:
+                pos += 2
+                continue
+            if ch == "`":
+                frames.pop()
+                pos += 1
+                continue
+            if ch == "$" and pos + 1 < n and text[pos + 1] == "{":
+                frames.append(["INTERP", 0])
+                pos += 2
+                continue
+            if ch == "\n":
+                state["line"] += 1
+                state["line_start"] = pos + 1
+            pos += 1
+            continue
+
+        if ch == "\n":
+            state["line"] += 1
+            state["line_start"] = pos + 1
+            pos += 1
+            continue
+
+        if frame[0] == "INTERP":
+            if ch == "{":
+                frame[1] += 1
+                pos += 1
+                continue
+            if ch == "}":
+                if frame[1] == 0:
+                    frames.pop()
+                else:
+                    frame[1] -= 1
+                pos += 1
+                continue
+
+        if ch == "/" and pos + 1 < n and text[pos + 1] == "/":
+            start_line = state["line"]
+            start_col = pos - state["line_start"]
+            eol = text.find("\n", pos)
+            if eol == -1:
+                eol = n
+            events.append(
+                {
+                    "kind": "line",
+                    "start_line": start_line,
+                    "end_line": start_line,
+                    "start_col": start_col,
+                }
+            )
+            pos = eol
+            continue
+
+        if ch == "/" and pos + 1 < n and text[pos + 1] == "*":
+            start_line = state["line"]
+            start_col = pos - state["line_start"]
+            end = text.find("*/", pos + 2)
+            block_end = n if end == -1 else end + 2
+            block_text = text[pos:block_end]
+            advance_line_tracking(state, block_text, pos)
+            events.append(
+                {
+                    "kind": "block",
+                    "start_line": start_line,
+                    "end_line": state["line"],
+                    "start_col": start_col,
+                }
+            )
+            pos = block_end
+            continue
+
+        if is_rust:
+            prev_char = text[pos - 1] if pos > 0 else ""
+            at_word_boundary = not (prev_char.isalnum() or prev_char == "_")
+            if at_word_boundary and ch in ("b", "r"):
+                match = RAW_STRING_RE.match(text, pos)
+                if match:
+                    advance_line_tracking(state, match.group(0), pos)
+                    pos = match.end()
+                    continue
+
+            if ch == "'":
+                match = CHAR_LITERAL_RE.match(text, pos)
+                if match:
+                    pos = match.end()
+                    continue
+                pos += 1
+                continue
+
+        if ch == '"' or (is_rust and ch == "b" and pos + 1 < n and text[pos + 1] == '"'):
+            string_start = pos
+            match_pos = pos + 1 if ch == "b" else pos
+            match = DOUBLE_STRING_RE.match(text, match_pos)
+            if match:
+                advance_line_tracking(state, text[string_start : match.end()], string_start)
+                pos = match.end()
+                continue
+            pos += 1
+            continue
+
+        if is_ts and ch == "'":
+            match = TS_SINGLE_STRING_RE.match(text, pos)
+            if match:
+                advance_line_tracking(state, match.group(0), pos)
+                pos = match.end()
+                continue
+            pos += 1
+            continue
+
+        if is_ts and ch == "`":
+            frames.append(["TEMPLATE"])
+            pos += 1
+            continue
+
+        if is_ts and ch == "/" and regex_may_start_here(text, pos):
+            match = TS_REGEX_RE.match(text, pos)
+            if match:
+                pos = match.end()
+                continue
+
+        pos += 1
+
+    return events
+
+
+def find_violations(path, text, is_ts):
+    events = scan_text(text, is_ts)
+    lines = text.split("\n")
+    violations = []
+
+    line_role = {}
+    for event in events:
+        if event["kind"] == "block":
+            for line_number in range(event["start_line"], event["end_line"] + 1):
+                line_role[line_number] = "block"
+            continue
+
+        line_number = event["start_line"]
+        source_line = lines[line_number - 1] if line_number - 1 < len(lines) else ""
+        text_before = source_line[: event["start_col"]]
+        is_full_line = text_before.strip() == ""
+        trimmed = source_line.strip()
+
+        if not is_full_line:
+            line_role[line_number] = "trailing"
+        elif trimmed.startswith("// SAFETY:"):
+            line_role[line_number] = "safety_start"
+        elif trimmed.startswith("//"):
+            line_role[line_number] = "line_comment"
+        else:
+            line_role[line_number] = "code"
+
+    in_safety_block = False
+    for line_number in range(1, len(lines) + 1):
+        role = line_role.get(line_number, "code")
+        source_line = lines[line_number - 1]
+
+        if role == "block":
+            violations.append((line_number, source_line.rstrip()))
+            in_safety_block = False
+        elif role == "trailing":
+            violations.append((line_number, source_line.rstrip()))
+            in_safety_block = False
+        elif role == "safety_start":
+            in_safety_block = True
+        elif role == "line_comment":
+            if in_safety_block:
+                pass
+            else:
+                violations.append((line_number, source_line.rstrip()))
+                in_safety_block = False
+        else:
+            in_safety_block = False
+
+    return violations
+
+
+def scan_file(path):
+    text = path.read_text(encoding="utf-8")
+    is_ts = path.suffix in (".ts", ".tsx")
+    return find_violations(path, text, is_ts)
+
+
+def tracked_files():
+    result = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "ls-files", "*.rs", "*.ts", "*.tsx"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return [line for line in result.stdout.splitlines() if line]
+
+
+def run_scan():
+    all_violations = []
+    for relative_path in tracked_files():
+        if is_excluded(relative_path):
+            continue
+        absolute_path = REPO_ROOT / relative_path
+        for line_number, source_line in scan_file(absolute_path):
+            all_violations.append(f"{relative_path}:{line_number}: {source_line}")
+
+    if all_violations:
+        for entry in all_violations:
+            print(entry)
+        return 1
+    return 0
+
+
+def run_self_test():
+    fixture_files = sorted(
+        p
+        for p in FIXTURES_DIR.glob("*")
+        if p.suffix in (".rs", ".ts", ".tsx")
+    )
+    if not fixture_files:
+        print(f"no fixtures found in {FIXTURES_DIR}")
+        return 1
+
+    failures = []
+    for fixture_path in fixture_files:
+        expected_clean = fixture_path.name.startswith("pass_")
+        violations = scan_file(fixture_path)
+        got_clean = len(violations) == 0
+        status = "ok" if got_clean == expected_clean else "MISMATCH"
+        print(f"{status}: {fixture_path.name} (violations={len(violations)})")
+        if got_clean != expected_clean:
+            failures.append(fixture_path.name)
+
+    if failures:
+        print(f"self-test failed for: {', '.join(failures)}")
+        return 1
+    print("self-test passed")
+    return 0
+
+
+def main():
+    if "--self-test" in sys.argv[1:]:
+        return run_self_test()
+    return run_scan()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

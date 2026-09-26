@@ -55,6 +55,11 @@ jobs:
         working-directory: localbar-tauri/ui
         run: npm run build
 
+      - name: No code comments
+        run: |
+          scripts/check-no-comments --self-test
+          scripts/check-no-comments
+
       - name: cargo clippy (workspace)
         run: cargo clippy --all-targets --workspace -- -D warnings
 

@@ -38,4 +38,4 @@ The legacy Swift tree (`LocalBar/`, `LocalBar.xcodeproj`) is out of scope.
 
 - The ADR set and GitHub issues become the home for rationale that used to live in comments; a reader who wants the "why" behind a piece of code looks in `docs/adr/` or the issue tracker, not inline.
 - Preconditions and invariants must be pushed into signatures, types, and named tests, which is more upfront work than writing a comment but removes an entire class of stale or unenforced documentation.
-- CI gates this policy (#43); until that lands, reviewers are the enforcement mechanism.
+- The policy is enforced by `scripts/check-no-comments` in CI (#43), not just by reviewers.
