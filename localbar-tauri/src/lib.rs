@@ -572,19 +572,7 @@ async fn start_instance(state: State<'_, AppState>, app: AppHandle, id: String) 
     let uuid = parse_uuid(&id)?;
     {
         let reg = state.registry.lock().unwrap();
-        let is_external = reg.get_config(uuid)
-            .ok_or("instance not found")
-            .map(|c| c.server_type == ServerType::External)?;
-        let phase = reg.get_phase(uuid);
-        // Always skip transitions already in progress.
-        if matches!(phase, Some(InstancePhase::Starting | InstancePhase::Stopping)) {
-            return Ok(());
-        }
-        // For managed instances, Running means the server is up — no action needed.
-        // For External instances, allow re-validation: the unmanaged server may have stopped.
-        if !is_external && matches!(phase, Some(InstancePhase::Running)) {
-            return Ok(());
-        }
+        reg.get_config(uuid).ok_or("instance not found")?;
     }
     // launch_instance does blocking network I/O (health checks); run it off the main thread.
     tauri::async_runtime::spawn_blocking(move || launch_instance(app, uuid));

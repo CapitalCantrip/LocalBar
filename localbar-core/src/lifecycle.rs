@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::driver::{HealthStatus, LaunchPlan, ServerDriver};
 use crate::net::port_is_open;
 use crate::registry::InstanceRegistry;
-use crate::types::{InstanceError, InstanceErrorKind, InstancePhase, ModelMemoryKey, ModelRef, ParamValues};
+use crate::types::{InstanceError, InstanceErrorKind, InstancePhase, ModelMemoryKey, ModelRef, ParamValues, ServerType};
 
 #[derive(Debug, Clone)]
 pub enum LifecycleEvent {
@@ -34,16 +34,27 @@ pub fn start(
     id: Uuid,
     driver: &dyn ServerDriver,
 ) -> (Option<LaunchPlan>, Vec<LifecycleEvent>) {
+    let Some(config) = reg.get_config(id).cloned() else {
+        return (None, vec![]);
+    };
+    if !start_should_proceed(reg, id, &config) {
+        return (None, vec![]);
+    }
+
     reg.record_start_time(id);
     let mut events = phase_events(reg, id, InstancePhase::Starting);
-
-    let Some(config) = reg.get_config(id).cloned() else {
-        return (None, events);
-    };
 
     let (plan, rest) = start_from_stopped_config(reg, id, driver, &config);
     events.extend(rest);
     (plan, events)
+}
+
+fn start_should_proceed(reg: &InstanceRegistry, id: Uuid, config: &crate::types::ServerInstanceConfig) -> bool {
+    match reg.get_phase(id) {
+        Some(InstancePhase::Starting | InstancePhase::Stopping) => false,
+        Some(InstancePhase::Running) => config.server_type == ServerType::External,
+        _ => true,
+    }
 }
 
 fn start_from_stopped_config(
@@ -385,6 +396,50 @@ mod tests {
 
         assert_ne!(reg.get_phase(id), Some(&InstancePhase::Stopped), "start must move the instance out of Stopped");
         assert!(reg.consume_start_time(id).is_some(), "start must record the start time");
+    }
+
+    #[test]
+    fn start_noop_when_starting_or_stopping() {
+        for in_progress_phase in [InstancePhase::Starting, InstancePhase::Stopping] {
+            let mut reg = make_registry();
+            let id = reg.add_instance(ollama_config("a"));
+            reg.set_phase(id, in_progress_phase.clone()).unwrap();
+            let driver = MockDriver::new(ServerType::Ollama);
+
+            let (plan, events) = start(&mut reg, id, &driver);
+
+            assert!(plan.is_none());
+            assert!(events.is_empty(), "must not emit events for {in_progress_phase:?}");
+            assert_eq!(reg.get_phase(id), Some(&in_progress_phase));
+            assert!(reg.consume_start_time(id).is_none(), "must not record a start time for {in_progress_phase:?}");
+        }
+    }
+
+    #[test]
+    fn start_noop_when_managed_instance_already_running() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(ollama_config("a"));
+        reg.set_phase(id, InstancePhase::Running).unwrap();
+        let driver = MockDriver::new(ServerType::Ollama);
+
+        let (plan, events) = start(&mut reg, id, &driver);
+
+        assert!(plan.is_none());
+        assert!(events.is_empty());
+        assert_eq!(reg.get_phase(id), Some(&InstancePhase::Running));
+        assert!(reg.consume_start_time(id).is_none());
+    }
+
+    #[test]
+    fn start_proceeds_when_external_instance_already_running() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(external_config("lm-studio"));
+        reg.set_phase(id, InstancePhase::Running).unwrap();
+        let driver = MockDriver::new_unhealthy(ServerType::External);
+
+        let (_, events) = start(&mut reg, id, &driver);
+
+        assert_eq!(phase_of(&events), Some(InstancePhase::Starting));
     }
 
     #[test]
