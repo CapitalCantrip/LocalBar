@@ -10,6 +10,8 @@ pub enum HealthStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct ModelMetadata {
     pub parameter_count: Option<String>,
     pub quantization: Option<String>,

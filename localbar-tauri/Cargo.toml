@@ -17,6 +17,10 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 sysinfo = { workspace = true }
 tokio = { workspace = true }
+ts-rs = { workspace = true, optional = true }
+
+[features]
+ts = ["dep:ts-rs", "localbar-core/ts"]
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
