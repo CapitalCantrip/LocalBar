@@ -3,6 +3,9 @@ name = "localbar-tauri"
 version = "0.2.0"
 edition = "2021"
 
+[lints]
+workspace = true
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

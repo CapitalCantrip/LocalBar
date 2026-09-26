@@ -2,6 +2,9 @@
 members = ["localbar-core", "localbar-tauri"]
 resolver = "2"
 
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+
 [workspace.dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 serde = { version = "1", features = ["derive"] }
