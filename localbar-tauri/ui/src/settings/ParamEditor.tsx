@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { ipc, type ParamSchemaEntry } from '../ipc'
-import { type ParamValues, type ServerInstanceConfig } from '../types'
+import { type CanonicalParam, type ParamValue, type ParamValues, type ServerInstanceConfig } from '../types'
 import { s } from './styles'
 
 export function ParamEditor({ instance, onRefresh }: {
@@ -20,13 +20,13 @@ export function ParamEditor({ instance, onRefresh }: {
     ipc.getParamSchema(instance.server_type).then(setSchema).catch(() => {})
   }, [instance.id, instance.server_type])
 
-  const setField = (key: string, raw: string, kind: 'double' | 'int') => {
+  const setField = (key: CanonicalParam, raw: string, kind: 'double' | 'int') => {
     const num = kind === 'int' ? parseInt(raw, 10) : parseFloat(raw)
     if (raw !== '' && isNaN(num)) return
     setParams(prev => {
       if (!prev) return prev
       const values = { ...prev.values }
-      if (raw === '') { delete values[key] } else { values[key] = { type: kind, value: num } }
+      if (raw === '') { delete values[key] } else { values[key] = { type: kind, value: num } as ParamValue }
       return { ...prev, values }
     })
   }

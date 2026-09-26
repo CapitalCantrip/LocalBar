@@ -61,6 +61,13 @@ jobs:
       - name: cargo test (workspace)
         run: cargo test --workspace
 
+      - name: TS bindings are up to date
+        if: runner.os == 'Linux'
+        run: |
+          cargo test -p localbar-core -p localbar-tauri --features ts export_bindings
+          git diff --exit-code localbar-tauri/ui/src/generated
+          test -z "$(git status --porcelain localbar-tauri/ui/src/generated)"
+
       - name: Build localbar-tauri binary (smoke test)
         if: runner.os == 'Linux'
         run: cargo build --bin localbar-tauri --target ${{ matrix.target }}

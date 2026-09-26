@@ -23,6 +23,8 @@ use localbar_core::types::{
 use localbar_core::{adopt_external_as_new_instance, set_active_profile, set_instance_params};
 
 #[derive(serde::Serialize, Clone)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ErrorKindDto {
     LaunchFailed,
@@ -34,6 +36,8 @@ pub enum ErrorKindDto {
 }
 
 #[derive(serde::Serialize, Clone)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum InstancePhaseDto {
     Stopped,
@@ -709,6 +713,8 @@ async fn list_models_for_type(state: State<'_, AppState>, server_type: String) -
 }
 
 #[derive(serde::Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 struct DiscoveredModel {
     server_type: String,
     key: String,

@@ -1,8 +1,8 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { DiscoveredModel, DiscoveryConfig, InstancePhase, ModelMetadata, ModelRef, ParamValues, ServerInstanceConfig } from './types'
+import type { CanonicalParam, DiscoveredModel, DiscoveryConfig, InstancePhase, ModelMetadata, ModelRef, ParamValues, ServerInstanceConfig } from './types'
 
 export interface ParamSchemaEntry {
-  key: string
+  key: CanonicalParam
   label: string
   kind: 'double' | 'int'
   server_flag: string

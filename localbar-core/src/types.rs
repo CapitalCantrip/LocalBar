@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 #[serde(tag = "type", content = "value", rename_all = "camelCase")]
 pub enum ParamValue {
     Double(f64),
@@ -13,6 +15,7 @@ pub enum ParamValue {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub enum CanonicalParam {
     Temperature,
@@ -36,6 +39,8 @@ pub struct ParamDescriptor {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct ParamValues {
     #[serde(default)]
     pub values: HashMap<CanonicalParam, ParamValue>,
@@ -124,6 +129,8 @@ impl ModelMemory {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct ModelRef {
     pub key: String,
     pub display_name: String,
@@ -134,6 +141,8 @@ pub struct ModelRef {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 #[serde(rename_all = "kebab-case")]
 pub enum ServerType {
     MlxLm,
@@ -142,6 +151,8 @@ pub enum ServerType {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct DiscoveryConfig {
     #[serde(default)]
     pub mlx_lm_search_paths: Vec<String>,
@@ -159,6 +170,8 @@ impl DiscoveryConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
 pub struct ServerInstanceConfig {
     pub id: Uuid,
     pub name: String,
