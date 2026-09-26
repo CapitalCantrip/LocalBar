@@ -1,5 +1,9 @@
 use crate::drivers::external::{models_url, parse_openai_models};
-use crate::types::ServerInstanceConfig;
+use crate::types::{ServerInstanceConfig, ServerType};
+
+pub fn reports_loaded_model(server_type: ServerType) -> bool {
+    matches!(server_type, ServerType::MlxLm)
+}
 
 pub fn detect_loaded_model(config: &ServerInstanceConfig) -> Option<String> {
     let resp = crate::drivers::http::quick_agent()
@@ -14,11 +18,16 @@ pub fn model_matches(candidate: &str, reported: &str) -> bool {
     if candidate == reported {
         return true;
     }
-    if candidate.ends_with(reported) || reported.ends_with(candidate) {
+    if path_boundary_match(candidate, reported) {
         return true;
     }
     hf_repo_from_cache_path(reported).as_deref() == Some(candidate)
         || hf_repo_from_cache_path(candidate).as_deref() == Some(reported)
+}
+
+fn path_boundary_match(a: &str, b: &str) -> bool {
+    let (longer, shorter) = if a.len() >= b.len() { (a, b) } else { (b, a) };
+    longer.ends_with(shorter) && longer[..longer.len() - shorter.len()].ends_with('/')
 }
 
 fn hf_repo_from_cache_path(s: &str) -> Option<String> {
@@ -41,8 +50,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reports_loaded_model_true_for_mlx_lm() {
+        assert!(reports_loaded_model(ServerType::MlxLm));
+    }
+
+    #[test]
+    fn reports_loaded_model_false_for_ollama_and_external() {
+        assert!(!reports_loaded_model(ServerType::Ollama));
+        assert!(!reports_loaded_model(ServerType::External));
+    }
+
+    #[test]
     fn model_matches_exact_key() {
-        assert!(model_matches("llama3:8b", "llama3:8b"));
+        assert!(model_matches(
+            "mlx-community/Qwen3.5-4B-OptiQ-4bit",
+            "mlx-community/Qwen3.5-4B-OptiQ-4bit"
+        ));
     }
 
     #[test]
@@ -79,15 +102,27 @@ mod tests {
     }
 
     #[test]
+    fn model_matches_false_for_substring_that_is_not_on_a_path_boundary() {
+        assert!(!model_matches("Qwen3-4B", "mlx-community/Some-Qwen3-4B"));
+        assert!(!model_matches("tinyllama", "llama"));
+    }
+
+    #[test]
     fn best_matching_key_finds_the_right_candidate() {
-        let candidates = vec!["llama3:8b".to_string(), "mistral:7b".to_string()];
-        let reported = "/models/mistral:7b";
-        assert_eq!(best_matching_key(reported, &candidates), Some("mistral:7b".to_string()));
+        let candidates = vec![
+            "mlx-community/Llama-3-8B-4bit".to_string(),
+            "mlx-community/Mistral-7B-4bit".to_string(),
+        ];
+        let reported = "/models/mlx-community/Mistral-7B-4bit";
+        assert_eq!(
+            best_matching_key(reported, &candidates),
+            Some("mlx-community/Mistral-7B-4bit".to_string())
+        );
     }
 
     #[test]
     fn best_matching_key_none_when_nothing_matches() {
-        let candidates = vec!["llama3:8b".to_string()];
+        let candidates = vec!["mlx-community/Llama-3-8B-4bit".to_string()];
         assert_eq!(best_matching_key("totally-unrelated", &candidates), None);
     }
 }

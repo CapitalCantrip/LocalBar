@@ -390,7 +390,9 @@ fn finish_adoption_if_running(app: &AppHandle, id: Uuid, config: &ServerInstance
         Some(InstancePhase::Running)
     );
     if running {
-        detect_and_correct_adopted_model(app, id, config, driver);
+        if localbar_core::model_probe::reports_loaded_model(config.server_type) {
+            detect_and_correct_adopted_model(app, id, config, driver);
+        }
         tauri::async_runtime::spawn(run_adopted_health_poll(app.clone(), id));
     }
 }
@@ -413,7 +415,7 @@ fn detect_and_correct_adopted_model(
         .list_models(config)
         .map(|models| models.into_iter().map(|m| m.key).collect())
         .unwrap_or_default();
-    let corrected = localbar_core::model_probe::best_matching_key(&reported, &candidates).unwrap_or(reported);
+    let Some(corrected) = localbar_core::model_probe::best_matching_key(&reported, &candidates) else { return };
     let state = app.state::<AppState>();
     let mut reg = state.registry.lock().unwrap();
     reg.update_config(id, |c| c.selected_model_key = Some(corrected)).ok();
