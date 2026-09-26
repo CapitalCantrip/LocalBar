@@ -13,14 +13,14 @@ use localbar_core::driver::{HealthStatus, ModelMetadata, ServerDriver};
 use localbar_core::drivers::external::ExternalDriver;
 use localbar_core::drivers::mlx_lm::MLXLMDriver;
 use localbar_core::drivers::ollama::{self, OllamaDriver};
+use localbar_core::lifecycle::{self, LifecycleEvent, PollContext, PollOutcome};
 use localbar_core::persistence::FilePersistence;
 use localbar_core::registry::InstanceRegistry;
 use localbar_core::types::{
     DiscoveryConfig, InstanceError, InstanceErrorKind, InstancePhase, ModelMemoryKey, ModelRef,
     ParamValues, ServerInstanceConfig, ServerType,
 };
-use localbar_core::net::port_is_open;
-use localbar_core::{adopt_external_as_new_instance, ensure_managed_model, push_restart_duration_sample, update_model_memory};
+use localbar_core::{adopt_external_as_new_instance, ensure_managed_model};
 
 // ─── DTO ─────────────────────────────────────────────────────────────────────
 
@@ -54,9 +54,6 @@ pub struct AppState {
     pub processes: Mutex<HashMap<Uuid, Child>>,
     /// Stored here so on_startup can emit it once windows are ready.
     pub load_error: Option<String>,
-    /// Wall-clock instant when each instance entered Starting or SwitchingModel,
-    /// keyed by instance id. Consumed once the instance reaches Running.
-    pub start_times: Mutex<HashMap<Uuid, std::time::Instant>>,
 }
 
 impl AppState {
@@ -67,7 +64,6 @@ impl AppState {
             registry: Mutex::new(registry),
             processes: Mutex::new(HashMap::new()),
             load_error: None,
-            start_times: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -172,33 +168,28 @@ fn set_error_emit(app: &AppHandle, id: Uuid, kind: InstanceErrorKind, msg: &str)
     }));
 }
 
+fn emit_lifecycle_events(app: &AppHandle, events: Vec<LifecycleEvent>) {
+    for e in events {
+        match e {
+            LifecycleEvent::PhaseChanged(id, _phase) => {
+                app.emit("phase-changed", id.to_string()).ok();
+            }
+        }
+    }
+}
+
 fn clone_config(app: &AppHandle, id: Uuid) -> Option<ServerInstanceConfig> {
     app.state::<AppState>().registry.lock().unwrap().get_config(id).cloned()
+}
+
+fn discovery_config(app: &AppHandle) -> DiscoveryConfig {
+    app.state::<AppState>().registry.lock().unwrap().get_discovery_config().clone()
 }
 
 fn delete_managed_config_if_present(config: Option<&ServerInstanceConfig>) {
     let Some(cfg) = config else { return };
     let Some(tag) = &cfg.managed_model_tag else { return };
     driver_for(cfg, &DiscoveryConfig::default()).delete_managed_config(cfg, tag).ok();
-}
-
-fn record_model_memory_on_running(app: &AppHandle, id: Uuid) {
-    let state = app.state::<AppState>();
-    let start_time = state.start_times.lock().unwrap().remove(&id);
-    let mut reg = state.registry.lock().unwrap();
-    let Some(config) = reg.get_config(id).cloned() else { return };
-    let schema = driver_for(&config, &DiscoveryConfig::default()).param_schema();
-    let profile = reg.get_active_profile_params(id).cloned();
-    let mem_key = ModelMemoryKey {
-        server_type: config.server_type,
-        model_key: config.selected_model_key.clone().unwrap_or_default(),
-    };
-    let memory = reg.get_model_memory(&mem_key).cloned();
-    let resolved = ParamValues::resolve(profile.as_ref(), memory.as_ref(), &schema);
-    update_model_memory(&mut reg, id, resolved.0).ok();
-    if let Some(t) = start_time {
-        push_restart_duration_sample(&mut reg, id, t.elapsed().as_secs_f64()).ok();
-    }
 }
 
 // ─── Health-poll loop ─────────────────────────────────────────────────────────
@@ -217,18 +208,6 @@ fn process_is_alive(app: &AppHandle, id: Uuid) -> bool {
     }
 }
 
-fn current_phase_is_starting(app: &AppHandle, id: Uuid) -> bool {
-    let state = app.state::<AppState>();
-    let reg = state.registry.lock().unwrap();
-    matches!(reg.get_phase(id), Some(InstancePhase::Starting))
-}
-
-fn current_phase_is_switching_model(app: &AppHandle, id: Uuid) -> bool {
-    let state = app.state::<AppState>();
-    let reg = state.registry.lock().unwrap();
-    matches!(reg.get_phase(id), Some(InstancePhase::SwitchingModel))
-}
-
 fn rollback_switch_key(app: &AppHandle, id: Uuid, old_key: &Option<String>) {
     let state = app.state::<AppState>();
     let mut reg = state.registry.lock().unwrap();
@@ -242,52 +221,43 @@ fn spawn_for_model_switch(config: &ServerInstanceConfig) -> Result<Child, String
     spawn_from_plan(&plan)
 }
 
-async fn check_and_transition_running(app: &AppHandle, id: Uuid) -> bool {
-    let app_clone = app.clone();
-    let healthy = tauri::async_runtime::spawn_blocking(move || check_health_once(&app_clone, id))
-        .await
-        .unwrap_or(false);
-    if healthy {
-        record_model_memory_on_running(app, id);
-        set_phase_emit(app, id, InstancePhase::Running);
+fn poll_tick(
+    app: &AppHandle,
+    id: Uuid,
+    health: bool,
+    process_alive: bool,
+    elapsed: std::time::Duration,
+    ctx: PollContext,
+) -> (PollOutcome, Vec<LifecycleEvent>) {
+    let state = app.state::<AppState>();
+    let mut reg = state.registry.lock().unwrap();
+    let Some(config) = reg.get_config(id).cloned() else { return (PollOutcome::Done, vec![]) };
+    let discovery = reg.get_discovery_config().clone();
+    let driver = driver_for(&config, &discovery);
+    lifecycle::poll_once(&mut reg, id, &*driver, health, process_alive, elapsed, ctx)
+}
+
+async fn run_poll_loop(app: AppHandle, id: Uuid, ctx: PollContext) {
+    let started = tokio::time::Instant::now();
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        let app_clone = app.clone();
+        let (health, alive) = tauri::async_runtime::spawn_blocking(move || {
+            (check_health_once(&app_clone, id), process_is_alive(&app_clone, id))
+        }).await.unwrap_or((false, false));
+        let elapsed = started.elapsed();
+        let (outcome, events) = poll_tick(&app, id, health, alive, elapsed, ctx.clone());
+        emit_lifecycle_events(&app, events);
+        if outcome == PollOutcome::Done { return; }
     }
-    healthy
 }
 
 async fn run_health_poll(app: AppHandle, id: Uuid) {
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
-    loop {
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        if !current_phase_is_starting(&app, id) { return; }
-        if !process_is_alive(&app, id) {
-            set_error_emit(&app, id, InstanceErrorKind::LaunchFailed, "process exited unexpectedly");
-            return;
-        }
-        if check_and_transition_running(&app, id).await { return; }
-        if tokio::time::Instant::now() >= deadline {
-            set_error_emit(&app, id, InstanceErrorKind::HealthCheckFailed, "startup timed out after 30 s");
-            return;
-        }
-    }
+    run_poll_loop(app, id, PollContext::Startup).await;
 }
 
 async fn run_restart_switch_poll(app: AppHandle, id: Uuid, old_key: Option<String>) {
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
-    loop {
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        if !current_phase_is_switching_model(&app, id) { return; }
-        if !process_is_alive(&app, id) {
-            rollback_switch_key(&app, id, &old_key);
-            set_error_emit(&app, id, InstanceErrorKind::ModelSwitchFailed, "process exited unexpectedly during model switch");
-            return;
-        }
-        if check_and_transition_running(&app, id).await { return; }
-        if tokio::time::Instant::now() >= deadline {
-            rollback_switch_key(&app, id, &old_key);
-            set_error_emit(&app, id, InstanceErrorKind::HealthCheckFailed, "model switch timed out after 30 s");
-            return;
-        }
-    }
+    run_poll_loop(app, id, PollContext::ModelSwitch { old_key }).await;
 }
 
 /// Kill the current process and relaunch with the new model key already set in config.
@@ -339,21 +309,6 @@ fn adopted_phase_is_active(app: &AppHandle, id: Uuid) -> bool {
     matches!(reg.get_phase(id), Some(InstancePhase::Running) | Some(InstancePhase::Error(_)))
 }
 
-fn apply_adopted_health_result(app: &AppHandle, id: Uuid, healthy: bool) {
-    let state = app.state::<AppState>();
-    let current_phase = state.registry.lock().unwrap().get_phase(id).cloned();
-    match (healthy, current_phase) {
-        (false, Some(InstancePhase::Running)) => {
-            set_error_emit(app, id, InstanceErrorKind::HealthCheckFailed,
-                "server is no longer reachable");
-        }
-        (true, Some(InstancePhase::Error(_))) => {
-            set_phase_emit(app, id, InstancePhase::Running);
-        }
-        _ => {}
-    }
-}
-
 /// Polls health every 10 s for an externally-adopted (unmanaged) instance.
 /// Transitions to Error if the server becomes unreachable, and re-adopts (Running) if it
 /// comes back. Exits when the phase leaves the Running/Error cycle (e.g. user clicks Stop).
@@ -365,66 +320,56 @@ async fn run_adopted_health_poll(app: AppHandle, id: Uuid) {
         let healthy = tauri::async_runtime::spawn_blocking(move || check_health_once(&app_clone, id))
             .await
             .unwrap_or(false);
-        apply_adopted_health_result(&app, id, healthy);
+        let events = {
+            let state = app.state::<AppState>();
+            let mut reg = state.registry.lock().unwrap();
+            lifecycle::poll_adopted(&mut reg, id, healthy)
+        };
+        emit_lifecycle_events(&app, events);
     }
 }
 
-/// Returns true and sets PortConflict error if the port is occupied by a foreign process.
-/// Accepts the already-computed health status to avoid a redundant network round-trip.
-fn detect_port_conflict(app: &AppHandle, config: &ServerInstanceConfig, health: &HealthStatus) -> bool {
-    if port_is_open(&config.host, config.port) && *health != HealthStatus::Healthy {
-        set_error_emit(app, config.id, InstanceErrorKind::PortConflict { port: config.port },
-            &format!("port {} is in use by another process", config.port));
-        return true;
-    }
-    false
-}
-
-/// Returns the spawned Child, or None if the instance was adopted/conflicted/errored.
-fn try_spawn_instance(app: &AppHandle, id: Uuid, config: &ServerInstanceConfig) -> Option<Child> {
-    let driver = driver_for(config, &DiscoveryConfig::default());
-    let first_health = driver.health_check(config);
-
-    if first_health == HealthStatus::Healthy {
-        adopt_running(app, config);
-        return None;
-    }
-    if detect_port_conflict(app, config, &first_health) {
-        return None;
-    }
-    // External drivers never own a process — if the server isn't reachable, that's an error.
-    if !driver.manages_lifecycle() {
-        set_error_emit(app, id, InstanceErrorKind::HealthCheckFailed,
-            &format!("no server detected at {}:{}", config.host, config.port));
-        return None;
-    }
-    let plan = match driver.launch(config, None, &config.instance_params) {
-        Ok(p) => p,
-        Err(e) => { set_error_emit(app, id, InstanceErrorKind::LaunchFailed, &e); return None; }
+fn launch_from_plan(app: &AppHandle, id: Uuid, plan: &localbar_core::driver::LaunchPlan) {
+    let child = match spawn_from_plan(plan) {
+        Ok(c) => c,
+        Err(e) => { set_error_emit(app, id, InstanceErrorKind::LaunchFailed, &e); return; }
     };
-    match spawn_from_plan(&plan) {
-        Ok(c) => Some(c),
-        Err(e) => { set_error_emit(app, id, InstanceErrorKind::LaunchFailed, &e); None }
+    let state = app.state::<AppState>();
+    let still_starting = matches!(state.registry.lock().unwrap().get_phase(id), Some(InstancePhase::Starting));
+    if !still_starting {
+        graceful_kill(child, 0.0);
+        return;
+    }
+    state.processes.lock().unwrap().insert(id, child);
+    tauri::async_runtime::spawn(run_health_poll(app.clone(), id));
+}
+
+fn finish_adoption_if_running(app: &AppHandle, id: Uuid) {
+    let running = matches!(
+        app.state::<AppState>().registry.lock().unwrap().get_phase(id),
+        Some(InstancePhase::Running)
+    );
+    if running {
+        tauri::async_runtime::spawn(run_adopted_health_poll(app.clone(), id));
     }
 }
 
 fn launch_instance(app: AppHandle, id: Uuid) {
     let Some(config) = clone_config(&app, id) else { return };
-    let Some(child) = try_spawn_instance(&app, id, &config) else { return };
+    let discovery = discovery_config(&app);
+    let driver = driver_for(&config, &discovery);
 
-    // Guard against a Stop that arrived during the blocking I/O above.
-    {
+    let (plan, events) = {
         let state = app.state::<AppState>();
-        let reg = state.registry.lock().unwrap();
-        if !matches!(reg.get_phase(id), Some(InstancePhase::Starting)) {
-            drop(reg);
-            graceful_kill(child, 0.0);
-            return;
-        }
+        let mut reg = state.registry.lock().unwrap();
+        lifecycle::start(&mut reg, id, &*driver)
+    };
+    emit_lifecycle_events(&app, events);
+
+    match plan {
+        Some(plan) => launch_from_plan(&app, id, &plan),
+        None => finish_adoption_if_running(&app, id),
     }
-    app.state::<AppState>().processes.lock().unwrap().insert(id, child);
-    // ParamValues::resolve is not called here — resolution is scaffolded for T8+.
-    tauri::async_runtime::spawn(run_health_poll(app, id));
 }
 
 // ─── IPC: read queries ────────────────────────────────────────────────────────
@@ -642,9 +587,9 @@ async fn start_instance(state: State<'_, AppState>, app: AppHandle, id: String) 
             return Ok(());
         }
         reg.set_phase(uuid, InstancePhase::Starting).ok();
+        reg.record_start_time(uuid);
     }
     app.emit("phase-changed", uuid.to_string()).ok();
-    app.state::<AppState>().start_times.lock().unwrap().insert(uuid, std::time::Instant::now());
     // launch_instance does blocking network I/O (health checks); run it off the main thread.
     tauri::async_runtime::spawn_blocking(move || launch_instance(app, uuid));
     Ok(())
@@ -719,9 +664,22 @@ async fn warm_load_model(app: &AppHandle, id: Uuid, old_key: Option<String>) -> 
         driver.switch_model(&model, &config.instance_params, &config)
     }).await.map_err(|e| e.to_string())?;
     match result {
-        Ok(()) => { set_phase_emit(app, id, InstancePhase::Running); Ok(true) }
+        Ok(()) => Ok(true),
         Err(e) => { set_error_emit(app, id, InstanceErrorKind::ModelSwitchFailed, &e); Err(e) }
     }
+}
+
+fn record_switch_running(app: &AppHandle, id: Uuid, old_key: Option<String>) -> Vec<LifecycleEvent> {
+    let state = app.state::<AppState>();
+    let mut reg = state.registry.lock().unwrap();
+    let elapsed = reg.consume_start_time(id).map(|t| t.elapsed()).unwrap_or_default();
+    let Some(config) = reg.get_config(id).cloned() else { return vec![] };
+    let discovery = reg.get_discovery_config().clone();
+    let driver = driver_for(&config, &discovery);
+    let (_, events) = lifecycle::poll_once(
+        &mut reg, id, &*driver, true, true, elapsed, PollContext::ModelSwitch { old_key },
+    );
+    events
 }
 
 #[tauri::command]
@@ -739,13 +697,17 @@ async fn switch_model_cmd(
         let config = reg.get_config(uuid).unwrap().clone();
         let driver = driver_for(&config, &DiscoveryConfig::default());
         ensure_managed_model(&mut reg, uuid, &*driver)?;
+        // Record when the switch begins so its duration can be pushed to ModelMemory.
+        reg.record_start_time(uuid);
         old_key
     };
     app.emit("config-changed", uuid.to_string()).ok();
-    // Record when the switch begins so its duration can be pushed to ModelMemory.
-    state.start_times.lock().unwrap().insert(uuid, std::time::Instant::now());
     match warm_load_model(&app, uuid, old_key.clone()).await {
-        Ok(true) => { record_model_memory_on_running(&app, uuid); Ok(()) }
+        Ok(true) => {
+            let events = record_switch_running(&app, uuid, old_key);
+            emit_lifecycle_events(&app, events);
+            Ok(())
+        }
         Ok(false) => Ok(()),  // restart path: poll records memory when healthy
         Err(e) => { rollback_switch_key(&app, uuid, &old_key); Err(e) }
     }
