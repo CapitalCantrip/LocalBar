@@ -38,12 +38,7 @@ pub fn adopt_external_as_new_instance(
     Ok(new_id)
 }
 
-/// Resolve params and bake a managed model tag for an instance.
-///
-/// Must be called **after** `selected_model_key` is written to the config:
-/// the tag is built from whatever key is currently in the config.
-/// No-ops for drivers that return `None` from `generate_managed_config`.
-pub fn ensure_managed_model(
+fn ensure_managed_model(
     registry: &mut InstanceRegistry,
     id: Uuid,
     driver: &dyn ServerDriver,
@@ -64,6 +59,36 @@ pub fn ensure_managed_model(
     driver.apply_managed_config(&config, &tag, &content)?;
     registry.update_config(id, |c| c.managed_model_tag = Some(tag))?;
     registry.save()
+}
+
+pub fn select_model(
+    registry: &mut InstanceRegistry,
+    id: Uuid,
+    model_key: &str,
+    driver: &dyn ServerDriver,
+) -> Result<(), String> {
+    registry.update_config(id, |c| c.selected_model_key = Some(model_key.to_string()))?;
+    ensure_managed_model(registry, id, driver)
+}
+
+pub fn set_instance_params(
+    registry: &mut InstanceRegistry,
+    id: Uuid,
+    params: ParamValues,
+    driver: &dyn ServerDriver,
+) -> Result<(), String> {
+    registry.update_config(id, |c| c.instance_params = params)?;
+    ensure_managed_model(registry, id, driver)
+}
+
+pub fn set_active_profile(
+    registry: &mut InstanceRegistry,
+    id: Uuid,
+    profile_id: Option<Uuid>,
+    driver: &dyn ServerDriver,
+) -> Result<(), String> {
+    registry.update_config(id, |c| c.active_profile_id = profile_id)?;
+    ensure_managed_model(registry, id, driver)
 }
 
 const RESTART_SAMPLE_WINDOW: usize = 10;
@@ -119,7 +144,10 @@ mod tests {
         CanonicalParam, InstanceError, InstanceErrorKind, InstancePhase, ModelMemory, ParamValue,
         ParamValues, ServerInstanceConfig, ServerType,
     };
-    use super::{adopt_external_as_new_instance, ensure_managed_model, update_model_memory};
+    use super::{
+        adopt_external_as_new_instance, ensure_managed_model, select_model, set_active_profile,
+        set_instance_params, update_model_memory,
+    };
 
     struct SharedPersistence(Arc<Mutex<InMemoryPersistence>>);
     impl Persistence for SharedPersistence {
@@ -496,6 +524,65 @@ mod tests {
 
         let calls = driver.managed_config_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
+    }
+
+    #[test]
+    fn select_model_writes_key_and_applies_managed_tag() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(ollama_config("o"));
+        let driver = MockDriver::new(ServerType::Ollama);
+
+        select_model(&mut reg, id, "llama3:8b", &driver).unwrap();
+
+        assert_eq!(reg.get_config(id).unwrap().selected_model_key.as_deref(), Some("llama3:8b"));
+        let tag = reg.get_config(id).unwrap().managed_model_tag.clone();
+        assert!(tag.is_some(), "managed tag must be applied after key is written");
+        assert!(tag.unwrap().contains("llama3"));
+    }
+
+    #[test]
+    fn select_model_overwrites_previous_key() {
+        let mut reg = make_registry();
+        let mut cfg = ollama_config("o");
+        cfg.selected_model_key = Some("old-model".into());
+        let id = reg.add_instance(cfg);
+        let driver = MockDriver::new(ServerType::Ollama);
+
+        select_model(&mut reg, id, "new-model", &driver).unwrap();
+
+        let calls = driver.managed_config_calls.lock().unwrap();
+        assert!(calls[0].0.contains("new-model"), "tag must reflect the newly selected key");
+    }
+
+    #[test]
+    fn set_instance_params_updates_params_and_reapplies_managed_tag() {
+        let mut reg = make_registry();
+        let mut cfg = ollama_config("o");
+        cfg.selected_model_key = Some("llama3:8b".into());
+        let id = reg.add_instance(cfg);
+        let driver = MockDriver::new(ServerType::Ollama);
+        let mut params = ParamValues::default();
+        params.values.insert(CanonicalParam::Temperature, ParamValue::Double(0.3));
+
+        set_instance_params(&mut reg, id, params.clone(), &driver).unwrap();
+
+        assert_eq!(reg.get_config(id).unwrap().instance_params, params);
+        assert_eq!(driver.managed_config_calls.lock().unwrap().len(), 1, "managed tag must be re-applied");
+    }
+
+    #[test]
+    fn set_active_profile_updates_profile_and_reapplies_managed_tag() {
+        let mut reg = make_registry();
+        let mut cfg = ollama_config("o");
+        cfg.selected_model_key = Some("llama3:8b".into());
+        let id = reg.add_instance(cfg);
+        let driver = MockDriver::new(ServerType::Ollama);
+        let profile_id = uuid::Uuid::new_v4();
+
+        set_active_profile(&mut reg, id, Some(profile_id), &driver).unwrap();
+
+        assert_eq!(reg.get_config(id).unwrap().active_profile_id, Some(profile_id));
+        assert_eq!(driver.managed_config_calls.lock().unwrap().len(), 1, "managed tag must be re-applied");
     }
 
     #[test]
