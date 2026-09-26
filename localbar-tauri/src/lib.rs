@@ -22,8 +22,6 @@ use localbar_core::types::{
 };
 use localbar_core::{adopt_external_as_new_instance, set_active_profile, set_instance_params};
 
-// ─── DTO ─────────────────────────────────────────────────────────────────────
-
 #[derive(serde::Serialize, Clone)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ErrorKindDto {
@@ -35,7 +33,6 @@ pub enum ErrorKindDto {
     Unexpected,
 }
 
-/// Wire-format for InstancePhase. Separate from core type — core has no Serialize impl.
 #[derive(serde::Serialize, Clone)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum InstancePhaseDto {
@@ -47,12 +44,9 @@ pub enum InstancePhaseDto {
     Error { kind: ErrorKindDto, message: String },
 }
 
-// ─── AppState ────────────────────────────────────────────────────────────────
-
 pub struct AppState {
     pub registry: Mutex<InstanceRegistry>,
     pub processes: Mutex<HashMap<Uuid, Child>>,
-    /// Stored here so on_startup can emit it once windows are ready.
     pub load_error: Option<String>,
 }
 
@@ -78,8 +72,6 @@ fn driver_for(config: &ServerInstanceConfig, discovery: &DiscoveryConfig) -> Box
         ServerType::External => Box::new(ExternalDriver),
     }
 }
-
-// ─── Small helpers ────────────────────────────────────────────────────────────
 
 fn parse_uuid(id: &str) -> Result<Uuid, String> {
     Uuid::parse_str(id).map_err(|e| format!("invalid id: {e}"))
@@ -131,7 +123,6 @@ fn spawn_from_plan(plan: &localbar_core::driver::LaunchPlan) -> Result<Child, St
     cmd.spawn().map_err(|e| format!("spawn failed: {e}"))
 }
 
-/// Send SIGTERM on Unix, then wait up to `grace_secs`, then SIGKILL.
 fn graceful_kill(mut child: Child, grace_secs: f64) {
     #[cfg(unix)]
     {
@@ -152,8 +143,6 @@ fn graceful_kill(mut child: Child, grace_secs: f64) {
     let _ = child.kill();
     let _ = child.wait();
 }
-
-// ─── Phase mutation helpers ───────────────────────────────────────────────────
 
 fn set_phase_emit(app: &AppHandle, id: Uuid, phase: InstancePhase) {
     let state = app.state::<AppState>();
@@ -191,8 +180,6 @@ fn delete_managed_config_if_present(config: Option<&ServerInstanceConfig>) {
     let Some(tag) = &cfg.managed_model_tag else { return };
     driver_for(cfg, &DiscoveryConfig::default()).delete_managed_config(cfg, tag).ok();
 }
-
-// ─── Health-poll loop ─────────────────────────────────────────────────────────
 
 fn check_health_once(app: &AppHandle, id: Uuid) -> bool {
     let Some(config) = clone_config(app, id) else { return false };
@@ -285,8 +272,6 @@ fn fail_switch(app: &AppHandle, id: Uuid, old_key: Option<String>, message: Stri
     Err(message)
 }
 
-// ─── Core launch logic (shared by IPC command + startup) ─────────────────────
-
 fn adopt_running(app: &AppHandle, config: &ServerInstanceConfig) {
     let was_running = {
         let state = app.state::<AppState>();
@@ -295,9 +280,8 @@ fn adopt_running(app: &AppHandle, config: &ServerInstanceConfig) {
         result
     };
     set_phase_emit(app, config.id, InstancePhase::Running);
-    // Only spawn a health poller on first adoption — re-validation from Start reuses the
-    // existing poller rather than layering a second one on top.
-    if !was_running {
+    let is_first_adoption = !was_running;
+    if is_first_adoption {
         tauri::async_runtime::spawn(run_adopted_health_poll(app.clone(), config.id));
     }
 }
@@ -308,9 +292,6 @@ fn adopted_phase_is_active(app: &AppHandle, id: Uuid) -> bool {
     matches!(reg.get_phase(id), Some(InstancePhase::Running) | Some(InstancePhase::Error(_)))
 }
 
-/// Polls health every 10 s for an externally-adopted (unmanaged) instance.
-/// Transitions to Error if the server becomes unreachable, and re-adopts (Running) if it
-/// comes back. Exits when the phase leaves the Running/Error cycle (e.g. user clicks Stop).
 async fn run_adopted_health_poll(app: AppHandle, id: Uuid) {
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
@@ -371,8 +352,6 @@ fn launch_instance(app: AppHandle, id: Uuid) {
     }
 }
 
-// ─── IPC: read queries ────────────────────────────────────────────────────────
-
 #[tauri::command]
 fn list_instances(state: State<'_, AppState>) -> Vec<ServerInstanceConfig> {
     state.registry.lock().unwrap().all_configs().cloned().collect()
@@ -428,8 +407,6 @@ fn ram_warning_text(model_bytes: u64, total_bytes: u64) -> String {
     )
 }
 
-// ─── IPC: mutations ──────────────────────────────────────────────────────────
-
 #[tauri::command]
 fn add_instance(
     state: State<'_, AppState>,
@@ -451,7 +428,6 @@ fn add_instance(
     Ok(id.to_string())
 }
 
-/// Probe an external server for its first listed model key without touching the registry.
 async fn probe_external_model_key(host: String, port: u16) -> Option<String> {
     let mut probe = ServerInstanceConfig::new("probe", ServerType::External, port, "");
     probe.host = host;
@@ -469,7 +445,6 @@ fn activate_adopted_instance(app: &AppHandle, state: &AppState, original_id: Uui
     app.emit("instance-added", new_id.to_string()).ok();
 }
 
-/// Promote a port-conflicting managed instance's occupant to a tracked external instance.
 #[tauri::command]
 async fn adopt_as_external_instance(
     state: State<'_, AppState>,
@@ -565,8 +540,6 @@ fn set_model_search_path_override(
     reg.save()
 }
 
-// ─── IPC: lifecycle ───────────────────────────────────────────────────────────
-
 #[tauri::command]
 async fn start_instance(state: State<'_, AppState>, app: AppHandle, id: String) -> Result<(), String> {
     let uuid = parse_uuid(&id)?;
@@ -574,12 +547,10 @@ async fn start_instance(state: State<'_, AppState>, app: AppHandle, id: String) 
         let reg = state.registry.lock().unwrap();
         reg.get_config(uuid).ok_or("instance not found")?;
     }
-    // launch_instance does blocking network I/O (health checks); run it off the main thread.
     tauri::async_runtime::spawn_blocking(move || launch_instance(app, uuid));
     Ok(())
 }
 
-/// Returns Err if the instance was adopted and the server is still up after the stop attempt.
 async fn do_stop(app: &AppHandle, uuid: Uuid, child: Option<Child>, grace: f64) -> Result<(), String> {
     if let Some(child) = child {
         tauri::async_runtime::spawn_blocking(move || graceful_kill(child, grace))
@@ -587,7 +558,6 @@ async fn do_stop(app: &AppHandle, uuid: Uuid, child: Option<Child>, grace: f64) 
             .map_err(|e| e.to_string())?;
         return Ok(());
     }
-    // Adopted instance — verify it actually stopped.
     let config = clone_config(app, uuid);
     let still_up = tauri::async_runtime::spawn_blocking(move || {
         config.map(|c| driver_for(&c, &DiscoveryConfig::default()).health_check(&c) == HealthStatus::Healthy)
@@ -600,21 +570,22 @@ async fn do_stop(app: &AppHandle, uuid: Uuid, child: Option<Child>, grace: f64) 
     }
 }
 
+fn take_child(state: &AppState, id: Uuid) -> Option<Child> {
+    state.processes.lock().unwrap().remove(&id)
+}
+
 #[tauri::command]
 async fn stop_instance(state: State<'_, AppState>, app: AppHandle, id: String) -> Result<(), String> {
     let uuid = parse_uuid(&id)?;
     state.registry.lock().unwrap().set_phase(uuid, InstancePhase::Stopping)?;
     app.emit("phase-changed", &id).ok();
 
-    // Extract child before blocking ops so the mutex is not held during kill/wait.
-    let child = state.processes.lock().unwrap().remove(&uuid);
+    let child = take_child(&state, uuid);
     let grace = clone_config(&app, uuid)
         .map(|c| driver_for(&c, &DiscoveryConfig::default()).stop(&c).grace_period_secs)
         .unwrap_or(0.0);
 
     if let Err(e) = do_stop(&app, uuid, child, grace).await {
-        // Show an error badge so the user knows why Stop didn't work (e.g. adopted server
-        // still running), rather than silently reverting to Running with no indication.
         set_error_emit(&app, uuid, InstanceErrorKind::StopFailed, &e);
         return Err(e);
     }
@@ -628,8 +599,6 @@ async fn stop_instance(state: State<'_, AppState>, app: AppHandle, id: String) -
     app.emit("phase-changed", id).ok();
     Ok(())
 }
-
-// ─── IPC: T8 param tuning + model management ─────────────────────────────────
 
 async fn switch_model_warm_load(
     app: &AppHandle,
@@ -715,8 +684,8 @@ fn list_non_ollama_models(stype: ServerType, discovery: &DiscoveryConfig) -> Res
     driver_for(&probe, discovery).list_models(&probe)
 }
 
-/// Try Ollama HTTP first, then CLI. Returns `Err("OLLAMA_UNREACHABLE")` when
-/// both fail — the UI uses this sentinel to show a free-text model entry field.
+const OLLAMA_UNREACHABLE: &str = "OLLAMA_UNREACHABLE";
+
 fn list_ollama_models_with_fallback(discovery: &DiscoveryConfig) -> Result<Vec<ModelRef>, String> {
     let probe = ServerInstanceConfig::new("probe", ServerType::Ollama, 11434, "");
     if let Ok(models) = driver_for(&probe, discovery).list_models(&probe) {
@@ -724,7 +693,7 @@ fn list_ollama_models_with_fallback(discovery: &DiscoveryConfig) -> Result<Vec<M
     }
     let raw_exe = discovery.ollama_executable_path.as_deref().unwrap_or("");
     let exe = if raw_exe.is_empty() { "ollama" } else { raw_exe };
-    ollama::list_models_cli(exe).map_err(|_| "OLLAMA_UNREACHABLE".to_string())
+    ollama::list_models_cli(exe).map_err(|_| OLLAMA_UNREACHABLE.to_string())
 }
 
 #[tauri::command]
@@ -738,8 +707,6 @@ async fn list_models_for_type(state: State<'_, AppState>, server_type: String) -
     .await
     .map_err(|e| e.to_string())?
 }
-
-// ─── IPC: discovered models ───────────────────────────────────────────────────
 
 #[derive(serde::Serialize)]
 struct DiscoveredModel {
@@ -778,8 +745,6 @@ fn discover_mlx_models(discovery: &DiscoveryConfig) -> Vec<DiscoveredModel> {
 }
 
 fn discover_ollama_models(_discovery: &DiscoveryConfig) -> Vec<DiscoveredModel> {
-    // HTTP-only: no CLI fallback here. Spawning `ollama list` activates the
-    // Ollama.app on macOS via launch services and steals window focus.
     let probe = ServerInstanceConfig::new("probe", ServerType::Ollama, 11434, "");
     driver_for(&probe, &DiscoveryConfig::default())
         .list_models(&probe)
@@ -918,8 +883,6 @@ fn open_url(url: String) {
     let _ = std::process::Command::new("open").arg(&url).spawn();
 }
 
-// ─── App lifecycle helpers ────────────────────────────────────────────────────
-
 fn mark_running_instances_for_reconnect(app: &AppHandle) {
     let state = app.state::<AppState>();
     let mut reg = state.registry.lock().unwrap();
@@ -941,10 +904,6 @@ fn on_startup(app: &tauri::App) {
         app.emit("startup-error", e.clone()).ok();
     }
 
-    // The C3 start_warning gate is bypassed here on purpose for now: every
-    // auto-start instance is launched concurrently, so two large models can
-    // load at once and exhaust memory. That risk is known; a startup chooser
-    // that lets the user pick which instances to restore is tracked in #15.
     let configs: Vec<_> = state.registry.lock().unwrap().all_configs().cloned().collect();
     for config in configs {
         if config.was_running_when_quit || config.start_on_launch {
@@ -956,8 +915,6 @@ fn on_startup(app: &tauri::App) {
         }
     }
 }
-
-// ─── Tray icon state ─────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq)]
 enum TrayIconState { Idle, Running, Transitioning, Error }
@@ -1000,8 +957,6 @@ fn sync_tray_icon(app: &AppHandle) {
     }
 }
 
-// ─── Tray / window wiring ────────────────────────────────────────────────────
-
 fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let icon = tauri::image::Image::from_bytes(icon_bytes(TrayIconState::Idle))?;
     let tray = TrayIconBuilder::new()
@@ -1040,10 +995,6 @@ fn wire_popover_autohide(app: &tauri::App) {
     }
 }
 
-/// Install a local NSEvent monitor so that ESC and Cmd+W dismiss the popover
-/// regardless of WKWebView's key-event filtering.
-/// Cmd+H is intentionally NOT intercepted: LSUIElement apps have no Dock presence,
-/// so "hide app" is meaningless and the event should pass through unconsumed.
 #[cfg(target_os = "macos")]
 fn install_popover_key_monitor(app: &tauri::App) {
     use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags};
@@ -1051,9 +1002,8 @@ fn install_popover_key_monitor(app: &tauri::App) {
 
     let Some(popover) = app.get_webview_window("popover") else { return };
 
-    // key codes (hardware-layout independent)
-    const KEY_W:   u16 = 13;
-    const KEY_ESC: u16 = 53;
+    const KEYCODE_W:   u16 = 13;
+    const KEYCODE_ESC: u16 = 53;
     const CMD: NSEventModifierFlags = NSEventModifierFlags::Command;
 
     let block = RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| -> *mut NSEvent {
@@ -1061,10 +1011,10 @@ fn install_popover_key_monitor(app: &tauri::App) {
         let ev = unsafe { event.as_ref() };
         let code = ev.keyCode();
         let mods = ev.modifierFlags().intersection(CMD);
-        let dismiss = code == KEY_ESC || (mods == CMD && code == KEY_W);
+        let dismiss = code == KEYCODE_ESC || (mods == CMD && code == KEYCODE_W);
         if dismiss && popover.is_visible().unwrap_or(false) {
             let _ = popover.hide();
-            return std::ptr::null_mut(); // consume the event
+            return std::ptr::null_mut();
         }
         event.as_ptr()
     });
@@ -1074,11 +1024,11 @@ fn install_popover_key_monitor(app: &tauri::App) {
     // monitor is forgotten rather than dropped so it keeps intercepting events
     // for the lifetime of the app, matching the installed handler's lifetime.
     unsafe {
-        let _monitor = NSEvent::addLocalMonitorForEventsMatchingMask_handler(
+        let monitor_lives_for_app = NSEvent::addLocalMonitorForEventsMatchingMask_handler(
             NSEventMask::KeyDown,
             &block,
         );
-        std::mem::forget(_monitor);
+        std::mem::forget(monitor_lives_for_app);
     }
 }
 
@@ -1118,8 +1068,6 @@ fn wire_settings_close(app: &tauri::App) {
     }
 }
 
-// ─── Entry point ─────────────────────────────────────────────────────────────
-
 fn load_persisted_state(state: &mut AppState) {
     let mut reg = state.registry.lock().unwrap();
     if let Err(e) = reg.load() {
@@ -1141,8 +1089,6 @@ fn setup_handler(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
         app.set_activation_policy(tauri::ActivationPolicy::Accessory);
         set_dock_icon();
     }
-    // Propagating Err here would cause Tauri to panic!() inside applicationDidFinishLaunching,
-    // which cannot unwind through ObjC and aborts. Use process::exit for fatal tray failures.
     if let Err(e) = build_tray(app) {
         eprintln!("[localbar] fatal: could not create tray icon: {e}");
         std::process::exit(1);
