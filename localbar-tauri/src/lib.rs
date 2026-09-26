@@ -684,6 +684,8 @@ fn list_non_ollama_models(stype: ServerType, discovery: &DiscoveryConfig) -> Res
     driver_for(&probe, discovery).list_models(&probe)
 }
 
+const OLLAMA_UNREACHABLE: &str = "OLLAMA_UNREACHABLE";
+
 fn list_ollama_models_with_fallback(discovery: &DiscoveryConfig) -> Result<Vec<ModelRef>, String> {
     let probe = ServerInstanceConfig::new("probe", ServerType::Ollama, 11434, "");
     if let Ok(models) = driver_for(&probe, discovery).list_models(&probe) {
@@ -691,7 +693,7 @@ fn list_ollama_models_with_fallback(discovery: &DiscoveryConfig) -> Result<Vec<M
     }
     let raw_exe = discovery.ollama_executable_path.as_deref().unwrap_or("");
     let exe = if raw_exe.is_empty() { "ollama" } else { raw_exe };
-    ollama::list_models_cli(exe).map_err(|_| "OLLAMA_UNREACHABLE".to_string())
+    ollama::list_models_cli(exe).map_err(|_| OLLAMA_UNREACHABLE.to_string())
 }
 
 #[tauri::command]
@@ -1022,11 +1024,11 @@ fn install_popover_key_monitor(app: &tauri::App) {
     // monitor is forgotten rather than dropped so it keeps intercepting events
     // for the lifetime of the app, matching the installed handler's lifetime.
     unsafe {
-        let _monitor = NSEvent::addLocalMonitorForEventsMatchingMask_handler(
+        let monitor_lives_for_app = NSEvent::addLocalMonitorForEventsMatchingMask_handler(
             NSEventMask::KeyDown,
             &block,
         );
-        std::mem::forget(_monitor);
+        std::mem::forget(monitor_lives_for_app);
     }
 }
 
