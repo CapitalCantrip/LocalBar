@@ -7,13 +7,13 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Returns true when a process is already listening on `(host, port)`.
 ///
-/// For loopback / unspecified addresses probes both 127.0.0.1 and ::1 with a
-/// bind probe (no network flow, immune to macOS network-extension latency).
-/// For remote hosts falls back to a TCP connect probe with a 1 s timeout.
+/// For loopback / unspecified addresses uses bind probes (no network flow,
+/// immune to macOS network-extension latency). For remote hosts falls back to
+/// a TCP connect probe with a 1 s timeout.
 pub fn port_is_open(host: &str, port: u16) -> bool {
     let Ok(mut addrs) = (host, port).to_socket_addrs() else { return false };
     let Some(addr) = addrs.next() else { return false };
-    if is_local(&addr) { loopback_bind_probes(port) } else { connect_probe(addr) }
+    if is_local(&addr) { local_bind_probes(port) } else { connect_probe(addr) }
 }
 
 fn is_local(addr: &SocketAddr) -> bool {
@@ -23,13 +23,20 @@ fn is_local(addr: &SocketAddr) -> bool {
     }
 }
 
-// Probes both IPv4 and IPv6 loopback so we catch a holder regardless of which
-// family the server bound to, even when the caller resolves "localhost" to only
-// one family.
-fn loopback_bind_probes(port: u16) -> bool {
-    let v4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-    let v6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port);
-    bind_probe(v4) || bind_probe(v6)
+// Probes loopback and wildcard in both families. With SO_REUSEADDR on (as real
+// servers set it), a bind only conflicts with a socket bound to the *same*
+// address, so all four are needed to catch a holder on any of them. SO_REUSEADDR
+// is required so that TIME_WAIT connections left by a just-stopped server are
+// not reported as a conflict.
+fn local_bind_probes(port: u16) -> bool {
+    [
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        IpAddr::V6(Ipv6Addr::LOCALHOST),
+        IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+    ]
+    .into_iter()
+    .any(|ip| bind_probe(SocketAddr::new(ip, port)))
 }
 
 fn bind_probe(addr: SocketAddr) -> bool {
@@ -37,12 +44,13 @@ fn bind_probe(addr: SocketAddr) -> bool {
     let Ok(socket) = Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) else {
         return connect_probe(addr);
     };
-    if socket.set_reuse_address(false).is_err() {
+    if socket.set_reuse_address(true).is_err() {
         return connect_probe(addr);
     }
     match socket.bind(&addr.into()) {
         Ok(()) => false,
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => true,
+        // e.g. AddrNotAvailable for ::1 on a host without IPv6.
         Err(_) => connect_probe(addr),
     }
 }
@@ -53,7 +61,8 @@ fn connect_probe(addr: SocketAddr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::net::TcpListener;
+    use std::io::Read;
+    use std::net::{TcpListener, TcpStream};
 
     use super::port_is_open;
 
@@ -82,6 +91,28 @@ mod tests {
     fn free_port_detected_as_closed() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        assert!(!port_is_open("127.0.0.1", port));
+    }
+
+    #[test]
+    fn ipv6_loopback_listener_detected_as_open() {
+        let Ok(listener) = TcpListener::bind("[::1]:0") else { return }; // no IPv6
+        let port = listener.local_addr().unwrap().port();
+        assert!(port_is_open("127.0.0.1", port));
+    }
+
+    #[test]
+    fn time_wait_after_server_exit_is_not_a_conflict() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let (server_side, _) = listener.accept().unwrap();
+        // Server closes first (as a stopped server does), leaving TIME_WAIT
+        // on the server's port.
+        drop(server_side);
+        let _ = client.read(&mut [0u8; 1]);
+        drop(client);
         drop(listener);
         assert!(!port_is_open("127.0.0.1", port));
     }

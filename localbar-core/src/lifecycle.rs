@@ -275,14 +275,20 @@ mod tests {
         InstanceRegistry::new(Box::new(InMemoryPersistence::default()))
     }
 
+    /// A port nothing is listening on, so `start()` doesn't see a conflict from
+    /// a real server on the dev machine or from tests running in parallel.
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    }
+
     fn ollama_config(name: &str) -> ServerInstanceConfig {
-        let mut cfg = ServerInstanceConfig::new(name, ServerType::Ollama, 11434, "/usr/bin/ollama");
+        let mut cfg = ServerInstanceConfig::new(name, ServerType::Ollama, free_port(), "/usr/bin/ollama");
         cfg.selected_model_key = Some("llama3:8b".into());
         cfg
     }
 
     fn external_config(name: &str) -> ServerInstanceConfig {
-        let mut cfg = ServerInstanceConfig::new(name, ServerType::External, 11434, "");
+        let mut cfg = ServerInstanceConfig::new(name, ServerType::External, free_port(), "");
         cfg.host = "127.0.0.1".into();
         cfg
     }

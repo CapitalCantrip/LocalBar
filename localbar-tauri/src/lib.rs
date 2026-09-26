@@ -149,7 +149,6 @@ fn spawn_from_plan(plan: &localbar_core::driver::LaunchPlan) -> Result<Child, St
     cmd.spawn().map_err(|e| format!("spawn failed: {e}"))
 }
 
-
 /// Send SIGTERM on Unix, then wait up to `grace_secs`, then SIGKILL.
 fn graceful_kill(mut child: Child, grace_secs: f64) {
     #[cfg(unix)]
