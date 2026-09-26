@@ -124,7 +124,63 @@ fn spawn_from_plan(plan: &localbar_core::driver::LaunchPlan) -> Result<Child, St
     if let Some(dir) = &plan.working_directory {
         cmd.current_dir(dir);
     }
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
     cmd.spawn().map_err(|e| format!("spawn failed: {e}"))
+}
+
+#[cfg(unix)]
+fn find_listening_pid(port: u16) -> Option<u32> {
+    let output = std::process::Command::new("lsof")
+        .args(["-nP", "-t", &format!("-iTCP:{port}"), "-sTCP:LISTEN"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .and_then(|line| line.trim().parse::<u32>().ok())
+}
+
+#[cfg(not(unix))]
+fn find_listening_pid(_port: u16) -> Option<u32> {
+    None
+}
+
+#[cfg(unix)]
+fn pid_is_alive(pid: u32) -> bool {
+    // SAFETY: kill(2) with signal 0 only probes for the pid's existence and permission; it sends no signal.
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+#[cfg(unix)]
+fn kill_by_pid(pid: u32, grace_secs: f64) -> Result<(), String> {
+    // SAFETY: kill(2) is always safe to call with a valid pid and SIGTERM.
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM); }
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs_f64(grace_secs.clamp(0.0, 60.0));
+    while pid_is_alive(pid) {
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if !pid_is_alive(pid) {
+        return Ok(());
+    }
+    // SAFETY: kill(2) is always safe to call with a valid pid and SIGKILL.
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL); }
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    if pid_is_alive(pid) {
+        Err(format!("process {pid} survived SIGKILL"))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_by_pid(_pid: u32, _grace_secs: f64) -> Result<(), String> {
+    Err("stopping adopted processes is not supported on this platform".to_string())
 }
 
 fn graceful_kill(mut child: Child, grace_secs: f64) {
@@ -328,14 +384,42 @@ fn launch_from_plan(app: &AppHandle, id: Uuid, plan: &localbar_core::driver::Lau
     tauri::async_runtime::spawn(run_health_poll(app.clone(), id));
 }
 
-fn finish_adoption_if_running(app: &AppHandle, id: Uuid) {
+fn finish_adoption_if_running(app: &AppHandle, id: Uuid, config: &ServerInstanceConfig, driver: &dyn ServerDriver) {
     let running = matches!(
         app.state::<AppState>().registry.lock().unwrap().get_phase(id),
         Some(InstancePhase::Running)
     );
     if running {
+        if localbar_core::model_probe::reports_loaded_model(config.server_type) {
+            detect_and_correct_adopted_model(app, id, config, driver);
+        }
         tauri::async_runtime::spawn(run_adopted_health_poll(app.clone(), id));
     }
+}
+
+fn detect_and_correct_adopted_model(
+    app: &AppHandle,
+    id: Uuid,
+    config: &ServerInstanceConfig,
+    driver: &dyn ServerDriver,
+) {
+    let Some(reported) = localbar_core::model_probe::detect_loaded_model(config) else { return };
+    let already_matches = config
+        .selected_model_key
+        .as_deref()
+        .is_some_and(|k| localbar_core::model_probe::model_matches(k, &reported));
+    if already_matches {
+        return;
+    }
+    let candidates: Vec<String> = driver
+        .list_models(config)
+        .map(|models| models.into_iter().map(|m| m.key).collect())
+        .unwrap_or_default();
+    let Some(corrected) = localbar_core::model_probe::best_matching_key(&reported, &candidates) else { return };
+    let state = app.state::<AppState>();
+    let mut reg = state.registry.lock().unwrap();
+    reg.update_config(id, |c| c.selected_model_key = Some(corrected)).ok();
+    reg.save().ok();
 }
 
 fn launch_instance(app: AppHandle, id: Uuid) {
@@ -343,16 +427,17 @@ fn launch_instance(app: AppHandle, id: Uuid) {
     let discovery = discovery_config(&app);
     let driver = driver_for(&config, &discovery);
 
+    let listener_pid = find_listening_pid(config.port);
     let (plan, events) = {
         let state = app.state::<AppState>();
         let mut reg = state.registry.lock().unwrap();
-        lifecycle::start(&mut reg, id, &*driver)
+        lifecycle::start(&mut reg, id, &*driver, listener_pid)
     };
     emit_lifecycle_events(&app, events);
 
     match plan {
         Some(plan) => launch_from_plan(&app, id, &plan),
-        None => finish_adoption_if_running(&app, id),
+        None => finish_adoption_if_running(&app, id, &config, &*driver),
     }
 }
 
@@ -563,15 +648,54 @@ async fn do_stop(app: &AppHandle, uuid: Uuid, child: Option<Child>, grace: f64) 
         return Ok(());
     }
     let config = clone_config(app, uuid);
+    let Some(config) = config else { return Ok(()) };
+    let adopted_pid = adopted_pid_if_killable(app, uuid, &config);
+    match adopted_pid {
+        Some(pid) => stop_adopted_by_pid(app, uuid, &config, pid, grace).await,
+        None => stop_via_health_check(config).await,
+    }
+}
+
+fn adopted_pid_if_killable(app: &AppHandle, uuid: Uuid, config: &ServerInstanceConfig) -> Option<u32> {
+    if config.server_type == ServerType::External {
+        return None;
+    }
+    app.state::<AppState>().registry.lock().unwrap().get_adopted_pid(uuid)
+}
+
+async fn stop_via_health_check(config: ServerInstanceConfig) -> Result<(), String> {
     let still_up = tauri::async_runtime::spawn_blocking(move || {
-        config.map(|c| driver_for(&c, &DiscoveryConfig::default()).health_check(&c) == HealthStatus::Healthy)
-              .unwrap_or(false)
+        driver_for(&config, &DiscoveryConfig::default()).health_check(&config) == HealthStatus::Healthy
     }).await.unwrap_or(false);
     if still_up {
         Err("cannot stop: server was not launched by LocalBar and is still running".to_string())
     } else {
         Ok(())
     }
+}
+
+async fn stop_adopted_by_pid(
+    app: &AppHandle,
+    uuid: Uuid,
+    config: &ServerInstanceConfig,
+    pid: u32,
+    grace: f64,
+) -> Result<(), String> {
+    let port = config.port;
+    let currently_listening = tauri::async_runtime::spawn_blocking(move || find_listening_pid(port))
+        .await
+        .unwrap_or(None);
+    if currently_listening != Some(pid) {
+        app.state::<AppState>().registry.lock().unwrap().clear_adopted_pid(uuid);
+        return Err(format!("adopted process {pid} is no longer the listener on port {port}"));
+    }
+    let result = tauri::async_runtime::spawn_blocking(move || kill_by_pid(pid, grace))
+        .await
+        .map_err(|e| e.to_string())?;
+    if result.is_ok() {
+        app.state::<AppState>().registry.lock().unwrap().clear_adopted_pid(uuid);
+    }
+    result
 }
 
 fn take_child(state: &AppState, id: Uuid) -> Option<Child> {

@@ -27,6 +27,9 @@ export const ipc = {
   removeInstance: (id: string): Promise<void> =>
     invoke('remove_instance', { id }),
 
+  adoptAsExternalInstance: (conflictingId: string): Promise<string> =>
+    invoke('adopt_as_external_instance', { conflictingId }),
+
   getStartWarning: (id: string): Promise<string | null> =>
     invoke('get_start_warning', { id }),
 

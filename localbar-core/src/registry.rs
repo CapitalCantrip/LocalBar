@@ -18,6 +18,7 @@ pub struct InstanceRegistry {
     discovery_config: DiscoveryConfig,
     persistence: Box<dyn Persistence>,
     start_times: HashMap<Uuid, Instant>,
+    adopted_pids: HashMap<Uuid, u32>,
 }
 
 impl InstanceRegistry {
@@ -29,6 +30,7 @@ impl InstanceRegistry {
             discovery_config: DiscoveryConfig::default(),
             persistence,
             start_times: HashMap::new(),
+            adopted_pids: HashMap::new(),
         }
     }
 
@@ -42,6 +44,7 @@ impl InstanceRegistry {
         let pos = self.instances.iter().position(|r| r.config.id == id)
             .ok_or_else(|| format!("remove_instance: no instance with id {id}"))?;
         self.instances.remove(pos);
+        self.adopted_pids.remove(&id);
         Ok(())
     }
 
@@ -160,6 +163,18 @@ impl InstanceRegistry {
 
     pub fn consume_start_time(&mut self, id: Uuid) -> Option<Instant> {
         self.start_times.remove(&id)
+    }
+
+    pub fn set_adopted_pid(&mut self, id: Uuid, pid: u32) {
+        self.adopted_pids.insert(id, pid);
+    }
+
+    pub fn get_adopted_pid(&self, id: Uuid) -> Option<u32> {
+        self.adopted_pids.get(&id).copied()
+    }
+
+    pub fn clear_adopted_pid(&mut self, id: Uuid) {
+        self.adopted_pids.remove(&id);
     }
 }
 
@@ -302,6 +317,33 @@ mod tests {
         assert_eq!(*reg.get_discovery_config(), cfg);
         reg.load_discovery_config().unwrap();
         assert_eq!(*reg.get_discovery_config(), cfg);
+    }
+
+    #[test]
+    fn adopted_pid_roundtrips() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(external_config("a"));
+        assert_eq!(reg.get_adopted_pid(id), None);
+        reg.set_adopted_pid(id, 4242);
+        assert_eq!(reg.get_adopted_pid(id), Some(4242));
+    }
+
+    #[test]
+    fn clear_adopted_pid_removes_it() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(external_config("a"));
+        reg.set_adopted_pid(id, 4242);
+        reg.clear_adopted_pid(id);
+        assert_eq!(reg.get_adopted_pid(id), None);
+    }
+
+    #[test]
+    fn remove_instance_clears_adopted_pid() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(external_config("a"));
+        reg.set_adopted_pid(id, 4242);
+        reg.remove_instance(id).unwrap();
+        assert_eq!(reg.get_adopted_pid(id), None);
     }
 
     #[test]
