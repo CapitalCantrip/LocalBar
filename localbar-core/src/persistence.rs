@@ -3,8 +3,6 @@ use std::path::PathBuf;
 
 use crate::types::{DiscoveryConfig, ModelMemory, ModelMemoryKey, NamedProfile, ServerInstanceConfig};
 
-// ─── Persistence trait ───────────────────────────────────────────────────────
-
 pub trait Persistence: Send + Sync {
     fn save_instances(&mut self, configs: &[ServerInstanceConfig]) -> Result<(), String>;
     fn load_instances(&self) -> Result<Vec<ServerInstanceConfig>, String>;
@@ -16,9 +14,6 @@ pub trait Persistence: Send + Sync {
     fn load_discovery_config(&self) -> Result<DiscoveryConfig, String>;
 }
 
-// ─── InMemoryPersistence ─────────────────────────────────────────────────────
-
-/// In-memory persistence adapter for tests. No filesystem access.
 #[derive(Debug, Default)]
 pub struct InMemoryPersistence {
     instances: Vec<ServerInstanceConfig>,
@@ -65,10 +60,6 @@ impl Persistence for InMemoryPersistence {
     }
 }
 
-// ─── FilePersistence ─────────────────────────────────────────────────────────
-
-/// JSON-file persistence. Reads the whole file on load; writes the whole file on save.
-/// All fields share one file — each save operation preserves the other fields.
 pub struct FilePersistence {
     path: PathBuf,
 }
@@ -149,8 +140,6 @@ impl Persistence for FilePersistence {
         Ok(self.read()?.discovery)
     }
 }
-
-// ─── FilePersistence tests ────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

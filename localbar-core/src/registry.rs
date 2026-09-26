@@ -6,14 +6,10 @@ use uuid::Uuid;
 use crate::persistence::Persistence;
 use crate::types::{DiscoveryConfig, InstancePhase, ModelMemory, ModelMemoryKey, NamedProfile, ParamValues, ServerInstanceConfig, ServerType};
 
-// ─── InstanceRecord ──────────────────────────────────────────────────────────
-
 pub struct InstanceRecord {
     pub config: ServerInstanceConfig,
     pub phase: InstancePhase,
 }
-
-// ─── InstanceRegistry ────────────────────────────────────────────────────────
 
 pub struct InstanceRegistry {
     instances: Vec<InstanceRecord>,
@@ -21,8 +17,6 @@ pub struct InstanceRegistry {
     model_memory: HashMap<ModelMemoryKey, ModelMemory>,
     discovery_config: DiscoveryConfig,
     persistence: Box<dyn Persistence>,
-    /// Wall-clock instants for instances in Starting or SwitchingModel phase.
-    /// Consumed by lifecycle::poll_once when the instance reaches Running.
     start_times: HashMap<Uuid, Instant>,
 }
 
@@ -85,10 +79,6 @@ impl InstanceRegistry {
         self.instances.iter().any(|r| r.phase.is_active())
     }
 
-    /// Returns a warning string when starting this instance would conflict with
-    /// another active instance, or None when it is safe to start (C3).
-    /// External instances are excluded — they are unmanaged processes, so running
-    /// a managed instance alongside them is the intended use case.
     pub fn start_warning(&self, instance_id: Uuid) -> Option<String> {
         self.instances
             .iter()
@@ -105,13 +95,11 @@ impl InstanceRegistry {
             })
     }
 
-    /// Persist current instance configs to the backing store.
     pub fn save(&mut self) -> Result<(), String> {
         let configs: Vec<_> = self.instances.iter().map(|r| r.config.clone()).collect();
         self.persistence.save_instances(&configs)
     }
 
-    /// Load instance configs from the backing store. All phases start at Stopped.
     pub fn load(&mut self) -> Result<(), String> {
         let configs = self.persistence.load_instances()?;
         self.instances = configs
@@ -121,31 +109,26 @@ impl InstanceRegistry {
         Ok(())
     }
 
-    /// Load named profiles from the backing store into the in-memory cache.
     pub fn load_profiles(&mut self) -> Result<(), String> {
         self.profiles = self.persistence.load_profiles()?;
         Ok(())
     }
 
-    /// Load model memory from the backing store into the in-memory cache.
     pub fn load_model_memory(&mut self) -> Result<(), String> {
         self.model_memory = self.persistence.load_model_memory()?;
         Ok(())
     }
 
-    /// Return the resolved-params layer for the active profile of the given instance, if any.
     pub fn get_active_profile_params(&self, instance_id: Uuid) -> Option<&ParamValues> {
         let record = self.instances.iter().find(|r| r.config.id == instance_id)?;
         let profile_id = record.config.active_profile_id?;
         self.profiles.iter().find(|p| p.id == profile_id).map(|p| &p.params)
     }
 
-    /// Return the cached `ModelMemory` for the given key, if any.
     pub fn get_model_memory(&self, key: &ModelMemoryKey) -> Option<&ModelMemory> {
         self.model_memory.get(key)
     }
 
-    /// Persist and cache a model-memory entry.
     pub fn upsert_model_memory(&mut self, entry: ModelMemory) -> Result<(), String> {
         self.persistence.upsert_model_memory(entry.clone())?;
         self.model_memory.insert(entry.key(), entry);
@@ -156,14 +139,12 @@ impl InstanceRegistry {
         &self.discovery_config
     }
 
-    /// Persist and cache the discovery config.
     pub fn set_discovery_config(&mut self, config: DiscoveryConfig) -> Result<(), String> {
         self.persistence.save_discovery_config(&config)?;
         self.discovery_config = config;
         Ok(())
     }
 
-    /// Load discovery config from the backing store into the in-memory cache.
     pub fn load_discovery_config(&mut self) -> Result<(), String> {
         self.discovery_config = self.persistence.load_discovery_config()?;
         Ok(())
@@ -173,19 +154,14 @@ impl InstanceRegistry {
         self.instances.len()
     }
 
-    /// Record the wall-clock start of a Starting or SwitchingModel transition.
     pub fn record_start_time(&mut self, id: Uuid) {
         self.start_times.insert(id, Instant::now());
     }
 
-    /// Remove and return the recorded start instant, if any.
-    /// Called by lifecycle::poll_once when the instance reaches Running or Error.
     pub fn consume_start_time(&mut self, id: Uuid) -> Option<Instant> {
         self.start_times.remove(&id)
     }
 }
-
-// ─── Registry tests ──────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -275,7 +251,6 @@ mod tests {
         let ext = reg.add_instance(external_config("lm-studio"));
         let managed = reg.add_instance(ollama_config("ollama"));
         reg.set_phase(ext, InstancePhase::Running).unwrap();
-        // External instance running must NOT block starting a managed one.
         assert_eq!(reg.start_warning(managed), None);
     }
 
@@ -287,7 +262,6 @@ mod tests {
         let b = reg.add_instance(ollama_config("beta"));
         reg.set_phase(ext, InstancePhase::Running).unwrap();
         reg.set_phase(a, InstancePhase::Running).unwrap();
-        // Managed instance already running must still warn.
         assert!(reg.start_warning(b).is_some());
     }
 
@@ -326,8 +300,19 @@ mod tests {
         };
         reg.set_discovery_config(cfg.clone()).unwrap();
         assert_eq!(*reg.get_discovery_config(), cfg);
-        // Verify it was written through to persistence by loading fresh.
         reg.load_discovery_config().unwrap();
         assert_eq!(*reg.get_discovery_config(), cfg);
+    }
+
+    #[test]
+    fn load_resets_phases_to_stopped() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(ollama_config("a"));
+        reg.set_phase(id, InstancePhase::Running).unwrap();
+        reg.save().unwrap();
+
+        reg.load().unwrap();
+
+        assert_eq!(reg.get_phase(id), Some(&InstancePhase::Stopped));
     }
 }
