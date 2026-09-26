@@ -2,9 +2,6 @@ use crate::driver::{HealthStatus, LaunchPlan, ServerDriver, ShutdownPlan};
 use crate::drivers::http::base_url;
 use crate::types::{ModelRef, ParamDescriptor, ParamValues, ServerInstanceConfig, ServerType};
 
-/// Driver for inference servers LocalBar did not launch.
-/// Lifecycle operations (`launch`, `stop`) are deliberate no-ops.
-/// Phase is health-check driven: Running when the server responds 200, Error otherwise.
 pub struct ExternalDriver;
 
 impl ServerDriver for ExternalDriver {
@@ -71,8 +68,6 @@ impl ServerDriver for ExternalDriver {
     }
 }
 
-// ─── URL helpers ──────────────────────────────────────────────────────────────
-
 fn models_url(config: &ServerInstanceConfig) -> String {
     format!("{}/v1/models", base_url(config))
 }
@@ -80,8 +75,6 @@ fn models_url(config: &ServerInstanceConfig) -> String {
 fn health_url(config: &ServerInstanceConfig) -> String {
     format!("{}/health", base_url(config))
 }
-
-// ─── Probe helpers ────────────────────────────────────────────────────────────
 
 enum ProbeOutcome {
     Ok,
@@ -99,8 +92,6 @@ fn probe_result(agent: &ureq::Agent, url: &str) -> ProbeOutcome {
     }
 }
 
-// ─── OpenAI /v1/models parser ─────────────────────────────────────────────────
-
 fn parse_openai_models(json: &serde_json::Value) -> Vec<ModelRef> {
     let Some(data) = json["data"].as_array() else { return Vec::new() };
     data.iter().filter_map(model_ref_from_openai).collect()
@@ -110,8 +101,6 @@ fn model_ref_from_openai(m: &serde_json::Value) -> Option<ModelRef> {
     let key = m["id"].as_str()?.to_owned();
     Some(ModelRef { display_name: key.clone(), key, publisher: None, architecture: None, size_bytes: None, modified_secs: None })
 }
-
-// ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

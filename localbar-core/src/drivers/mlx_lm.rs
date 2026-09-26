@@ -9,9 +9,6 @@ use crate::types::{
     ServerType,
 };
 
-/// Driver for mlx_lm.server.
-/// `search_paths` is the ordered list of directories to scan for HF-cached models.
-/// Empty = derive from HF_HOME or HOME at list time (consistent with ADR D10: global, not per-instance).
 pub struct MLXLMDriver {
     pub search_paths: Vec<String>,
 }
@@ -122,8 +119,6 @@ impl ServerDriver for MLXLMDriver {
     }
 }
 
-// ─── Launch helpers ───────────────────────────────────────────────────────────
-
 fn build_launch_args(
     config: &ServerInstanceConfig,
     model_key: &str,
@@ -152,8 +147,6 @@ fn append_param_arg(flag: &str, value: &ParamValue, args: &mut Vec<String>) {
         ParamValue::String(s) => { args.push(flag.to_string()); args.push(s.clone()); }
     }
 }
-
-// ─── List-models helper ───────────────────────────────────────────────────────
 
 fn read_architecture(config_json: &Path) -> Option<String> {
     let text = fs::read_to_string(config_json).ok()?;
@@ -196,8 +189,6 @@ fn push_model(
     });
 }
 
-/// Splits `"org/model"` or `"category/org/model"` into `(model_name, publisher)`.
-/// Publisher is the second-to-last path component; absent when there is only one.
 fn split_display_publisher(rel: &str) -> (&str, Option<&str>) {
     match rel.rfind('/') {
         Some(pos) => {
@@ -233,11 +224,6 @@ fn scan_hf_root(
     }
 }
 
-/// Recursively scans for flat-layout models up to `depth` levels from `dir`.
-/// key   = absolute path to the model dir (used as --model arg for mlx-lm)
-/// display_name = path relative to the search root (human-readable)
-/// Stops recursing into a dir once it finds config.json (treats it as a leaf).
-/// Skips HF-cache dirs (models--*) and hidden dirs (.*).
 fn scan_flat_recursive(
     dir: &Path,
     rel: &str,
@@ -268,9 +254,6 @@ fn scan_flat_recursive(
     }
 }
 
-// ─── HF cache helpers ─────────────────────────────────────────────────────────
-
-/// `models--org--name` → `org/name`
 pub fn hf_dir_to_model_key(dir_name: &str) -> String {
     dir_name
         .strip_prefix("models--")
@@ -279,8 +262,6 @@ pub fn hf_dir_to_model_key(dir_name: &str) -> String {
         .replace("--", "/")
 }
 
-/// Pick the canonical snapshot directory for a given model dir.
-/// Prefers the hash written in `refs/main`; falls back to latest mtime.
 pub fn canonical_snapshot(model_dir: &Path, snapshots_dir: &Path) -> Option<PathBuf> {
     let refs_main = model_dir.join("refs").join("main");
     if refs_main.exists() {
@@ -294,7 +275,6 @@ pub fn canonical_snapshot(model_dir: &Path, snapshots_dir: &Path) -> Option<Path
             }
         }
     }
-    // Fall back to snapshot with latest mtime.
     fs::read_dir(snapshots_dir)
         .ok()?
         .flatten()
@@ -314,8 +294,6 @@ fn effective_search_paths(configured: &[String]) -> Vec<String> {
     hf_cache_default().into_iter().collect()
 }
 
-/// Returns `$HF_HOME` if set, or `$HOME/.cache/huggingface/hub` if HOME is set,
-/// or None if neither is set (e.g. daemon context without HOME).
 fn hf_cache_default() -> Option<String> {
     if let Ok(hf) = std::env::var("HF_HOME") {
         return Some(hf);
@@ -346,8 +324,6 @@ fn locate_config_json(model_key: &str, search_paths: &[String]) -> Option<PathBu
     None
 }
 
-// ─── Metadata parsing ─────────────────────────────────────────────────────────
-
 fn parse_metadata_from_config(model_key: &str, config_path: &Path) -> (Option<String>, Option<String>) {
     let Ok(data) = fs::read_to_string(config_path) else {
         return (parse_parameter_count(model_key), parse_quantization(model_key));
@@ -356,17 +332,14 @@ fn parse_metadata_from_config(model_key: &str, config_path: &Path) -> (Option<St
         Ok(v) => v,
         Err(_) => return (parse_parameter_count(model_key), parse_quantization(model_key)),
     };
-    // config.json rarely has a "quantization" field; derive from name when absent.
     let quantization = json["quantization_config"]["quant_type"]
         .as_str()
         .map(str::to_owned)
         .or_else(|| parse_quantization(model_key));
-    // num_parameters is non-standard; use name-based heuristic.
     let parameter_count = parse_parameter_count(model_key);
     (parameter_count, quantization)
 }
 
-/// Matches tokens like "7B", "1.5B", "0.5b" in a path string.
 pub fn parse_parameter_count(text: &str) -> Option<String> {
     for token in split_tokens(text) {
         let lower = token.to_lowercase();
@@ -384,18 +357,15 @@ pub fn parse_parameter_count(text: &str) -> Option<String> {
     None
 }
 
-/// Matches "4bit", "8bit", "4-bit", GGUF-style "Q4_K_M", or float dtypes.
 pub fn parse_quantization(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
 
-    // N-bit variants
     for bits in ["4", "8", "2", "3", "5", "6"] {
         if lower.contains(&format!("{}bit", bits)) || lower.contains(&format!("{}-bit", bits)) {
             return Some(format!("{}bit", bits));
         }
     }
 
-    // Float dtypes — check longer tokens first
     let tokens: Vec<&str> = split_tokens(&lower).collect();
     for dtype in ["bf16", "fp16", "f16"] {
         if tokens.contains(&dtype) {
@@ -403,7 +373,6 @@ pub fn parse_quantization(text: &str) -> Option<String> {
         }
     }
 
-    // GGUF-style: q4_k_m etc.
     for token in split_tokens(&lower) {
         if token.starts_with('q')
             && token.len() >= 2
@@ -422,23 +391,16 @@ fn split_tokens(text: &str) -> impl Iterator<Item = &str> {
         .filter(|s| !s.is_empty())
 }
 
-
-// ─── Unit tests ───────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
 
-    // ── Driver trait behaviour ────────────────────────────────────────────────
-
     #[test]
     fn switch_requires_restart_is_true() {
         assert!(MLXLMDriver::default().switch_requires_restart());
     }
-
-    // ── Display name derivation ───────────────────────────────────────────────
 
     #[test]
     fn hf_dir_to_key_standard_org_name() {
@@ -455,11 +417,8 @@ mod tests {
 
     #[test]
     fn hf_dir_to_key_three_component_repo() {
-        // models--a--b--c: first -- is the separator, rest stay as /
         assert_eq!(hf_dir_to_model_key("models--a--b--c"), "a/b/c");
     }
-
-    // ── Snapshot deduplication ────────────────────────────────────────────────
 
     fn make_snapshot(root: &Path, hash: &str) -> PathBuf {
         let dir = root.join(hash);
@@ -487,9 +446,6 @@ mod tests {
 
     #[test]
     fn canonical_snapshot_falls_back_when_no_refs_main() {
-        // Tests that a valid snapshot is returned when refs/main is absent.
-        // Mtime ordering between snapshots is not asserted here because
-        // sub-second mtime resolution is not guaranteed on all filesystems.
         let tmp = TempDir::new().unwrap();
         let model_dir = tmp.path().join("models--org--name");
         let snapshots_dir = model_dir.join("snapshots");
@@ -498,11 +454,8 @@ mod tests {
         make_snapshot(&snapshots_dir, "abc123");
 
         let result = canonical_snapshot(&model_dir, &snapshots_dir).unwrap();
-        // The sole snapshot must be returned when no refs/main exists.
         assert_eq!(result.file_name().unwrap(), "abc123");
     }
-
-    // ── Two snapshots → one entry ─────────────────────────────────────────────
 
     #[test]
     fn list_models_two_snapshots_returns_one_entry() {
@@ -527,13 +480,10 @@ mod tests {
         assert_eq!(models[0].publisher.as_deref(), Some("mlx-community"));
     }
 
-    // ── Hidden dirs are excluded; depth-1 flat dirs with config.json ARE found ─
-
     #[test]
     fn list_models_flat_excludes_hidden_dirs() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-        // Hidden dir must be skipped by flat scan
         let hidden = root.join(".hidden-model");
         fs::create_dir_all(&hidden).unwrap();
         fs::write(hidden.join("config.json"), r#"{"model_type":"llama"}"#).unwrap();
@@ -547,7 +497,6 @@ mod tests {
     fn list_models_depth1_flat_found_as_model() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-        // A dir at depth 1 with config.json is a valid flat-layout model
         let model_dir = root.join("my-local-model");
         fs::create_dir_all(&model_dir).unwrap();
         fs::write(model_dir.join("config.json"), r#"{"model_type":"llama"}"#).unwrap();
@@ -559,8 +508,6 @@ mod tests {
         assert_eq!(models[0].display_name, "my-local-model");
         assert_eq!(models[0].publisher, None);
     }
-
-    // ── Metadata parsing ──────────────────────────────────────────────────────
 
     #[test]
     fn parse_parameter_count_standard_tokens() {
@@ -581,7 +528,36 @@ mod tests {
         assert_eq!(parse_quantization("plain-model-7B"), None);
     }
 
-    // ── Flat org/model layout ─────────────────────────────────────────────────
+    #[test]
+    fn parse_quantization_prefers_longer_dtype_when_both_tokens_present() {
+        assert_eq!(
+            parse_quantization("model-bf16-f16"),
+            Some("bf16".to_string()),
+            "bf16 must win over f16 when both dtype tokens are present"
+        );
+    }
+
+    #[test]
+    fn metadata_from_config_falls_back_to_name_when_quant_field_absent() {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.json");
+        fs::write(&config_path, r#"{"model_type":"llama"}"#).unwrap();
+
+        let (parameter_count, quantization) =
+            parse_metadata_from_config("Qwen2.5-7B-4bit", &config_path);
+        assert_eq!(parameter_count, Some("7B".to_string()));
+        assert_eq!(quantization, Some("4bit".to_string()));
+    }
+
+    #[test]
+    fn metadata_from_config_prefers_quant_type_field_when_present() {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.json");
+        fs::write(&config_path, r#"{"quantization_config":{"quant_type":"int4"}}"#).unwrap();
+
+        let (_, quantization) = parse_metadata_from_config("model-name", &config_path);
+        assert_eq!(quantization, Some("int4".to_string()));
+    }
 
     #[test]
     fn list_models_flat_org_model_layout() {
@@ -604,7 +580,6 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
 
-        // HF cache entry
         let model_dir = root.join("models--org--model");
         let snapshots_dir = model_dir.join("snapshots");
         let refs_dir = model_dir.join("refs");
@@ -613,7 +588,6 @@ mod tests {
         make_snapshot(&snapshots_dir, "abc123");
         fs::write(refs_dir.join("main"), "abc123").unwrap();
 
-        // Flat entry — different model
         let flat_dir = root.join("froggeric").join("Qwen3-35B-4bit");
         fs::create_dir_all(&flat_dir).unwrap();
         fs::write(flat_dir.join("config.json"), r#"{"model_type":"qwen"}"#).unwrap();
@@ -622,10 +596,8 @@ mod tests {
         let models = driver.list_models(&dummy_config()).unwrap();
         assert_eq!(models.len(), 2);
         let keys: Vec<_> = models.iter().map(|m| m.key.as_str()).collect();
-        // HF key is the repo id; flat key is the absolute path
         assert!(keys.contains(&"org/model"));
         assert!(keys.contains(&flat_dir.to_str().unwrap()));
-        // Check publishers
         let flat = models.iter().find(|m| m.key == flat_dir.to_str().unwrap()).unwrap();
         assert_eq!(flat.publisher.as_deref(), Some("froggeric"));
         assert_eq!(flat.display_name, "Qwen3-35B-4bit");
@@ -635,7 +607,6 @@ mod tests {
     fn list_models_flat_ignores_dir_without_config_json() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-        // Dir tree with no config.json at any leaf
         let model_dir = root.join("someorg").join("incomplete-model");
         fs::create_dir_all(&model_dir).unwrap();
 
@@ -648,7 +619,6 @@ mod tests {
     fn list_models_flat_depth3_layout() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-        // category/org/model — depth 3 from root
         let deep_dir = root.join("quantized").join("mlx-community").join("Llama-3-8B-4bit");
         fs::create_dir_all(&deep_dir).unwrap();
         fs::write(deep_dir.join("config.json"), r#"{"model_type":"llama"}"#).unwrap();
@@ -660,8 +630,6 @@ mod tests {
         assert_eq!(models[0].display_name, "Llama-3-8B-4bit");
         assert_eq!(models[0].publisher.as_deref(), Some("mlx-community"));
     }
-
-    // ── helpers ───────────────────────────────────────────────────────────────
 
     fn driver_for(search_path: String) -> MLXLMDriver {
         MLXLMDriver::new(vec![search_path])

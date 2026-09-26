@@ -2,22 +2,24 @@ use std::time::Duration;
 
 use crate::types::ServerInstanceConfig;
 
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const QUICK_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const WARM_LOAD_READ_TIMEOUT: Duration = Duration::from_secs(300);
+
 pub fn base_url(config: &ServerInstanceConfig) -> String {
     format!("http://{}:{}", config.host, config.port)
 }
 
-/// Agent for fast status/metadata calls: 5 s connect timeout, 10 s read timeout.
 pub fn quick_agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(5))
-        .timeout_read(Duration::from_secs(10))
+        .timeout_connect(CONNECT_TIMEOUT)
+        .timeout_read(QUICK_READ_TIMEOUT)
         .build()
 }
 
-/// Agent for model warm-load: 5 s connect timeout, 5 min read timeout.
-pub fn load_agent() -> ureq::Agent {
+pub fn warm_load_agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(5))
-        .timeout_read(Duration::from_secs(300))
+        .timeout_connect(CONNECT_TIMEOUT)
+        .timeout_read(WARM_LOAD_READ_TIMEOUT)
         .build()
 }

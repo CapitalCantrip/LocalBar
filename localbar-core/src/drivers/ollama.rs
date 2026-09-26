@@ -71,8 +71,7 @@ impl ServerDriver for OllamaDriver {
         let tag = config.managed_model_tag.as_deref().unwrap_or(&model.key);
         let url = format!("{}/api/generate", super::http::base_url(config));
         let body = serde_json::json!({"model": tag, "prompt": "", "stream": false});
-        // 5-minute timeout: model warm-load into VRAM can be slow on large models.
-        super::http::load_agent().post(&url).send_json(body).map_err(|e| e.to_string())?;
+        super::http::warm_load_agent().post(&url).send_json(body).map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -136,19 +135,15 @@ impl ServerDriver for OllamaDriver {
     }
 }
 
-// ─── Managed tag ─────────────────────────────────────────────────────────────
-
-/// Build the managed model tag: `localbar/<sanitised-model-key>-<first-8-chars-of-instance-id>`.
 pub fn managed_tag(model_key: &str, instance_id: Uuid) -> String {
     let sanitized = sanitize_model_key_for_tag(model_key);
     let short_id = &instance_id.to_string()[..8];
     format!("localbar/{sanitized}-{short_id}")
 }
 
-/// Lowercase the key and replace runs of non-alphanumeric characters with a single hyphen.
 fn sanitize_model_key_for_tag(key: &str) -> String {
     let mut result = String::new();
-    let mut last_was_sep = true; // suppress leading hyphens
+    let mut last_was_sep = true;
     for ch in key.chars() {
         if ch.is_ascii_alphanumeric() {
             result.push(ch.to_ascii_lowercase());
@@ -164,19 +159,11 @@ fn sanitize_model_key_for_tag(key: &str) -> String {
     result
 }
 
-// ─── HTTP helpers ─────────────────────────────────────────────────────────────
-
 fn tags_url(config: &ServerInstanceConfig) -> String {
     format!("{}/api/tags", super::http::base_url(config))
 }
 
-// ─── Modelfile generation (Seam 3 — pure function) ───────────────────────────
-
-/// Build an Ollama Modelfile from schema + params.
-/// Param names come from `ParamDescriptor.modelfile_param_name` (C6).
-/// Params with `modelfile_param_name = None` are silently skipped.
 pub fn generate_modelfile(schema: &[ParamDescriptor], base_key: &str, params: &ParamValues) -> String {
-    // Strip newlines to prevent Modelfile directive injection via base_key.
     let safe_key = base_key.replace(['\n', '\r'], "");
     let mut lines = vec![format!("FROM {}", safe_key)];
     for desc in schema {
@@ -192,7 +179,6 @@ pub fn generate_modelfile(schema: &[ParamDescriptor], base_key: &str, params: &P
 fn append_system_block(lines: &mut Vec<String>, system_prompt: &Option<String>) {
     if let Some(system) = system_prompt {
         if !system.is_empty() {
-            // Escape backslashes first, then triple-quotes, to avoid double-escape.
             let escaped = system.replace('\\', "\\\\").replace("\"\"\"", "\\\"\\\"\\\"");
             lines.push(format!("SYSTEM \"\"\"\n{}\n\"\"\"", escaped));
         }
@@ -208,8 +194,6 @@ fn fmt_param_value(value: &ParamValue) -> String {
     }
 }
 
-// ─── Tags response parser ─────────────────────────────────────────────────────
-
 fn parse_tags_response(json: &serde_json::Value) -> Result<Vec<ModelRef>, String> {
     let models = json["models"].as_array().ok_or("missing 'models' array in /api/tags response")?;
     models.iter().map(model_ref_from_json).collect()
@@ -220,10 +204,6 @@ fn model_ref_from_json(m: &serde_json::Value) -> Result<ModelRef, String> {
     Ok(ModelRef { display_name: key.clone(), key, publisher: None, architecture: None, size_bytes: m["size"].as_i64(), modified_secs: None })
 }
 
-// ─── CLI list ─────────────────────────────────────────────────────────────────
-
-/// Invoke `ollama list` and parse its output. Uses `executable` as the path to
-/// the ollama binary, falling back to PATH resolution when the string is "ollama".
 pub fn list_models_cli(executable: &str) -> Result<Vec<ModelRef>, String> {
     let output = std::process::Command::new(executable)
         .arg("list")
@@ -235,9 +215,6 @@ pub fn list_models_cli(executable: &str) -> Result<Vec<ModelRef>, String> {
     Ok(parse_ollama_list_output(&String::from_utf8_lossy(&output.stdout)))
 }
 
-/// Parse the tabular stdout of `ollama list` into `Vec<ModelRef>`.
-/// Skips the header row (detected by first token "NAME") and any malformed rows;
-/// never panics.
 pub fn parse_ollama_list_output(raw: &str) -> Vec<ModelRef> {
     raw.lines()
         .filter(|l| !is_ollama_header_line(l))
@@ -269,8 +246,6 @@ fn parse_size_cols(value_col: Option<&str>, unit_col: Option<&str>) -> Option<i6
     };
     Some((value * multiplier) as i64)
 }
-
-// ─── sanitize_model_key_for_tag tests ────────────────────────────────────────
 
 #[cfg(test)]
 mod tag_tests {
@@ -309,8 +284,6 @@ mod tag_tests {
     }
 }
 
-// ─── CLI list parser tests ────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod cli_tests {
     use super::*;
@@ -347,12 +320,9 @@ mistral:7b       6577803aa9a0    4.4 GB    6 days ago";
     }
 
     #[test]
-    fn preamble_before_header_is_ignored() {
+    fn header_row_excluded_even_with_preceding_preamble() {
         let raw = "warning: some preamble\nNAME    ID    SIZE    MODIFIED\nllama3:8b    abc    4.9 GB    yesterday";
         let models = parse_ollama_list_output(raw);
-        // "warning:" does not start with NAME so it tries to parse as a row,
-        // but "warning:" has no second column (id), yielding one model with key "warning:".
-        // The real guard here is that "NAME" header is correctly filtered out.
         assert!(models.iter().all(|m| m.key != "NAME"));
     }
 
@@ -389,8 +359,6 @@ mistral:7b       6577803aa9a0    4.4 GB    6 days ago";
     }
 }
 
-// ─── Seam 3 tests — pure Modelfile generation, no process needed ──────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,7 +378,6 @@ mod tests {
                 modelfile_param_name: Some("num_ctx"),
                 default_value: Some(ParamValue::Int(2048)),
             },
-            // MaxTokens intentionally has no modelfile name to test C6 skip.
             ParamDescriptor {
                 param: CanonicalParam::MaxTokens,
                 server_flag_name: "options.num_predict",
@@ -473,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn modelfile_newline_in_base_key_is_stripped() {
+    fn modelfile_newline_in_base_key_cannot_inject_directive() {
         let out = generate_modelfile(&[], "llama3:8b\nSYSTEM injected", &ParamValues::default());
         assert_eq!(out, "FROM llama3:8bSYSTEM injected");
     }
@@ -485,8 +452,6 @@ mod tests {
             ..Default::default()
         };
         let out = generate_modelfile(&[], "base", &params);
-        // backslash → \\ then """ → \"\"\", so the combined \\\"\"\" should
-        // produce \\\\\"\"\", not double-escape.
         assert!(out.contains("SYSTEM \"\"\""));
         assert!(!out.contains("\\\\\\\\"), "should not double-escape backslashes");
     }
