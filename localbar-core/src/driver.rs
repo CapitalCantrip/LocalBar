@@ -2,8 +2,6 @@ use uuid::Uuid;
 
 use crate::types::{ModelRef, ParamDescriptor, ParamValues, ServerInstanceConfig, ServerType};
 
-// ─── Health ───────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum HealthStatus {
     Healthy,
@@ -11,15 +9,11 @@ pub enum HealthStatus {
     Unreachable,
 }
 
-// ─── Model metadata ───────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ModelMetadata {
     pub parameter_count: Option<String>,
     pub quantization: Option<String>,
 }
-
-// ─── Launch / shutdown plans ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct LaunchPlan {
@@ -34,11 +28,6 @@ pub struct ShutdownPlan {
     pub grace_period_secs: f64,
 }
 
-// ─── ServerDriver ────────────────────────────────────────────────────────────
-
-/// The seam between LocalBar's generic control plane and each server's behaviour.
-/// Implementations must be stateless — all mutable state lives in InstanceRegistry.
-/// No code outside a driver implementation may downcast `dyn ServerDriver` (C4).
 pub trait ServerDriver: Send + Sync {
     fn server_type(&self) -> ServerType;
     fn param_schema(&self) -> Vec<ParamDescriptor>;
@@ -63,19 +52,14 @@ pub trait ServerDriver: Send + Sync {
 
     fn health_check(&self, config: &ServerInstanceConfig) -> HealthStatus;
 
-    /// True when this driver owns the server process (full driver).
-    /// False for external drivers — callers must not invoke `launch`/`stop` to spawn processes.
     fn manages_lifecycle(&self) -> bool {
         true
     }
 
-    /// True when switching models requires a process restart (stop + relaunch).
-    /// Default: false (e.g. Ollama switches via API without restarting).
     fn switch_requires_restart(&self) -> bool {
         false
     }
 
-    /// Returns best-effort metadata for a model. Default: None (C4).
     fn fetch_model_metadata(
         &self,
         _model_key: &str,
@@ -84,8 +68,6 @@ pub trait ServerDriver: Send + Sync {
         None
     }
 
-    /// Generate a managed config artifact (e.g. an Ollama Modelfile).
-    /// Returns None for drivers that don't use managed configs.
     fn generate_managed_config(
         &self,
         _base_key: &str,
@@ -95,14 +77,10 @@ pub trait ServerDriver: Send + Sync {
         None
     }
 
-    /// Compute the managed config tag for a given model key and instance id.
-    /// Returns None for drivers that don't use managed configs.
     fn managed_config_tag(&self, _model_key: &str, _instance_id: Uuid) -> Option<String> {
         None
     }
 
-    /// Apply (create/update) the managed config artifact on the server.
-    /// Default: no-op (drivers that don't use managed configs do nothing).
     fn apply_managed_config(
         &self,
         _config: &ServerInstanceConfig,
@@ -112,8 +90,6 @@ pub trait ServerDriver: Send + Sync {
         Ok(())
     }
 
-    /// Delete the managed config artifact from the server.
-    /// Default: no-op. Called when an instance is removed (cleanup).
     fn delete_managed_config(
         &self,
         _config: &ServerInstanceConfig,

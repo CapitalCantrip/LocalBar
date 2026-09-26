@@ -3,8 +3,6 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-// ─── ParamValue ───────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "camelCase")]
 pub enum ParamValue {
@@ -13,8 +11,6 @@ pub enum ParamValue {
     String(String),
     Bool(bool),
 }
-
-// ─── CanonicalParam ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,25 +24,16 @@ pub enum CanonicalParam {
     PresencePenalty,
     Seed,
     ContextLength,
-    // Never stored in ParamValues.values — lives in ParamValues.system_prompt.
-    // Included for exhaustive descriptor switches only.
     SystemPrompt,
 }
-
-// ─── ParamDescriptor ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct ParamDescriptor {
     pub param: CanonicalParam,
-    /// The server's CLI flag name shown in hover tooltips.
     pub server_flag_name: &'static str,
-    /// The Modelfile PARAMETER directive name (e.g. "temperature").
-    /// None for params not baked into an Ollama Modelfile. (C6)
     pub modelfile_param_name: Option<&'static str>,
     pub default_value: Option<ParamValue>,
 }
-
-// ─── ParamValues ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ParamValues {
@@ -55,16 +42,10 @@ pub struct ParamValues {
     pub system_prompt: Option<String>,
 }
 
-/// The result of `ParamValues::resolve`. Newtype prevents callers from
-/// accidentally passing unresolved params where resolved params are expected.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedParams(pub ParamValues);
 
 impl ParamValues {
-    /// Sole implementation of the param resolution contract (C1).
-    /// Priority (lowest → highest): driver defaults → model memory → active profile.
-    /// `CanonicalParam::SystemPrompt` is never inserted into `values`; it is
-    /// filtered out of driver defaults here to enforce the invariant at the boundary.
     pub fn resolve(
         profile: Option<&ParamValues>,
         memory: Option<&ModelMemory>,
@@ -72,7 +53,6 @@ impl ParamValues {
     ) -> ResolvedParams {
         let mut resolved = ParamValues::default();
         for desc in driver_defaults {
-            // SystemPrompt must never live in values — it belongs in system_prompt.
             if desc.param == CanonicalParam::SystemPrompt {
                 continue;
             }
@@ -97,11 +77,9 @@ impl ParamValues {
             self.values.insert(*param, value.clone());
         }
         match mode {
-            // Profile is highest priority: always wins, including clearing the prompt.
             MergeMode::Profile => {
                 self.system_prompt = source.system_prompt.clone();
             }
-            // Auto-memory only sets the prompt when the profile did not supply one.
             MergeMode::AutoMemory => {
                 if self.system_prompt.is_none() {
                     self.system_prompt = source.system_prompt.clone();
@@ -116,25 +94,17 @@ enum MergeMode {
     Profile,
 }
 
-// ─── ModelMemoryKey ───────────────────────────────────────────────────────────
-
-/// Composite key for ModelMemory. Entries are per-(server_type, model_key) so
-/// that MlxLm and Ollama entries for a key string "llama3" never clobber each other.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ModelMemoryKey {
     pub server_type: ServerType,
     pub model_key: String,
 }
 
-// ─── ModelMemory ─────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelMemory {
     pub server_type: ServerType,
-    /// ModelRef.key — driver-scoped; same weights → separate entries per server type.
     pub model_key: String,
     pub last_used_params: ParamValues,
-    /// Rolling window of measured stop→healthy durations (newest first, max 10).
     pub restart_duration_samples: Vec<f64>,
 }
 
@@ -153,8 +123,6 @@ impl ModelMemory {
     }
 }
 
-// ─── ModelRef ────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelRef {
     pub key: String,
@@ -165,8 +133,6 @@ pub struct ModelRef {
     pub modified_secs: Option<i64>,
 }
 
-// ─── ServerType ──────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ServerType {
@@ -175,25 +141,15 @@ pub enum ServerType {
     External,
 }
 
-// ─── DiscoveryConfig ──────────────────────────────────────────────────────────
-
-/// Global user-configurable model discovery settings, persisted under the
-/// `discovery` key in state.json. Supersedes the Swift-era UserDefaults
-/// approach from ADR D10 — see ADR D11 for the Tauri-era decision.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct DiscoveryConfig {
-    /// Ordered list of directories to scan for mlx-lm HF-cached models.
-    /// Empty = fall back to $HF_HOME / ~/.cache/huggingface/hub at scan time.
     #[serde(default)]
     pub mlx_lm_search_paths: Vec<String>,
-    /// Path to the ollama executable. None = resolve via system PATH.
     #[serde(default)]
     pub ollama_executable_path: Option<String>,
 }
 
 impl DiscoveryConfig {
-    /// Resolve the mlx-lm search paths for one instance.
-    /// If the instance has an override, it replaces the global list entirely.
     pub fn resolved_mlx_paths(&self, override_path: Option<&str>) -> Vec<String> {
         match override_path {
             Some(p) => vec![p.to_owned()],
@@ -202,9 +158,6 @@ impl DiscoveryConfig {
     }
 }
 
-// ─── ServerInstanceConfig ────────────────────────────────────────────────────
-
-/// One configured server instance. Pure config — no runtime state (no PID, no phase).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServerInstanceConfig {
     pub id: Uuid,
@@ -216,13 +169,9 @@ pub struct ServerInstanceConfig {
     pub selected_model_key: Option<String>,
     pub instance_params: ParamValues,
     pub active_profile_id: Option<Uuid>,
-    /// Ollama only: localbar/<model>-<instanceId> managed model tag.
     pub managed_model_tag: Option<String>,
     pub start_on_launch: bool,
     pub was_running_when_quit: bool,
-    /// mlx-lm only: when set, overrides the global discovery search list for
-    /// this instance. A single directory that is used instead of
-    /// `DiscoveryConfig::mlx_lm_search_paths` when scanning models.
     #[serde(default)]
     pub model_search_path_override: Option<String>,
 }
@@ -252,18 +201,13 @@ impl ServerInstanceConfig {
     }
 }
 
-// ─── NamedProfile ─────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NamedProfile {
     pub id: Uuid,
     pub name: String,
     pub params: ParamValues,
-    /// None = applicable to any server type.
     pub server_type: Option<ServerType>,
 }
-
-// ─── InstancePhase ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum InstancePhase {
@@ -284,8 +228,6 @@ impl InstancePhase {
     }
 }
 
-// ─── InstanceError ───────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct InstanceError {
     pub kind: InstanceErrorKind,
@@ -301,8 +243,6 @@ pub enum InstanceErrorKind {
     ModelSwitchFailed,
     Unexpected,
 }
-
-// ─── DiscoveryConfig tests ────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod discovery_tests {
@@ -328,7 +268,6 @@ mod discovery_tests {
 
     #[test]
     fn empty_global_paths_returns_empty_vec_for_driver_fallback() {
-        // Empty -> driver's effective_search_paths adds the HF cache default.
         let cfg = DiscoveryConfig::default();
         assert!(cfg.resolved_mlx_paths(None).is_empty());
     }

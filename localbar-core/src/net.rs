@@ -5,15 +5,10 @@ use socket2::{Domain, Protocol, Socket, Type};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Returns true when a process is already listening on `(host, port)`.
-///
-/// For loopback / unspecified addresses uses bind probes (no network flow,
-/// immune to macOS network-extension latency). For remote hosts falls back to
-/// a TCP connect probe with a 1 s timeout.
 pub fn port_is_open(host: &str, port: u16) -> bool {
     let Ok(mut addrs) = (host, port).to_socket_addrs() else { return false };
     let Some(addr) = addrs.next() else { return false };
-    if is_local(&addr) { local_bind_probes(port) } else { connect_probe(addr) }
+    if is_local(&addr) { probe_both_loopback_families(port) } else { connect_probe(addr) }
 }
 
 fn is_local(addr: &SocketAddr) -> bool {
@@ -23,12 +18,7 @@ fn is_local(addr: &SocketAddr) -> bool {
     }
 }
 
-// Probes loopback and wildcard in both families. With SO_REUSEADDR on (as real
-// servers set it), a bind only conflicts with a socket bound to the *same*
-// address, so all four are needed to catch a holder on any of them. SO_REUSEADDR
-// is required so that TIME_WAIT connections left by a just-stopped server are
-// not reported as a conflict.
-fn local_bind_probes(port: u16) -> bool {
+fn probe_both_loopback_families(port: u16) -> bool {
     [
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -50,7 +40,6 @@ fn bind_probe(addr: SocketAddr) -> bool {
     match socket.bind(&addr.into()) {
         Ok(()) => false,
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => true,
-        // e.g. AddrNotAvailable for ::1 on a host without IPv6.
         Err(_) => connect_probe(addr),
     }
 }
@@ -97,7 +86,7 @@ mod tests {
 
     #[test]
     fn ipv6_loopback_listener_detected_as_open() {
-        let Ok(listener) = TcpListener::bind("[::1]:0") else { return }; // no IPv6
+        let Ok(listener) = TcpListener::bind("[::1]:0") else { return };
         let port = listener.local_addr().unwrap().port();
         assert!(port_is_open("127.0.0.1", port));
     }
@@ -108,8 +97,6 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
         let (server_side, _) = listener.accept().unwrap();
-        // Server closes first (as a stopped server does), leaving TIME_WAIT
-        // on the server's port.
         drop(server_side);
         let _ = client.read(&mut [0u8; 1]);
         drop(client);

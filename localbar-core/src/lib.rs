@@ -1,5 +1,3 @@
-// localbar-core: platform-agnostic domain logic, drivers, and persistence.
-// No Tauri dependency. All Tauri-specific code lives in localbar-tauri.
 #![deny(clippy::cognitive_complexity)]
 #![deny(clippy::too_many_lines)]
 
@@ -18,11 +16,6 @@ use driver::ServerDriver;
 use registry::InstanceRegistry;
 use types::{ModelMemory, ModelMemoryKey, ParamValues, ServerInstanceConfig, ServerType};
 
-// ─── adopt_external_as_new_instance ──────────────────────────────────────────
-
-/// Create a new External instance at the same host:port as the conflicting managed instance.
-/// The original instance is left in its current phase; callers may reset it to Stopped.
-/// `detected_model_key` should come from probing the server's `/v1/models` before calling.
 pub fn adopt_external_as_new_instance(
     registry: &mut InstanceRegistry,
     conflicting_id: Uuid,
@@ -45,12 +38,10 @@ pub fn adopt_external_as_new_instance(
     Ok(new_id)
 }
 
-// ─── ensure_managed_model ────────────────────────────────────────────────────
-
 /// Resolve params and bake a managed model tag for an instance.
 ///
-/// Must be called **after** `selected_model_key` is written to the config
-/// (Bug 1 fix): the tag is built from whatever key is currently in the config.
+/// Must be called **after** `selected_model_key` is written to the config:
+/// the tag is built from whatever key is currently in the config.
 /// No-ops for drivers that return `None` from `generate_managed_config`.
 pub fn ensure_managed_model(
     registry: &mut InstanceRegistry,
@@ -75,13 +66,8 @@ pub fn ensure_managed_model(
     registry.save()
 }
 
-// ─── push_restart_duration_sample ────────────────────────────────────────────
+const RESTART_SAMPLE_WINDOW: usize = 10;
 
-/// Append a startup-duration sample to the rolling window in ModelMemory.
-///
-/// The window holds at most 10 samples, newest first. No-ops when no model is
-/// selected. Duration is wall-clock seconds from when the instance entered
-/// Starting (or SwitchingModel) to when it first became healthy.
 pub fn push_restart_duration_sample(
     registry: &mut InstanceRegistry,
     id: Uuid,
@@ -98,14 +84,10 @@ pub fn push_restart_duration_sample(
         .cloned()
         .unwrap_or_else(|| ModelMemory::new(server_type, model_key));
     entry.restart_duration_samples.insert(0, duration_secs);
-    entry.restart_duration_samples.truncate(10);
+    entry.restart_duration_samples.truncate(RESTART_SAMPLE_WINDOW);
     registry.upsert_model_memory(entry)
 }
 
-// ─── update_model_memory ─────────────────────────────────────────────────────
-
-/// Persist the params that were active when a model became Running (auto-memory).
-/// No-ops when no model is selected.
 pub fn update_model_memory(
     registry: &mut InstanceRegistry,
     id: Uuid,
@@ -179,8 +161,6 @@ mod tests {
         ModelMemory::new(ServerType::MlxLm, model_key)
     }
 
-    // ── Phase transitions ─────────────────────────────────────────────────────
-
     #[test]
     fn phase_transition_happy_path() {
         let mut reg = make_registry();
@@ -232,8 +212,6 @@ mod tests {
         let unknown = uuid::Uuid::new_v4();
         assert!(reg.set_phase(unknown, InstancePhase::Running).is_err());
     }
-
-    // ── ParamValues::resolve priority ordering ────────────────────────────────
 
     fn temp_desc() -> crate::types::ParamDescriptor {
         crate::types::ParamDescriptor {
@@ -313,34 +291,36 @@ mod tests {
 
     #[test]
     fn resolve_profile_no_prompt_clears_memory_prompt() {
-        // Profile with None system_prompt should override (clear) the memory-set prompt.
         let memory_params = ParamValues { system_prompt: Some("from memory".into()), ..Default::default() };
         let mut memory = make_memory("m");
         memory.last_used_params = memory_params;
 
-        // Profile has no system_prompt
         let profile_params = ParamValues::default();
         let resolved = ParamValues::resolve(Some(&profile_params), Some(&memory), &[]);
         assert_eq!(resolved.0.system_prompt, None);
     }
 
     #[test]
+    fn resolve_memory_prompt_only_when_profile_absent() {
+        let memory_params = ParamValues { system_prompt: Some("from memory".into()), ..Default::default() };
+        let mut memory = make_memory("m");
+        memory.last_used_params = memory_params;
+
+        let resolved = ParamValues::resolve(None, Some(&memory), &[]);
+        assert_eq!(resolved.0.system_prompt.as_deref(), Some("from memory"));
+    }
+
+    #[test]
     fn resolve_system_prompt_variant_in_driver_defaults_is_ignored() {
-        // A driver that mistakenly includes SystemPrompt in its schema must not
-        // end up with it in the values map.
-        let schema = vec![
-            crate::types::ParamDescriptor {
-                param: CanonicalParam::SystemPrompt,
-                server_flag_name: "--system",
-                modelfile_param_name: None,
-                default_value: Some(ParamValue::String("default system".into())),
-            },
-        ];
+        let schema = vec![crate::types::ParamDescriptor {
+            param: CanonicalParam::SystemPrompt,
+            server_flag_name: "--system",
+            modelfile_param_name: None,
+            default_value: Some(ParamValue::String("default system".into())),
+        }];
         let resolved = ParamValues::resolve(None, None, &schema);
         assert!(!resolved.0.values.contains_key(&CanonicalParam::SystemPrompt));
     }
-
-    // ── start_warning (C3) ────────────────────────────────────────────────────
 
     #[test]
     fn start_warning_none_when_all_stopped() {
@@ -389,8 +369,6 @@ mod tests {
         assert_eq!(reg.start_warning(b), None);
     }
 
-    // ── Persistence round-trip ────────────────────────────────────────────────
-
     #[test]
     fn persistence_round_trip_produces_identical_configs() {
         let store = Arc::new(Mutex::new(InMemoryPersistence::default()));
@@ -408,8 +386,6 @@ mod tests {
         let loaded = reg2.get_config(id).expect("config should exist after load");
         assert_eq!(loaded, &config);
     }
-
-    // ── ensure_managed_model (T8 Seam 1) ────────────────────────────────────
 
     fn ollama_config(name: &str) -> ServerInstanceConfig {
         ServerInstanceConfig::new(name, ServerType::Ollama, 11434, "/usr/bin/ollama")
@@ -462,16 +438,13 @@ mod tests {
         assert!(tag.unwrap().starts_with("localbar/"));
     }
 
-    /// Bug 1: the tag must be computed from the key that is in the config
-    /// **at the time ensure_managed_model is called**, not from a stale snapshot.
     #[test]
-    fn ensure_managed_model_uses_current_model_key_bug1() {
+    fn ensure_managed_model_uses_current_model_key_not_stale_snapshot() {
         let mut reg = make_registry();
         let mut cfg = ollama_config("o");
         cfg.selected_model_key = Some("old-model".into());
         let id = reg.add_instance(cfg);
 
-        // Caller updates key BEFORE calling ensure_managed_model (Bug 1 fix).
         reg.update_config(id, |c| c.selected_model_key = Some("new-model".into())).unwrap();
 
         let driver = MockDriver::new(ServerType::Ollama);
@@ -482,8 +455,6 @@ mod tests {
         assert!(calls[0].0.contains("new-model"), "tag must use new model key");
         assert!(!calls[0].0.contains("old-model"), "tag must not use old model key");
     }
-
-    // ── update_model_memory (T8 Seam 1) ─────────────────────────────────────
 
     #[test]
     fn update_model_memory_stores_params_for_model() {
@@ -516,7 +487,6 @@ mod tests {
         cfg.selected_model_key = Some("llama3:8b".into());
         let id = reg.add_instance(cfg);
 
-        // Prime model memory with a specific temperature.
         let mut mem_params = ParamValues::default();
         mem_params.values.insert(CanonicalParam::Temperature, ParamValue::Double(0.42));
         update_model_memory(&mut reg, id, mem_params).unwrap();
@@ -524,14 +494,9 @@ mod tests {
         let driver = MockDriver::new(ServerType::Ollama);
         ensure_managed_model(&mut reg, id, &driver).unwrap();
 
-        // The content passed to apply_managed_config is generated by MockDriver's
-        // generate_managed_config ("FROM <key>"), which doesn't embed params —
-        // but the real test is that the driver was called (not the content format).
         let calls = driver.managed_config_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
     }
-
-    // ── push_restart_duration_sample ─────────────────────────────────────────
 
     #[test]
     fn push_restart_duration_sample_records_value() {
@@ -590,8 +555,6 @@ mod tests {
         assert!(super::push_restart_duration_sample(&mut reg, id, 1.0).is_ok());
     }
 
-    // ── adopt_external_as_new_instance ───────────────────────────────────────
-
     #[test]
     fn adopt_external_creates_new_instance_with_external_type() {
         let mut reg = make_registry();
@@ -625,7 +588,6 @@ mod tests {
         let mut reg = make_registry();
         let original_id = reg.add_instance(ollama_config("ollama"));
         adopt_external_as_new_instance(&mut reg, original_id, None).unwrap();
-        // Original config must still be accessible with all its fields intact.
         assert!(reg.get_config(original_id).is_some());
     }
 
@@ -645,8 +607,6 @@ mod tests {
         let new_id = adopt_external_as_new_instance(&mut reg, original_id, None).unwrap();
         assert_eq!(reg.get_config(new_id).unwrap().host, "192.168.1.10");
     }
-
-    // ── Mock driver sanity ────────────────────────────────────────────────────
 
     #[test]
     fn mock_driver_list_models() {

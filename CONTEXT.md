@@ -2,6 +2,10 @@
 
 A macOS (and future cross-platform) menu bar app for managing local LLM inference servers. It starts, stops, and configures servers on the user's own hardware, handling model selection and parameter tuning.
 
+## Architecture
+
+`localbar-core` holds all platform-agnostic domain logic, drivers, and persistence, and has no dependency on Tauri. Tauri-specific code (commands, windows, tray) lives entirely in `localbar-tauri`.
+
 ## Language
 
 ### Servers and instances
@@ -12,7 +16,7 @@ _Avoid_: server, node, endpoint
 **Server type**: The inference backend that an instance runs. Each type has a corresponding Driver. Current types: mlx-lm, Ollama, llama.cpp.
 _Avoid_: backend, engine, runtime
 
-**Driver**: The code responsible for a single server type's lifecycle — launching, health-checking, model listing, parameter schema, and teardown. Full drivers own the process; external drivers connect to an already-running process.
+**Driver**: The code responsible for a single server type's lifecycle — launching, health-checking, model listing, parameter schema, and teardown. Full drivers own the process; external drivers connect to an already-running process. Drivers are stateless — all mutable state lives in `InstanceRegistry` — and no code outside a driver implementation may downcast `dyn ServerDriver`.
 _Avoid_: adapter, plugin, integration
 
 **Full driver**: A Driver that spawns and owns the server process. Responsible for the full lifecycle from launch to shutdown.

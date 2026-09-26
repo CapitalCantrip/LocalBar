@@ -1,4 +1,3 @@
-/// Mock ServerDriver for use in tests. Stateless; returns canned values.
 use std::sync::{Arc, Mutex};
 
 use uuid::Uuid;
@@ -13,13 +12,9 @@ pub struct MockDriver {
     pub server_type: ServerType,
     pub models: Vec<ModelRef>,
     pub health_status: HealthStatus,
-    /// When false, `manages_lifecycle()` returns false (External-style driver).
     pub manages_lifecycle: bool,
-    /// When true, `switch_requires_restart()` returns true (mlx-lm-style driver).
     pub switch_requires_restart: bool,
-    /// Captures (tag, content) pairs from `apply_managed_config` calls.
     pub managed_config_calls: Arc<Mutex<Vec<(String, String)>>>,
-    /// Captures tag strings from `delete_managed_config` calls.
     pub delete_config_calls: Arc<Mutex<Vec<String>>>,
 }
 
@@ -43,7 +38,6 @@ impl MockDriver {
         vec![mk("model-a", "Model A"), mk("model-b", "Model B")]
     }
 
-    /// A driver that reports Unhealthy but still manages its own process.
     pub fn new_unhealthy(server_type: ServerType) -> Self {
         Self {
             health_status: HealthStatus::Unhealthy("not ready".into()),
@@ -51,8 +45,6 @@ impl MockDriver {
         }
     }
 
-    /// A driver that reports Unhealthy AND does not manage its own lifecycle
-    /// (External-style: LocalBar cannot spawn it).
     pub fn new_unmanaged_unhealthy(server_type: ServerType) -> Self {
         Self {
             health_status: HealthStatus::Unhealthy("not ready".into()),
@@ -61,7 +53,6 @@ impl MockDriver {
         }
     }
 
-    /// A driver that requires a full process restart for model switches (mlx-lm-style).
     pub fn new_restart(server_type: ServerType) -> Self {
         Self { switch_requires_restart: true, ..Self::new(server_type) }
     }
@@ -141,8 +132,6 @@ impl ServerDriver for MockDriver {
     fn switch_requires_restart(&self) -> bool {
         self.switch_requires_restart
     }
-
-    // ── Managed-config methods (Ollama-like behaviour when server_type == Ollama) ──
 
     fn generate_managed_config(
         &self,

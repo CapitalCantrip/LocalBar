@@ -7,8 +7,6 @@ use crate::net::port_is_open;
 use crate::registry::InstanceRegistry;
 use crate::types::{InstanceError, InstanceErrorKind, InstancePhase, ModelMemoryKey, ModelRef, ParamValues};
 
-// ─── Public types ─────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 pub enum LifecycleEvent {
     PhaseChanged(Uuid, InstancePhase),
@@ -30,8 +28,6 @@ pub enum PollOutcome {
     Continue,
     Done,
 }
-
-// ─── start ────────────────────────────────────────────────────────────────────
 
 /// Precondition: instance is in Starting phase with start time recorded.
 pub fn start(
@@ -71,8 +67,6 @@ pub fn start(
     }
 }
 
-// ─── stop ─────────────────────────────────────────────────────────────────────
-
 pub fn stop(
     reg: &mut InstanceRegistry,
     id: Uuid,
@@ -85,8 +79,6 @@ pub fn stop(
     let events = phase_events(reg, id, InstancePhase::Stopping);
     (StopPlan { grace_secs }, events)
 }
-
-// ─── switch_model ─────────────────────────────────────────────────────────────
 
 /// Precondition: config already updated with new model key and managed model ensured.
 pub fn switch_model(
@@ -135,27 +127,19 @@ fn switch_model_sync(
     }
 }
 
-// ─── adopt ────────────────────────────────────────────────────────────────────
-
-/// Mark an already-running external/adopted instance as Running.
-///
-/// The Tauri layer spawns `run_adopted_health_poll` after calling this.
 pub fn adopt(reg: &mut InstanceRegistry, id: Uuid) -> Vec<LifecycleEvent> {
     phase_events(reg, id, InstancePhase::Running)
 }
 
-// ─── poll_once ────────────────────────────────────────────────────────────────
-
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Precondition: elapsed is wall-clock time since the instance entered Starting/SwitchingModel.
 pub fn poll_once(
     reg: &mut InstanceRegistry,
     id: Uuid,
     driver: &dyn ServerDriver,
     health: bool,
     process_alive: bool,
-    elapsed: Duration,
+    since_phase_entered: Duration,
     ctx: PollContext,
 ) -> (PollOutcome, Vec<LifecycleEvent>) {
     let phase = reg.get_phase(id).cloned();
@@ -172,12 +156,12 @@ pub fn poll_once(
     }
 
     if health {
-        persist_startup_metrics(reg, id, driver, elapsed);
+        persist_startup_metrics(reg, id, driver, since_phase_entered);
         reg.consume_start_time(id);
         return (PollOutcome::Done, phase_events(reg, id, InstancePhase::Running));
     }
 
-    if elapsed >= STARTUP_TIMEOUT {
+    if since_phase_entered >= STARTUP_TIMEOUT {
         return done_with_error(
             reg, id, &ctx,
             InstanceErrorKind::HealthCheckFailed, "startup timed out after 30 s",
@@ -188,12 +172,6 @@ pub fn poll_once(
     (PollOutcome::Continue, vec![])
 }
 
-// ─── poll_adopted ─────────────────────────────────────────────────────────────
-
-/// Ongoing health monitor for an adopted/external instance (every ~10 s).
-///
-/// Running → Error when `health` is false; Error → Running when `health` is true.
-/// Returns an empty vec when no phase change is needed.
 pub fn poll_adopted(reg: &mut InstanceRegistry, id: Uuid, health: bool) -> Vec<LifecycleEvent> {
     let phase = reg.get_phase(id).cloned();
     match (health, phase) {
@@ -206,8 +184,6 @@ pub fn poll_adopted(reg: &mut InstanceRegistry, id: Uuid, health: bool) -> Vec<L
         _ => vec![],
     }
 }
-
-// ─── Private helpers ──────────────────────────────────────────────────────────
 
 fn phase_events(reg: &mut InstanceRegistry, id: Uuid, phase: InstancePhase) -> Vec<LifecycleEvent> {
     reg.set_phase(id, phase.clone()).ok();
@@ -258,8 +234,6 @@ fn persist_startup_metrics(reg: &mut InstanceRegistry, id: Uuid, driver: &dyn Se
     crate::push_restart_duration_sample(reg, id, elapsed.as_secs_f64()).ok();
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -275,8 +249,6 @@ mod tests {
         InstanceRegistry::new(Box::new(InMemoryPersistence::default()))
     }
 
-    /// A port nothing is listening on, so `start()` doesn't see a conflict from
-    /// a real server on the dev machine or from tests running in parallel.
     fn free_port() -> u16 {
         std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
     }
@@ -299,8 +271,6 @@ mod tests {
         }).next()
     }
 
-    // ── start ─────────────────────────────────────────────────────────────────
-
     #[test]
     fn start_returns_launch_plan_for_unhealthy_managed_instance() {
         let mut reg = make_registry();
@@ -320,7 +290,7 @@ mod tests {
         let id = reg.add_instance(ollama_config("a"));
         reg.set_phase(id, InstancePhase::Starting).unwrap();
         reg.record_start_time(id);
-        let driver = MockDriver::new(ServerType::Ollama); // healthy by default
+        let driver = MockDriver::new(ServerType::Ollama);
 
         let (plan, events) = start(&mut reg, id, &driver);
         assert!(plan.is_none());
@@ -344,8 +314,6 @@ mod tests {
         ));
     }
 
-    // ── stop ──────────────────────────────────────────────────────────────────
-
     #[test]
     fn stop_sets_stopping_and_returns_grace_secs() {
         let mut reg = make_registry();
@@ -359,14 +327,12 @@ mod tests {
         assert_eq!(reg.get_phase(id), Some(&InstancePhase::Stopping));
     }
 
-    // ── switch_model ──────────────────────────────────────────────────────────
-
     #[test]
     fn switch_model_sync_driver_transitions_to_running() {
         let mut reg = make_registry();
         let id = reg.add_instance(ollama_config("a"));
         reg.set_phase(id, InstancePhase::Running).unwrap();
-        let driver = MockDriver::new(ServerType::Ollama); // switch_requires_restart = false
+        let driver = MockDriver::new(ServerType::Ollama);
 
         let (plan, events) = switch_model(&mut reg, id, &driver);
         assert!(plan.is_none());
@@ -444,13 +410,11 @@ mod tests {
         let mut reg = make_registry();
         let id = reg.add_instance(ollama_config("a"));
         reg.set_phase(id, InstancePhase::Running).unwrap();
-        let driver = MockDriver::new(ServerType::Ollama); // sync path: switch_requires_restart = false
+        let driver = MockDriver::new(ServerType::Ollama);
 
         switch_model(&mut reg, id, &driver);
         assert!(reg.consume_start_time(id).is_none(), "sync path must not leave a start time in the registry");
     }
-
-    // ── adopt ─────────────────────────────────────────────────────────────────
 
     #[test]
     fn adopt_sets_running() {
@@ -462,8 +426,6 @@ mod tests {
         assert_eq!(phase_of(&events), Some(InstancePhase::Running));
         assert_eq!(reg.get_phase(id), Some(&InstancePhase::Running));
     }
-
-    // ── poll_once ─────────────────────────────────────────────────────────────
 
     #[test]
     fn poll_once_continue_when_not_yet_healthy() {
@@ -568,8 +530,6 @@ mod tests {
         assert!(reg.consume_start_time(id).is_none(), "start time must be consumed");
     }
 
-    // ── poll_adopted ──────────────────────────────────────────────────────────
-
     #[test]
     fn poll_adopted_running_to_error_when_unhealthy() {
         let mut reg = make_registry();
@@ -606,8 +566,6 @@ mod tests {
         assert!(events.is_empty());
     }
 
-    // ── poll_once phase guard (M1) ────────────────────────────────────────────
-
     #[test]
     fn poll_once_noop_when_phase_is_terminal() {
         let mut reg = make_registry();
@@ -622,8 +580,6 @@ mod tests {
         assert_eq!(outcome, PollOutcome::Done);
         assert!(events.is_empty(), "terminal phase must produce no events");
     }
-
-    // ── start port conflict (M2) ──────────────────────────────────────────────
 
     #[test]
     fn start_port_in_use_gives_port_conflict() {
@@ -646,8 +602,6 @@ mod tests {
             Some(InstancePhase::Error(e)) if matches!(e.kind, crate::types::InstanceErrorKind::PortConflict { .. })
         ));
     }
-
-    // ── switch_model_sync failure (M3) ────────────────────────────────────────
 
     struct SwitchFailDriver;
     impl crate::driver::ServerDriver for SwitchFailDriver {
@@ -685,8 +639,6 @@ mod tests {
             message: "driver switch failed".into(),
         })));
     }
-
-    // ── start_times ───────────────────────────────────────────────────────────
 
     #[test]
     fn record_and_consume_start_time() {
