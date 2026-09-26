@@ -10,8 +10,6 @@ import {
 import { useInstances } from '../useInstances'
 import { startWithWarnings } from '../startWithWarnings'
 
-// ─── Styles ───────────────────────────────────────────────────────────────────
-
 const s = {
   root: {
     fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
@@ -66,8 +64,6 @@ const s = {
   dialogRow: { display: 'flex', gap: 8, justifyContent: 'flex-end' },
 }
 
-// ─── Confirm dialog ───────────────────────────────────────────────────────────
-
 function ConfirmDialog({ message, onConfirm, onCancel }: {
   message: string
   onConfirm: () => void
@@ -85,8 +81,6 @@ function ConfirmDialog({ message, onConfirm, onCancel }: {
     </div>
   )
 }
-
-// ─── Instance row ─────────────────────────────────────────────────────────────
 
 function InstanceRow({ instance, phase, onStart, onStop }: {
   instance: ServerInstanceConfig
@@ -110,8 +104,6 @@ function InstanceRow({ instance, phase, onStart, onStop }: {
     </div>
   )
 }
-
-// ─── PopoverApp ───────────────────────────────────────────────────────────────
 
 export default function PopoverApp() {
   const { instances, phases, refresh } = useInstances()

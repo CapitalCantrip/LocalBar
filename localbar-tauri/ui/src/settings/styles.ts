@@ -1,0 +1,90 @@
+export const s = {
+  root: {
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    fontSize: 13, height: '100vh', display: 'flex',
+    flexDirection: 'column' as const, background: '#f0f0f0', color: '#1a1a1a',
+  },
+  toolbar: {
+    display: 'flex', alignItems: 'center', gap: 4,
+    padding: '8px 12px', borderBottom: '1px solid #ddd', background: '#e8e8e8',
+  },
+  tabBtn: (active: boolean): React.CSSProperties => ({
+    padding: '4px 14px', borderRadius: 6,
+    border: '1px solid transparent',
+    background: active ? 'white' : 'transparent',
+    boxShadow: active ? '0 1px 3px rgba(0,0,0,0.15)' : 'none',
+    cursor: 'pointer', fontSize: 13, fontFamily: 'inherit',
+  }),
+  body: { flex: 1, display: 'flex', overflow: 'hidden' },
+  masterPane: {
+    width: 220, borderRight: '1px solid #ddd', background: 'white',
+    display: 'flex', flexDirection: 'column' as const, overflow: 'hidden',
+  },
+  masterHeader: {
+    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+    padding: '8px 12px', borderBottom: '1px solid #eee',
+  },
+  masterList: { flex: 1, overflow: 'auto' },
+  masterRow: (selected: boolean): React.CSSProperties => ({
+    display: 'flex', alignItems: 'center', gap: 8,
+    padding: '8px 12px', cursor: 'pointer',
+    background: selected ? '#e8f0fe' : 'transparent',
+    borderLeft: selected ? '3px solid #1d4ed8' : '3px solid transparent',
+  }),
+  dot: (color: string): React.CSSProperties => ({
+    width: 8, height: 8, borderRadius: '50%', background: color, flexShrink: 0,
+  }),
+  detailPane: {
+    flex: 1, background: 'white', overflow: 'auto',
+    display: 'flex', flexDirection: 'column' as const,
+  },
+  detailHeader: {
+    padding: '14px 18px', borderBottom: '1px solid #eee',
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+  },
+  detailTitle: { fontWeight: 600, fontSize: 15 },
+  detailBody: { padding: '14px 18px', display: 'flex', flexDirection: 'column' as const, gap: 14 },
+  field: { display: 'flex', flexDirection: 'column' as const, gap: 4 },
+  fieldLabel: { fontSize: 11, fontWeight: 600, color: '#666', textTransform: 'uppercase' as const, letterSpacing: '0.05em' },
+  fieldValue: { fontSize: 13 },
+  phaseRow: { display: 'flex', alignItems: 'center', gap: 8 },
+  btnRow: { display: 'flex', gap: 8 },
+  btn: (danger?: boolean): React.CSSProperties => ({
+    padding: '5px 12px', border: '1px solid #ccc', borderRadius: 6,
+    background: danger ? '#fee2e2' : 'white',
+    color: danger ? '#dc2626' : '#1a1a1a',
+    cursor: 'pointer', fontSize: 12, fontFamily: 'inherit',
+  }),
+  primaryBtn: { padding: '5px 12px', border: '1px solid #1d4ed8', borderRadius: 6, background: '#1d4ed8', color: 'white', cursor: 'pointer', fontSize: 12, fontFamily: 'inherit' },
+  placeholder: { color: '#aaa', fontSize: 12, textAlign: 'center' as const, padding: 40 },
+  addBtn: {
+    padding: '3px 10px', border: '1px solid #ccc', borderRadius: 4,
+    background: 'white', cursor: 'pointer', fontSize: 12, fontFamily: 'inherit',
+  },
+  sheet: {
+    position: 'absolute' as const, inset: 0, background: 'rgba(0,0,0,0.35)',
+    display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10,
+  },
+  sheetBox: {
+    background: 'white', borderRadius: 10, padding: 20, width: 340,
+    boxShadow: '0 8px 32px rgba(0,0,0,0.2)',
+    display: 'flex', flexDirection: 'column' as const, gap: 12,
+  },
+  sheetTitle: { fontWeight: 600, fontSize: 15, margin: 0 },
+  input: {
+    padding: '6px 10px', border: '1px solid #ccc', borderRadius: 6,
+    fontSize: 13, fontFamily: 'inherit', width: '100%', boxSizing: 'border-box' as const,
+  },
+  sheetBtns: { display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 },
+  checkbox: { display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 },
+  modelList: { display: 'flex', flexDirection: 'column' as const, gap: 2 },
+  modelRow: (selected: boolean): React.CSSProperties => ({
+    display: 'flex', alignItems: 'center', gap: 8,
+    padding: '6px 10px', borderRadius: 6, cursor: 'pointer',
+    background: selected ? '#e8f0fe' : 'transparent',
+    border: selected ? '1px solid #93c5fd' : '1px solid transparent',
+  }),
+  modelName: { flex: 1, fontSize: 12, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const },
+  modelMeta: { fontSize: 11, color: '#888', flexShrink: 0 },
+  refreshNote: { fontSize: 11, color: '#aaa', fontStyle: 'italic' as const },
+}
