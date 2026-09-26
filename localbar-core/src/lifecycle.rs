@@ -95,9 +95,9 @@ pub fn switch_model(
     driver: &dyn ServerDriver,
 ) -> (Option<LaunchPlan>, Vec<LifecycleEvent>) {
     let events = phase_events(reg, id, InstancePhase::SwitchingModel);
-    reg.record_start_time(id);
     let Some(config) = reg.get_config(id).cloned() else { return (None, events) };
     if driver.switch_requires_restart() {
+        reg.record_start_time(id);
         return switch_model_restart(reg, id, driver, &config, events);
     }
     switch_model_sync(reg, id, driver, &config, events)
@@ -113,6 +113,7 @@ fn switch_model_restart(
     match driver.launch(config, None, &config.instance_params) {
         Ok(plan) => (Some(plan), events),
         Err(e) => {
+            reg.consume_start_time(id);
             events.extend(error_events(reg, id, InstanceErrorKind::ModelSwitchFailed, &e));
             (None, events)
         }
@@ -408,6 +409,45 @@ mod tests {
 
         switch_model(&mut reg, id, &driver);
         assert!(reg.consume_start_time(id).is_some(), "start time must be recorded");
+    }
+
+    #[test]
+    fn switch_model_restart_launch_failure_does_not_leak_start_time() {
+        struct FailLaunchDriver;
+        impl crate::driver::ServerDriver for FailLaunchDriver {
+            fn server_type(&self) -> crate::types::ServerType { crate::types::ServerType::MlxLm }
+            fn param_schema(&self) -> Vec<crate::types::ParamDescriptor> { vec![] }
+            fn switch_requires_restart(&self) -> bool { true }
+            fn launch(&self, _: &crate::types::ServerInstanceConfig, _: Option<&crate::types::ModelRef>, _: &crate::types::ParamValues) -> Result<crate::driver::LaunchPlan, String> {
+                Err("launch failed".into())
+            }
+            fn stop(&self, _: &crate::types::ServerInstanceConfig) -> crate::driver::ShutdownPlan {
+                crate::driver::ShutdownPlan { grace_period_secs: 0.0 }
+            }
+            fn list_models(&self, _: &crate::types::ServerInstanceConfig) -> Result<Vec<crate::types::ModelRef>, String> { Ok(vec![]) }
+            fn switch_model(&self, _: &crate::types::ModelRef, _: &crate::types::ParamValues, _: &crate::types::ServerInstanceConfig) -> Result<(), String> { Ok(()) }
+            fn health_check(&self, _: &crate::types::ServerInstanceConfig) -> crate::driver::HealthStatus {
+                crate::driver::HealthStatus::Unhealthy("not ready".into())
+            }
+        }
+
+        let mut reg = make_registry();
+        let id = reg.add_instance(ollama_config("a"));
+        reg.set_phase(id, InstancePhase::Running).unwrap();
+
+        switch_model(&mut reg, id, &FailLaunchDriver);
+        assert!(reg.consume_start_time(id).is_none(), "restart launch failure must not leak start time");
+    }
+
+    #[test]
+    fn switch_model_sync_does_not_leak_start_time() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(ollama_config("a"));
+        reg.set_phase(id, InstancePhase::Running).unwrap();
+        let driver = MockDriver::new(ServerType::Ollama); // sync path: switch_requires_restart = false
+
+        switch_model(&mut reg, id, &driver);
+        assert!(reg.consume_start_time(id).is_none(), "sync path must not leave a start time in the registry");
     }
 
     // ── adopt ─────────────────────────────────────────────────────────────────
