@@ -33,14 +33,7 @@ pub enum PollOutcome {
 
 // ─── start ────────────────────────────────────────────────────────────────────
 
-/// Determine whether to spawn a process for this instance.
-///
-/// Precondition: id is in Starting phase; `reg.record_start_time(id)` already called.
-///
-/// Returns `Some(LaunchPlan)` when the Tauri layer must spawn a process (no phase event
-/// emitted yet — the transition to Error or Running happens in subsequent poll ticks).
-/// Returns `None` on adoption (phase → Running), port conflict, or launch error
-/// (phase → Error in those cases).
+/// Precondition: instance is in Starting phase with start time recorded.
 pub fn start(
     reg: &mut InstanceRegistry,
     id: Uuid,
@@ -80,9 +73,6 @@ pub fn start(
 
 // ─── stop ─────────────────────────────────────────────────────────────────────
 
-/// Set the instance to Stopping and return the driver's grace period.
-///
-/// The Tauri layer uses `StopPlan.grace_secs` to time the actual kill.
 pub fn stop(
     reg: &mut InstanceRegistry,
     id: Uuid,
@@ -98,14 +88,7 @@ pub fn stop(
 
 // ─── switch_model ─────────────────────────────────────────────────────────────
 
-/// Transition to SwitchingModel and drive the model switch.
-///
-/// Precondition: `reg.update_config(id, |c| c.selected_model_key = Some(new_key))` and
-/// `ensure_managed_model` have already been called by the Tauri layer.
-///
-/// For restart drivers: sets SwitchingModel, records start time, and returns a `LaunchPlan`
-/// (Tauri layer kills old process and spawns from plan, then runs restart-switch poll).
-/// For sync drivers: calls the driver inline; transitions to Running or Error directly.
+/// Precondition: config already updated with new model key and managed model ensured.
 pub fn switch_model(
     reg: &mut InstanceRegistry,
     id: Uuid,
@@ -164,14 +147,7 @@ pub fn adopt(reg: &mut InstanceRegistry, id: Uuid) -> Vec<LifecycleEvent> {
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// One synchronous poll tick during startup or a model-switch restart.
-///
-/// Called by the Tauri layer's async poll loops (in `spawn_blocking`) every ~500 ms.
-/// `health` and `process_alive` are measured by the caller before this call.
-/// `elapsed` is wall-clock time since the instance entered Starting/SwitchingModel,
-/// derived from `AppState.start_times` (C1a) or `reg.consume_start_time` (C1b+).
-///
-/// Returns `Done` when the instance has reached a terminal state for this poll loop.
+/// Precondition: elapsed is wall-clock time since the instance entered Starting/SwitchingModel.
 pub fn poll_once(
     reg: &mut InstanceRegistry,
     id: Uuid,
@@ -181,18 +157,31 @@ pub fn poll_once(
     elapsed: Duration,
     ctx: PollContext,
 ) -> (PollOutcome, Vec<LifecycleEvent>) {
+    let phase = reg.get_phase(id).cloned();
+    if !matches!(phase, Some(InstancePhase::Starting) | Some(InstancePhase::SwitchingModel)) {
+        return (PollOutcome::Done, vec![]);
+    }
+
     if !process_alive {
-        return done_with_process_failure(reg, id, &ctx);
+        return done_with_error(
+            reg, id, &ctx,
+            InstanceErrorKind::LaunchFailed, "process exited unexpectedly",
+            InstanceErrorKind::ModelSwitchFailed, "process exited unexpectedly during model switch",
+        );
     }
 
     if health {
-        record_on_running(reg, id, driver, elapsed);
+        persist_startup_metrics(reg, id, driver, elapsed);
         reg.consume_start_time(id);
         return (PollOutcome::Done, phase_events(reg, id, InstancePhase::Running));
     }
 
     if elapsed >= STARTUP_TIMEOUT {
-        return done_with_timeout(reg, id, &ctx);
+        return done_with_error(
+            reg, id, &ctx,
+            InstanceErrorKind::HealthCheckFailed, "startup timed out after 30 s",
+            InstanceErrorKind::HealthCheckFailed, "model switch timed out after 30 s",
+        );
     }
 
     (PollOutcome::Continue, vec![])
@@ -239,61 +228,28 @@ fn error_events(
     phase_events(reg, id, InstancePhase::Error(InstanceError { kind, message: msg.to_string() }))
 }
 
-fn rollback_model_key(reg: &mut InstanceRegistry, id: Uuid, old_key: &Option<String>) {
-    reg.update_config(id, |c| c.selected_model_key = old_key.clone()).ok();
-    reg.save().ok();
-}
-
-fn done_with_process_failure(
+fn done_with_error(
     reg: &mut InstanceRegistry,
     id: Uuid,
     ctx: &PollContext,
+    startup_kind: InstanceErrorKind,
+    startup_msg: &str,
+    switch_kind: InstanceErrorKind,
+    switch_msg: &str,
 ) -> (PollOutcome, Vec<LifecycleEvent>) {
     let events = match ctx {
-        PollContext::Startup => error_events(
-            reg, id,
-            InstanceErrorKind::LaunchFailed,
-            "process exited unexpectedly",
-        ),
+        PollContext::Startup => error_events(reg, id, startup_kind, startup_msg),
         PollContext::ModelSwitch { old_key } => {
-            rollback_model_key(reg, id, old_key);
-            error_events(
-                reg, id,
-                InstanceErrorKind::ModelSwitchFailed,
-                "process exited unexpectedly during model switch",
-            )
+            reg.update_config(id, |c| c.selected_model_key = old_key.clone()).ok();
+            reg.save().ok();
+            error_events(reg, id, switch_kind, switch_msg)
         }
     };
     reg.consume_start_time(id);
     (PollOutcome::Done, events)
 }
 
-fn done_with_timeout(
-    reg: &mut InstanceRegistry,
-    id: Uuid,
-    ctx: &PollContext,
-) -> (PollOutcome, Vec<LifecycleEvent>) {
-    let events = match ctx {
-        PollContext::Startup => error_events(
-            reg, id,
-            InstanceErrorKind::HealthCheckFailed,
-            "startup timed out after 30 s",
-        ),
-        PollContext::ModelSwitch { old_key } => {
-            rollback_model_key(reg, id, old_key);
-            error_events(
-                reg, id,
-                InstanceErrorKind::HealthCheckFailed,
-                "model switch timed out after 30 s",
-            )
-        }
-    };
-    reg.consume_start_time(id);
-    (PollOutcome::Done, events)
-}
-
-/// Record model memory and restart duration when an instance first becomes healthy.
-fn record_on_running(reg: &mut InstanceRegistry, id: Uuid, driver: &dyn ServerDriver, elapsed: Duration) {
+fn persist_startup_metrics(reg: &mut InstanceRegistry, id: Uuid, driver: &dyn ServerDriver, elapsed: Duration) {
     let Some(config) = reg.get_config(id).cloned() else { return };
     let schema = driver.param_schema();
     let profile = reg.get_active_profile_params(id).cloned();
@@ -312,8 +268,6 @@ fn record_on_running(reg: &mut InstanceRegistry, id: Uuid, driver: &dyn ServerDr
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
-
-    use uuid::Uuid;
 
     use crate::persistence::InMemoryPersistence;
     use crate::registry::InstanceRegistry;
@@ -339,9 +293,9 @@ mod tests {
     }
 
     fn phase_of(events: &[LifecycleEvent]) -> Option<InstancePhase> {
-        events.iter().rev().find_map(|e| match e {
-            LifecycleEvent::PhaseChanged(_, p) => Some(p.clone()),
-        })
+        events.iter().rev().map(|e| match e {
+            LifecycleEvent::PhaseChanged(_, p) => p.clone(),
+        }).next()
     }
 
     // ── start ─────────────────────────────────────────────────────────────────
@@ -610,6 +564,86 @@ mod tests {
 
         let events = poll_adopted(&mut reg, id, true);
         assert!(events.is_empty());
+    }
+
+    // ── poll_once phase guard (M1) ────────────────────────────────────────────
+
+    #[test]
+    fn poll_once_noop_when_phase_is_terminal() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(ollama_config("a"));
+        reg.set_phase(id, InstancePhase::Stopped).unwrap();
+        let driver = MockDriver::new(ServerType::Ollama);
+
+        let (outcome, events) = poll_once(
+            &mut reg, id, &driver,
+            true, true, Duration::from_secs(1), PollContext::Startup,
+        );
+        assert_eq!(outcome, PollOutcome::Done);
+        assert!(events.is_empty(), "terminal phase must produce no events");
+    }
+
+    // ── start port conflict (M2) ──────────────────────────────────────────────
+
+    #[test]
+    fn start_port_in_use_gives_port_conflict() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut reg = make_registry();
+        let mut cfg = ServerInstanceConfig::new("a", ServerType::Ollama, port, "/usr/bin/ollama");
+        cfg.host = "127.0.0.1".into();
+        cfg.selected_model_key = Some("llama3:8b".into());
+        let id = reg.add_instance(cfg);
+        reg.set_phase(id, InstancePhase::Starting).unwrap();
+        reg.record_start_time(id);
+        let driver = MockDriver::new_unhealthy(ServerType::Ollama);
+
+        let (plan, events) = start(&mut reg, id, &driver);
+        assert!(plan.is_none());
+        assert!(matches!(
+            phase_of(&events),
+            Some(InstancePhase::Error(e)) if matches!(e.kind, crate::types::InstanceErrorKind::PortConflict { .. })
+        ));
+    }
+
+    // ── switch_model_sync failure (M3) ────────────────────────────────────────
+
+    struct SwitchFailDriver;
+    impl crate::driver::ServerDriver for SwitchFailDriver {
+        fn server_type(&self) -> crate::types::ServerType { crate::types::ServerType::Ollama }
+        fn param_schema(&self) -> Vec<crate::types::ParamDescriptor> { vec![] }
+        fn launch(&self, c: &crate::types::ServerInstanceConfig, _: Option<&crate::types::ModelRef>, _: &crate::types::ParamValues) -> Result<crate::driver::LaunchPlan, String> {
+            Ok(crate::driver::LaunchPlan { executable: c.executable_path.clone(), arguments: vec![], environment: vec![], working_directory: None })
+        }
+        fn stop(&self, _: &crate::types::ServerInstanceConfig) -> crate::driver::ShutdownPlan {
+            crate::driver::ShutdownPlan { grace_period_secs: 0.0 }
+        }
+        fn list_models(&self, _: &crate::types::ServerInstanceConfig) -> Result<Vec<crate::types::ModelRef>, String> { Ok(vec![]) }
+        fn switch_model(&self, _: &crate::types::ModelRef, _: &crate::types::ParamValues, _: &crate::types::ServerInstanceConfig) -> Result<(), String> {
+            Err("driver switch failed".into())
+        }
+        fn health_check(&self, _: &crate::types::ServerInstanceConfig) -> crate::driver::HealthStatus {
+            crate::driver::HealthStatus::Unhealthy("not ready".into())
+        }
+    }
+
+    #[test]
+    fn switch_model_sync_driver_failure_gives_model_switch_failed() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(ollama_config("a"));
+        reg.set_phase(id, InstancePhase::Running).unwrap();
+
+        let (plan, events) = switch_model(&mut reg, id, &SwitchFailDriver);
+        assert!(plan.is_none());
+        assert!(matches!(
+            phase_of(&events),
+            Some(InstancePhase::Error(e)) if matches!(e.kind, crate::types::InstanceErrorKind::ModelSwitchFailed)
+        ));
+        assert_eq!(reg.get_phase(id), Some(&InstancePhase::Error(crate::types::InstanceError {
+            kind: crate::types::InstanceErrorKind::ModelSwitchFailed,
+            message: "driver switch failed".into(),
+        })));
     }
 
     // ── start_times ───────────────────────────────────────────────────────────
