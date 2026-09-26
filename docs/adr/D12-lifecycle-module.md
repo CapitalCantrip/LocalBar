@@ -43,7 +43,9 @@ pub enum SwitchPlan {
 // Sets Starting and records the start time itself, then returns a LaunchPlan when the
 // Tauri layer must spawn a process; None on adoption (phase → Running), port conflict,
 // or error (phase → Error). The first event returned is always PhaseChanged(Starting).
-pub fn start(reg: &mut InstanceRegistry, id: Uuid, driver: &dyn ServerDriver)
+// `listener_pid` is looked up by the Tauri layer (via `lsof`) before calling `start`, and
+// is recorded on the registry (`set_adopted_pid`) whenever a listener is adopted as Running.
+pub fn start(reg: &mut InstanceRegistry, id: Uuid, driver: &dyn ServerDriver, listener_pid: Option<u32>)
     -> (Option<LaunchPlan>, Vec<LifecycleEvent>);
 
 // Sets Stopping; returns the driver's grace period for the Tauri layer to use.
@@ -90,13 +92,45 @@ pub fn consume_start_time(&mut self, id: Uuid) -> Option<std::time::Instant>;
 
 `start_times` moves out of `AppState` (Tauri layer) into `InstanceRegistry` (core) so that `poll_once` can record the startup duration sample without needing `AppHandle`.
 
+### Addendum (2026-09-27): adopting a listening PID
+
+`start`'s decision logic (`start_from_stopped_config`) now accepts `listener_pid: Option<u32>`,
+supplied by the Tauri layer from a pre-`start` `lsof -nP -t -iTCP:<port> -sTCP:LISTEN` lookup
+(`find_listening_pid`, in `localbar-tauri/src/lib.rs`). Core never shells out or touches a real
+process; the PID arrives purely as data. The decision table:
+
+| health | port open | listener_pid | manages_lifecycle | result |
+|---|---|---|---|---|
+| Healthy | any | any | any | Running, adopted (record pid if `Some`) |
+| not Healthy | yes | `Some(pid)` | true | Running, adopted with pid; poll reconciles later |
+| not Healthy | yes | `Some(pid)` | false | PortConflict (no health confirmation for a driver that cannot manage this process) |
+| not Healthy | yes | `None` | any | PortConflict (as before) |
+| not Healthy | no | any | true | LaunchPlan (as before) |
+| not Healthy | no | any | false | HealthCheckFailed (as before) |
+
+`InstanceRegistry` gains a third `Uuid`-keyed map, mirroring `start_times`:
+
+```rust
+pub fn set_adopted_pid(&mut self, id: Uuid, pid: u32);
+pub fn get_adopted_pid(&self, id: Uuid) -> Option<u32>;
+pub fn clear_adopted_pid(&mut self, id: Uuid);
+```
+
+This relaxes the "no PID in `lifecycle.rs`" invariant below to "no `Child` or process handle" —
+a bare `u32` carries no process-I/O capability by itself (you cannot `wait()` or read/write to a
+`u32`), so it does not reintroduce the process-I/O coupling the original invariant guarded against.
+Killing by PID (`kill_by_pid`, SIGTERM → poll → SIGKILL) stays entirely in the Tauri layer
+(`do_stop` / `stop_adopted_by_pid`), gated `#[cfg(unix)]` with `// SAFETY:` comments on each
+`libc::kill` call, mirroring `graceful_kill`. It is only ever used for non-`External` instances;
+`External` instances are never killed by LocalBar (see D14 item 4).
+
 ---
 
 ## Key invariants
 
 | Invariant | Reason |
 |---|---|
-| No `Child`, PID, or process handle in `lifecycle.rs` | Process I/O stays in the Tauri layer. Core cannot link against `std::process::Child`-dependent Tauri types. |
+| No `Child` or process handle in `lifecycle.rs` (a bare `u32` PID, passed in as data, is allowed — see the adoption addendum below) | Process I/O stays in the Tauri layer. Core cannot link against `std::process::Child`-dependent Tauri types. |
 | No `AppHandle` in `lifecycle.rs` | Events are returned as `Vec<LifecycleEvent>` data; the Tauri layer emits them. This is the sole mechanism for notifying the frontend. |
 | Blocking network I/O is permitted in `lifecycle.rs` | `health_check`, `switch_model`, and `port_is_open` are short-lived TCP operations already present in core drivers. The Tauri layer wraps calls to lifecycle in `spawn_blocking`. |
 | Phase transitions are atomic with registry mutation | All phase writes go through `reg.set_phase`; the `Vec<LifecycleEvent>` returned mirrors those writes exactly. |
@@ -106,6 +140,7 @@ pub fn consume_start_time(&mut self, id: Uuid) -> Option<std::time::Instant>;
 ## What stays in the Tauri layer
 
 - Spawning and reaping `Child` processes (`spawn_from_plan`, `graceful_kill`, `process_is_alive`).
+- Looking up and killing adopted listener PIDs (`find_listening_pid`, `kill_by_pid`, `pid_is_alive`).
 - Async poll loops (`run_health_poll`, `run_restart_switch_poll`, `run_adopted_health_poll`) — thin loops that call `lifecycle::poll_once` / `lifecycle::poll_adopted` in `spawn_blocking`.
 - `AppHandle` event emission via `emit_lifecycle_events`.
 - IPC command guards (e.g. "already Starting → noop").

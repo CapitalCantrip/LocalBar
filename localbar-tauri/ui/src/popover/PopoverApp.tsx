@@ -82,14 +82,16 @@ function ConfirmDialog({ message, onConfirm, onCancel }: {
   )
 }
 
-function InstanceRow({ instance, phase, onStart, onStop }: {
+function InstanceRow({ instance, phase, onStart, onStop, onAdopt }: {
   instance: ServerInstanceConfig
   phase: InstancePhase | undefined
   onStart: () => void
   onStop: () => void
+  onAdopt: () => void
 }) {
   const active = isActive(phase)
   const transitioning = phase?.type === 'starting' || phase?.type === 'stopping'
+  const isPortConflict = phase?.type === 'error' && phase.kind.kind === 'portConflict'
   return (
     <div style={s.row}>
       <div style={s.dot(phaseColor(phase))} title={phaseLabel(phase)} />
@@ -100,6 +102,9 @@ function InstanceRow({ instance, phase, onStart, onStop }: {
       )}
       {!active && !transitioning && (
         <button style={s.btn(true)} onClick={onStart}>Start</button>
+      )}
+      {isPortConflict && (
+        <button style={s.btn()} onClick={onAdopt} title="Track the already-running server as a new external instance">Adopt</button>
       )}
     </div>
   )
@@ -119,6 +124,11 @@ export default function PopoverApp() {
 
   const handleStop = async (id: string) => {
     await ipc.stopInstance(id)
+    refresh()
+  }
+
+  const handleAdopt = async (id: string) => {
+    await ipc.adoptAsExternalInstance(id)
     refresh()
   }
 
@@ -147,6 +157,7 @@ export default function PopoverApp() {
               phase={phases[inst.id]}
               onStart={() => handleStart(inst.id)}
               onStop={() => handleStop(inst.id)}
+              onAdopt={() => handleAdopt(inst.id)}
             />
           ))
         )}

@@ -21,6 +21,7 @@ export function DetailPanel({ instance, phase, onRefresh }: {
 }) {
   const active = isActive(phase)
   const transitioning = phase?.type === 'starting' || phase?.type === 'stopping'
+  const isPortConflict = phase?.type === 'error' && phase.kind.kind === 'portConflict'
   const [confirmingRemove, setConfirmingRemove] = useState(false)
   const [modelsOpen, setModelsOpen] = useState(false)
 
@@ -37,6 +38,11 @@ export function DetailPanel({ instance, phase, onRefresh }: {
 
   const handleStop = async () => {
     await ipc.stopInstance(instance.id)
+    onRefresh()
+  }
+
+  const handleAdopt = async () => {
+    await ipc.adoptAsExternalInstance(instance.id)
     onRefresh()
   }
 
@@ -83,6 +89,13 @@ export function DetailPanel({ instance, phase, onRefresh }: {
               onClick={handleStart}
               disabled={(instance.server_type === 'mlx-lm' || instance.server_type === 'ollama') && instance.selected_model_key === null}
             >Start</button>
+          )}
+          {isPortConflict && (
+            <button
+              style={s.btn()}
+              onClick={handleAdopt}
+              title="Track the server already running on this port as a new external instance"
+            >Adopt</button>
           )}
         </div>
         <div style={s.field}>

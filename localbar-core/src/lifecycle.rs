@@ -33,6 +33,7 @@ pub fn start(
     reg: &mut InstanceRegistry,
     id: Uuid,
     driver: &dyn ServerDriver,
+    listener_pid: Option<u32>,
 ) -> (Option<LaunchPlan>, Vec<LifecycleEvent>) {
     let Some(config) = reg.get_config(id).cloned() else {
         return (None, vec![]);
@@ -44,7 +45,7 @@ pub fn start(
     reg.record_start_time(id);
     let mut events = phase_events(reg, id, InstancePhase::Starting);
 
-    let (plan, rest) = start_from_stopped_config(reg, id, driver, &config);
+    let (plan, rest) = start_from_stopped_config(reg, id, driver, &config, listener_pid);
     events.extend(rest);
     (plan, events)
 }
@@ -62,19 +63,16 @@ fn start_from_stopped_config(
     id: Uuid,
     driver: &dyn ServerDriver,
     config: &crate::types::ServerInstanceConfig,
+    listener_pid: Option<u32>,
 ) -> (Option<LaunchPlan>, Vec<LifecycleEvent>) {
     let health = driver.health_check(config);
 
     if health == HealthStatus::Healthy {
-        return (None, phase_events(reg, id, InstancePhase::Running));
+        return (None, adopt_as_running(reg, id, listener_pid));
     }
 
     if port_is_open(&config.host, config.port) {
-        return (None, error_events(
-            reg, id,
-            InstanceErrorKind::PortConflict { port: config.port },
-            &format!("port {} is in use by another process", config.port),
-        ));
+        return handle_port_conflict(reg, id, driver, config, listener_pid);
     }
 
     if !driver.manages_lifecycle() {
@@ -89,6 +87,32 @@ fn start_from_stopped_config(
         Ok(plan) => (Some(plan), vec![]),
         Err(e) => (None, error_events(reg, id, InstanceErrorKind::LaunchFailed, &e)),
     }
+}
+
+fn handle_port_conflict(
+    reg: &mut InstanceRegistry,
+    id: Uuid,
+    driver: &dyn ServerDriver,
+    config: &crate::types::ServerInstanceConfig,
+    listener_pid: Option<u32>,
+) -> (Option<LaunchPlan>, Vec<LifecycleEvent>) {
+    if driver.manages_lifecycle() {
+        if let Some(pid) = listener_pid {
+            return (None, adopt_as_running(reg, id, Some(pid)));
+        }
+    }
+    (None, error_events(
+        reg, id,
+        InstanceErrorKind::PortConflict { port: config.port },
+        &format!("port {} is in use by another process", config.port),
+    ))
+}
+
+fn adopt_as_running(reg: &mut InstanceRegistry, id: Uuid, listener_pid: Option<u32>) -> Vec<LifecycleEvent> {
+    if let Some(pid) = listener_pid {
+        reg.set_adopted_pid(id, pid);
+    }
+    phase_events(reg, id, InstancePhase::Running)
 }
 
 pub fn stop(
@@ -352,7 +376,7 @@ mod tests {
         let id = reg.add_instance(ollama_config("a"));
         let driver = MockDriver::new_unhealthy(ServerType::Ollama);
 
-        let (plan, events) = start(&mut reg, id, &driver);
+        let (plan, events) = start(&mut reg, id, &driver, None);
         assert!(plan.is_some(), "should return a LaunchPlan");
         assert_eq!(events.first().map(|e| match e {
             LifecycleEvent::PhaseChanged(_, p) => p.clone(),
@@ -365,7 +389,7 @@ mod tests {
         let id = reg.add_instance(ollama_config("a"));
         let driver = MockDriver::new(ServerType::Ollama);
 
-        let (plan, events) = start(&mut reg, id, &driver);
+        let (plan, events) = start(&mut reg, id, &driver, None);
         assert!(plan.is_none());
         assert_eq!(phase_of(&events), Some(InstancePhase::Running));
         assert_eq!(reg.get_phase(id), Some(&InstancePhase::Running));
@@ -377,7 +401,7 @@ mod tests {
         let id = reg.add_instance(external_config("ext"));
         let driver = MockDriver::new_unmanaged_unhealthy(ServerType::External);
 
-        let (plan, events) = start(&mut reg, id, &driver);
+        let (plan, events) = start(&mut reg, id, &driver, None);
         assert!(plan.is_none());
         assert!(matches!(
             phase_of(&events),
@@ -392,7 +416,7 @@ mod tests {
         assert_eq!(reg.get_phase(id), Some(&InstancePhase::Stopped));
         let driver = MockDriver::new_unhealthy(ServerType::Ollama);
 
-        start(&mut reg, id, &driver);
+        start(&mut reg, id, &driver, None);
 
         assert_ne!(reg.get_phase(id), Some(&InstancePhase::Stopped), "start must move the instance out of Stopped");
         assert!(reg.consume_start_time(id).is_some(), "start must record the start time");
@@ -406,7 +430,7 @@ mod tests {
             reg.set_phase(id, in_progress_phase.clone()).unwrap();
             let driver = MockDriver::new(ServerType::Ollama);
 
-            let (plan, events) = start(&mut reg, id, &driver);
+            let (plan, events) = start(&mut reg, id, &driver, None);
 
             assert!(plan.is_none());
             assert!(events.is_empty(), "must not emit events for {in_progress_phase:?}");
@@ -422,7 +446,7 @@ mod tests {
         reg.set_phase(id, InstancePhase::Running).unwrap();
         let driver = MockDriver::new(ServerType::Ollama);
 
-        let (plan, events) = start(&mut reg, id, &driver);
+        let (plan, events) = start(&mut reg, id, &driver, None);
 
         assert!(plan.is_none());
         assert!(events.is_empty());
@@ -437,7 +461,7 @@ mod tests {
         reg.set_phase(id, InstancePhase::Running).unwrap();
         let driver = MockDriver::new_unhealthy(ServerType::External);
 
-        let (_, events) = start(&mut reg, id, &driver);
+        let (_, events) = start(&mut reg, id, &driver, None);
 
         assert_eq!(phase_of(&events), Some(InstancePhase::Starting));
     }
@@ -751,12 +775,95 @@ mod tests {
         let id = reg.add_instance(cfg);
         let driver = MockDriver::new_unhealthy(ServerType::Ollama);
 
-        let (plan, events) = start(&mut reg, id, &driver);
+        let (plan, events) = start(&mut reg, id, &driver, None);
         assert!(plan.is_none());
         assert!(matches!(
             phase_of(&events),
             Some(InstancePhase::Error(e)) if matches!(e.kind, crate::types::InstanceErrorKind::PortConflict { .. })
         ));
+    }
+
+    #[test]
+    fn start_adopts_healthy_instance_records_pid_when_provided() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(ollama_config("a"));
+        let driver = MockDriver::new(ServerType::Ollama);
+
+        let (plan, events) = start(&mut reg, id, &driver, Some(4242));
+        assert!(plan.is_none());
+        assert_eq!(phase_of(&events), Some(InstancePhase::Running));
+        assert_eq!(reg.get_adopted_pid(id), Some(4242));
+    }
+
+    #[test]
+    fn start_adopts_unhealthy_listener_when_pid_known() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut reg = make_registry();
+        let mut cfg = ServerInstanceConfig::new("a", ServerType::Ollama, port, "/usr/bin/ollama");
+        cfg.host = "127.0.0.1".into();
+        cfg.selected_model_key = Some("llama3:8b".into());
+        let id = reg.add_instance(cfg);
+        let driver = MockDriver::new_unhealthy(ServerType::Ollama);
+
+        let (plan, events) = start(&mut reg, id, &driver, Some(9999));
+        assert!(plan.is_none());
+        assert_eq!(phase_of(&events), Some(InstancePhase::Running));
+        assert_eq!(reg.get_adopted_pid(id), Some(9999));
+    }
+
+    #[test]
+    fn start_still_port_conflict_when_pid_unknown() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut reg = make_registry();
+        let mut cfg = ServerInstanceConfig::new("a", ServerType::Ollama, port, "/usr/bin/ollama");
+        cfg.host = "127.0.0.1".into();
+        cfg.selected_model_key = Some("llama3:8b".into());
+        let id = reg.add_instance(cfg);
+        let driver = MockDriver::new_unhealthy(ServerType::Ollama);
+
+        let (plan, events) = start(&mut reg, id, &driver, None);
+        assert!(plan.is_none());
+        assert!(matches!(
+            phase_of(&events),
+            Some(InstancePhase::Error(e)) if matches!(e.kind, crate::types::InstanceErrorKind::PortConflict { .. })
+        ));
+        assert_eq!(reg.get_adopted_pid(id), None);
+    }
+
+    #[test]
+    fn start_port_conflict_when_pid_known_but_driver_unmanaged() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut reg = make_registry();
+        let mut cfg = ServerInstanceConfig::new("ext", ServerType::External, port, "");
+        cfg.host = "127.0.0.1".into();
+        let id = reg.add_instance(cfg);
+        let driver = MockDriver::new_unmanaged_unhealthy(ServerType::External);
+
+        let (plan, events) = start(&mut reg, id, &driver, Some(1234));
+        assert!(plan.is_none());
+        assert!(matches!(
+            phase_of(&events),
+            Some(InstancePhase::Error(e)) if matches!(e.kind, crate::types::InstanceErrorKind::PortConflict { .. })
+        ));
+        assert_eq!(reg.get_adopted_pid(id), None);
+    }
+
+    #[test]
+    fn start_launches_when_nothing_listening_and_pid_known_is_ignored() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(ollama_config("a"));
+        let driver = MockDriver::new_unhealthy(ServerType::Ollama);
+
+        let (plan, events) = start(&mut reg, id, &driver, Some(555));
+        assert!(plan.is_some(), "nothing is listening, so a launch plan is still expected");
+        assert_eq!(phase_of(&events), Some(InstancePhase::Starting));
+        assert_eq!(reg.get_adopted_pid(id), None, "must not record a pid when nothing was actually adopted");
     }
 
     #[test]

@@ -68,7 +68,7 @@ impl ServerDriver for ExternalDriver {
     }
 }
 
-fn models_url(config: &ServerInstanceConfig) -> String {
+pub(crate) fn models_url(config: &ServerInstanceConfig) -> String {
     format!("{}/v1/models", base_url(config))
 }
 
@@ -92,7 +92,7 @@ fn probe_result(agent: &ureq::Agent, url: &str) -> ProbeOutcome {
     }
 }
 
-fn parse_openai_models(json: &serde_json::Value) -> Vec<ModelRef> {
+pub(crate) fn parse_openai_models(json: &serde_json::Value) -> Vec<ModelRef> {
     let Some(data) = json["data"].as_array() else { return Vec::new() };
     data.iter().filter_map(model_ref_from_openai).collect()
 }
