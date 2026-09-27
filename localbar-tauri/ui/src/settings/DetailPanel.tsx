@@ -10,11 +10,13 @@ import {
   pidLabel,
 } from '../types'
 import { startWithWarnings } from '../startWithWarnings'
+import { modelLabelForKey } from '../modelLabel'
 import { s } from './styles'
 import { InlineEdit } from './InlineEdit'
 import { ModelPathOverrideField } from './ModelPathOverrideField'
 import { ModelList } from './ModelList'
 import { ParamEditor } from './ParamEditor'
+import { useModelList } from './useModelList'
 
 export function DetailPanel({ instance, phase, pid, onRefresh }: {
   instance: ServerInstanceConfig
@@ -28,6 +30,7 @@ export function DetailPanel({ instance, phase, pid, onRefresh }: {
   const isPortConflict = phase?.type === 'error' && phase.kind.kind === 'portConflict'
   const [confirmingRemove, setConfirmingRemove] = useState(false)
   const [modelsOpen, setModelsOpen] = useState(false)
+  const { models, loading: modelsLoading, error: modelsError, refresh: refreshModels } = useModelList(instance.id)
 
   const handleStart = async () => {
     await startWithWarnings(instance.id, async msg => {
@@ -126,8 +129,13 @@ export function DetailPanel({ instance, phase, pid, onRefresh }: {
         <div style={s.field}>
           <span style={s.fieldLabel}>Model</span>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <span style={{ ...s.fieldValue, fontSize: 11, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {instance.selected_model_key ?? <span style={{ color: '#aaa' }}>None selected</span>}
+            <span
+              style={{ ...s.fieldValue, fontSize: 11, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+              title={instance.selected_model_key ?? undefined}
+            >
+              {instance.selected_model_key === null
+                ? <span style={{ color: '#aaa' }}>None selected</span>
+                : modelLabelForKey(instance.selected_model_key, models)}
             </span>
             <button
               style={{ ...s.btn(), padding: '2px 8px', fontSize: 11 }}
@@ -139,7 +147,15 @@ export function DetailPanel({ instance, phase, pid, onRefresh }: {
               {instance.server_type === 'mlx-lm' && (
                 <ModelPathOverrideField instance={instance} onRefresh={onRefresh} />
               )}
-              <ModelList instance={instance} phase={phase} onRefresh={onRefresh} />
+              <ModelList
+                instance={instance}
+                phase={phase}
+                models={models}
+                loading={modelsLoading}
+                error={modelsError}
+                onRefetch={refreshModels}
+                onRefresh={onRefresh}
+              />
             </div>
           )}
         </div>
