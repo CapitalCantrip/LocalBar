@@ -66,6 +66,22 @@ const s = {
   dialogRow: { display: 'flex', gap: 8, justifyContent: 'flex-end' },
 }
 
+function NoticeDialog({ message, onDismiss }: {
+  message: string
+  onDismiss: () => void
+}) {
+  return (
+    <div style={s.dialog}>
+      <div style={s.dialogBox}>
+        <p style={s.dialogMsg}>{message}</p>
+        <div style={s.dialogRow}>
+          <button style={s.btn(true)} onClick={onDismiss}>OK</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function ConfirmDialog({ message, onConfirm, onCancel }: {
   message: string
   onConfirm: () => void
@@ -117,6 +133,7 @@ function InstanceRow({ instance, phase, pid, onStart, onStop, onAdopt }: {
 
 export default function PopoverApp() {
   const { instances, phases, pids, refresh } = useInstances()
+  const [notice, setNotice] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<{ id: string; msg: string; resolve: (v: boolean) => void } | null>(null)
 
   const promptWarning = (id: string, msg: string): Promise<boolean> =>
@@ -133,8 +150,9 @@ export default function PopoverApp() {
   }
 
   const handleAdopt = async (id: string) => {
-    await ipc.adoptAsExternalInstance(id)
+    const { warning } = await ipc.adoptAsExternalInstance(id)
     refresh()
+    if (warning) setNotice(warning)
   }
 
   const anyRunning = instances.some(i => isActive(phases[i.id]))
@@ -148,6 +166,7 @@ export default function PopoverApp() {
           onCancel={() => { confirm.resolve(false); setConfirm(null) }}
         />
       )}
+      {notice && <NoticeDialog message={notice} onDismiss={() => setNotice(null)} />}
       <div style={s.body}>
         {instances.length === 0 ? (
           <div style={s.empty}>

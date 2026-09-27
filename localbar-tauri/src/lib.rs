@@ -14,7 +14,8 @@ use localbar_core::driver::{HealthStatus, ModelMetadata, ServerDriver};
 use localbar_core::drivers::external::ExternalDriver;
 use localbar_core::drivers::mlx_lm::MLXLMDriver;
 use localbar_core::drivers::ollama::{self, OllamaDriver};
-use localbar_core::lifecycle::{self, displayed_pid, LifecycleEvent, PollContext, PollOutcome, SwitchPlan};
+use localbar_core::lifecycle::{self, displayed_pid, LifecycleEvent, StopKill, PollContext, PollOutcome, SwitchPlan};
+use localbar_core::net::port_is_open;
 use localbar_core::persistence::FilePersistence;
 use localbar_core::quit::{ids_to_stop_on_quit, quit_shutdown_budget_secs, QuitCandidate};
 use localbar_core::registry::InstanceRegistry;
@@ -57,6 +58,15 @@ pub enum InstancePhaseDto {
 pub struct InstancePidDto {
     pub pid: u32,
     pub adopted: bool,
+}
+
+#[derive(serde::Serialize, Clone)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptResultDto {
+    pub id: String,
+    pub warning: Option<String>,
 }
 
 pub struct AppState {
@@ -384,7 +394,7 @@ fn adopt_running(app: &AppHandle, config: &ServerInstanceConfig) {
 fn adopted_phase_is_active(app: &AppHandle, id: Uuid) -> bool {
     let state = app.state::<AppState>();
     let reg = state.registry.lock().unwrap();
-    matches!(reg.get_phase(id), Some(InstancePhase::Running) | Some(InstancePhase::Error(_)))
+    lifecycle::adopted_poll_continues(reg.get_phase(id))
 }
 
 async fn run_adopted_health_poll(app: AppHandle, id: Uuid) {
@@ -613,6 +623,14 @@ async fn probe_external_model_key(host: String, port: u16) -> Option<String> {
     }).await.unwrap_or(None)
 }
 
+async fn probe_external_health(host: String, port: u16) -> HealthStatus {
+    let mut probe = ServerInstanceConfig::new("probe", ServerType::External, port, "");
+    probe.host = host;
+    tauri::async_runtime::spawn_blocking(move || ExternalDriver.health_check(&probe))
+        .await
+        .unwrap_or(HealthStatus::Unreachable)
+}
+
 fn activate_adopted_instance(app: &AppHandle, state: &AppState, original_id: Uuid, new_id: Uuid) {
     state.registry.lock().unwrap().set_phase(original_id, InstancePhase::Stopped).ok();
     app.emit("phase-changed", original_id.to_string()).ok();
@@ -626,7 +644,7 @@ async fn adopt_as_external_instance(
     state: State<'_, AppState>,
     app: AppHandle,
     conflicting_id: String,
-) -> Result<String, String> {
+) -> Result<AdoptResultDto, String> {
     let uuid = parse_uuid(&conflicting_id)?;
     let (host, port) = {
         let reg = state.registry.lock().unwrap();
@@ -634,14 +652,15 @@ async fn adopt_as_external_instance(
             .ok_or_else(|| format!("instance {conflicting_id} not found"))
             .map(|c| (c.host.clone(), c.port))?
     };
-    let detected_model = probe_external_model_key(host, port).await;
+    let detected_model = probe_external_model_key(host.clone(), port).await;
+    let health = probe_external_health(host, port).await;
     let new_id = adopt_external_as_new_instance(
         &mut state.registry.lock().unwrap(),
         uuid,
         detected_model,
     )?;
     activate_adopted_instance(&app, &state, uuid, new_id);
-    Ok(new_id.to_string())
+    Ok(AdoptResultDto { id: new_id.to_string(), warning: lifecycle::adopt_health_warning(health, port) })
 }
 
 #[tauri::command]
@@ -739,7 +758,7 @@ async fn do_stop(app: &AppHandle, uuid: Uuid, child: Option<Child>, grace: f64) 
     let adopted_pid = adopted_pid_if_killable(app, uuid, &config);
     match adopted_pid {
         Some(pid) => stop_adopted_by_pid(app, uuid, &config, pid, grace).await,
-        None => stop_via_health_check(config).await,
+        None => stop_without_kill(config).await,
     }
 }
 
@@ -750,15 +769,12 @@ fn adopted_pid_if_killable(app: &AppHandle, uuid: Uuid, config: &ServerInstanceC
     app.state::<AppState>().registry.lock().unwrap().get_adopted_pid(uuid)
 }
 
-async fn stop_via_health_check(config: ServerInstanceConfig) -> Result<(), String> {
-    let still_up = tauri::async_runtime::spawn_blocking(move || {
-        driver_for(&config, &DiscoveryConfig::default()).health_check(&config) == HealthStatus::Healthy
-    }).await.unwrap_or(false);
-    if still_up {
-        Err("cannot stop: server was not launched by LocalBar and is still running".to_string())
-    } else {
-        Ok(())
-    }
+async fn stop_without_kill(config: ServerInstanceConfig) -> Result<(), String> {
+    let port = config.port;
+    let still_open = tauri::async_runtime::spawn_blocking(move || port_is_open(&config.host, config.port))
+        .await
+        .unwrap_or(false);
+    lifecycle::stop_outcome(StopKill::Nothing, port, still_open)
 }
 
 async fn stop_adopted_by_pid(

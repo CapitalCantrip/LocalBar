@@ -10,6 +10,7 @@ export type { AppSettings } from './generated/AppSettings'
 export type { DiscoveredModel } from './generated/DiscoveredModel'
 export type { ErrorKindDto } from './generated/ErrorKindDto'
 export type { InstancePidDto } from './generated/InstancePidDto'
+export type { AdoptResultDto } from './generated/AdoptResultDto'
 
 import type { InstancePhaseDto as InstancePhase } from './generated/InstancePhaseDto'
 export type { InstancePhase }
