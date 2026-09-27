@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ipc } from '../ipc'
+import { ipc, pickPath } from '../ipc'
 import { type ServerInstanceConfig } from '../types'
 import { s } from './styles'
 
@@ -26,6 +26,11 @@ export function ModelPathOverrideField({ instance, onRefresh }: {
     } finally { setBusy(false) }
   }
 
+  const choosePath = async () => {
+    const picked = await pickPath({ directory: true })
+    if (picked) setValue(picked)
+  }
+
   return (
     <div style={s.field}>
       <span style={s.fieldLabel}>Model path override</span>
@@ -36,6 +41,7 @@ export function ModelPathOverrideField({ instance, onRefresh }: {
           onChange={e => setValue(e.target.value)}
           placeholder="Optional — overrides global search paths"
         />
+        <button style={s.btn()} onClick={() => void choosePath()} disabled={busy}>Choose…</button>
         <button style={s.btn()} onClick={() => void save()} disabled={busy}>Save</button>
       </div>
       {saveError && <span style={{ fontSize: 11, color: '#ef4444' }}>{saveError}</span>}

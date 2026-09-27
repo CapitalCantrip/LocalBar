@@ -1,5 +1,11 @@
 import { invoke } from '@tauri-apps/api/core'
+import { open } from '@tauri-apps/plugin-dialog'
 import type { AppSettings, CanonicalParam, DiscoveredModel, DiscoveryConfig, InstancePhase, ModelMetadata, ModelRef, ParamValues, ServerInstanceConfig } from './types'
+
+export async function pickPath(options: { directory: boolean }): Promise<string | null> {
+  const result = await open({ directory: options.directory, multiple: false })
+  return result ?? null
+}
 
 export interface ParamSchemaEntry {
   key: CanonicalParam
