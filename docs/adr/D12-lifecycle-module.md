@@ -108,6 +108,8 @@ process; the PID arrives purely as data. The decision table:
 | not Healthy | no | any | true | LaunchPlan (as before) |
 | not Healthy | no | any | false | HealthCheckFailed (as before) |
 
+Superseded by the recognition revision below.
+
 `InstanceRegistry` gains a third `Uuid`-keyed map, mirroring `start_times`:
 
 ```rust
@@ -123,6 +125,34 @@ Killing by PID (`kill_by_pid`, SIGTERM → poll → SIGKILL) stays entirely in t
 (`do_stop` / `stop_adopted_by_pid`), gated `#[cfg(unix)]` with `// SAFETY:` comments on each
 `libc::kill` call, mirroring `graceful_kill`. It is only ever used for non-`External` instances;
 `External` instances are never killed by LocalBar (see D14 item 4).
+
+### Addendum (2026-09-27, revised for #60): drivers recognise their own processes
+
+Adopting any unhealthy listener by PID let an unrelated process (`python3 -m http.server 8090`)
+be adopted as an mlx-lm instance, and Stop would then signal that process. `start` now takes
+`listener: Option<Listener { pid, command_line }>`; the Tauri layer fills it from
+`find_listening_pid` + `ps_args_for_pid` (`find_listener`). `ServerDriver` gains a required,
+non-defaulted `recognises_process(&self, command_line) -> bool`, so every new server type must
+decide which processes are its own:
+
+- Ollama: executable basename is exactly `ollama` and a `serve` token follows.
+- mlx-lm: `-m mlx_lm.server`, `-m mlx_lm server`, `--from mlx-lm mlx_lm.server` (uvx), or an
+  `mlx_lm.server` / `mlx_lm server` console script (optionally run by a `python*` interpreter).
+  Matching is on whitespace tokens, never substrings, so `grep mlx_lm.server` is rejected.
+- External: never.
+
+"Recognised" below means `listener` is `Some` and `driver.recognises_process(command_line)`.
+
+| health | port open | listener | recognised | manages_lifecycle | result |
+|---|---|---|---|---|---|
+| Healthy | any | any | yes | any | Running, adopted, pid recorded |
+| Healthy | any | any | no | any | Running, adopted, no pid recorded (Stop cannot kill it) |
+| not Healthy | yes | `Some` | yes | true | Running, adopted with pid; poll reconciles later |
+| not Healthy | yes | `Some` | no | true | PortConflict (Adopt button offered) |
+| not Healthy | yes | any | any | false | PortConflict |
+| not Healthy | yes | `None` | n/a | any | PortConflict |
+| not Healthy | no | any | any | true | LaunchPlan |
+| not Healthy | no | any | any | false | HealthCheckFailed |
 
 ---
 

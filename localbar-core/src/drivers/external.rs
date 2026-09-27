@@ -13,6 +13,10 @@ impl ServerDriver for ExternalDriver {
         false
     }
 
+    fn recognises_process(&self, _command_line: &str) -> bool {
+        false
+    }
+
     fn param_schema(&self) -> Vec<ParamDescriptor> {
         Vec::new()
     }
@@ -105,6 +109,18 @@ fn model_ref_from_openai(m: &serde_json::Value) -> Option<ModelRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn never_recognises_any_process() {
+        for command_line in [
+            "python3 -m http.server 8090",
+            "ollama serve",
+            "python -m mlx_lm.server --model m --port 8080",
+            "/Applications/LM Studio.app/Contents/MacOS/LM Studio",
+        ] {
+            assert!(!ExternalDriver.recognises_process(command_line), "{command_line}");
+        }
+    }
 
     fn dummy_config() -> ServerInstanceConfig {
         ServerInstanceConfig::new("external-test", ServerType::External, 8080, "")

@@ -3,11 +3,20 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use super::process_match;
 use crate::driver::{HealthStatus, LaunchPlan, ModelMetadata, ServerDriver, ShutdownPlan};
 use crate::types::{
     CanonicalParam, ModelRef, ParamDescriptor, ParamValue, ParamValues, ServerInstanceConfig,
     ServerType,
 };
+
+const MLX_LM_SERVER_MODULE: &str = "mlx_lm.server";
+const MLX_LM_PACKAGE_MODULE: &str = "mlx_lm";
+const MLX_LM_SERVER_SUBCOMMAND: &str = "server";
+const MLX_LM_DISTRIBUTION: &str = "mlx-lm";
+const PYTHON_MODULE_FLAG: &str = "-m";
+const UVX_FROM_FLAG: &str = "--from";
+const PYTHON_EXECUTABLE_PREFIX: &str = "python";
 
 pub struct MLXLMDriver {
     pub search_paths: Vec<String>,
@@ -79,6 +88,11 @@ impl ServerDriver for MLXLMDriver {
         }
     }
 
+    fn recognises_process(&self, command_line: &str) -> bool {
+        let tokens = process_match::tokens(command_line);
+        is_module_invocation(&tokens) || is_uvx_invocation(&tokens) || is_script_invocation(&tokens)
+    }
+
     fn list_models(&self, _config: &ServerInstanceConfig) -> Result<Vec<ModelRef>, String> {
         let search_paths = effective_search_paths(&self.search_paths);
         let mut models = Vec::new();
@@ -119,6 +133,24 @@ impl ServerDriver for MLXLMDriver {
     }
 }
 
+fn is_module_invocation(tokens: &[&str]) -> bool {
+    process_match::has_adjacent_pair(tokens, PYTHON_MODULE_FLAG, MLX_LM_SERVER_MODULE)
+        || tokens.windows(3).any(|w| w == [PYTHON_MODULE_FLAG, MLX_LM_PACKAGE_MODULE, MLX_LM_SERVER_SUBCOMMAND])
+}
+
+fn is_uvx_invocation(tokens: &[&str]) -> bool {
+    tokens.windows(3).any(|w| w == [UVX_FROM_FLAG, MLX_LM_DISTRIBUTION, MLX_LM_SERVER_MODULE])
+}
+
+fn is_script_invocation(tokens: &[&str]) -> bool {
+    let script = match tokens.first() {
+        Some(first) if process_match::basename(first).starts_with(PYTHON_EXECUTABLE_PREFIX) => &tokens[1..],
+        _ => tokens,
+    };
+    process_match::executable_is(script, MLX_LM_SERVER_MODULE)
+        || (process_match::executable_is(script, MLX_LM_PACKAGE_MODULE) && script.get(1) == Some(&MLX_LM_SERVER_SUBCOMMAND))
+}
+
 fn build_launch_args(
     config: &ServerInstanceConfig,
     model_key: &str,
@@ -127,9 +159,9 @@ fn build_launch_args(
 ) -> Vec<String> {
     let is_uvx = config.executable_path.ends_with("/uvx") || config.executable_path == "uvx";
     let mut args: Vec<String> = if is_uvx {
-        vec!["--from".into(), "mlx-lm".into(), "mlx_lm.server".into()]
+        vec![UVX_FROM_FLAG.into(), MLX_LM_DISTRIBUTION.into(), MLX_LM_SERVER_MODULE.into()]
     } else {
-        vec!["-m".into(), "mlx_lm.server".into()]
+        vec![PYTHON_MODULE_FLAG.into(), MLX_LM_SERVER_MODULE.into()]
     };
     args.extend(["--model".into(), model_key.to_string(), "--host".into(), config.host.clone(), "--port".into(), config.port.to_string()]);
     for desc in schema {
@@ -396,6 +428,38 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn recognises_mlx_lm_server_processes() {
+        for command_line in [
+            "uvx --from mlx-lm mlx_lm.server --model mlx-community/Qwen3-4B-4bit --host 127.0.0.1 --port 8080",
+            "/opt/homebrew/bin/uvx --from mlx-lm mlx_lm.server --model m --port 8080",
+            "python -m mlx_lm.server --model m --port 8080",
+            "/usr/bin/python3 -m mlx_lm.server --model m --port 8080",
+            "python -m mlx_lm server --model m --port 8080",
+            "/Users/me/.cache/uv/archive-v0/abc/bin/python /Users/me/.cache/uv/archive-v0/abc/bin/mlx_lm.server --model m",
+            "/Users/me/.local/bin/mlx_lm.server --model m --port 8080",
+            "mlx_lm server --model m --port 8080",
+        ] {
+            assert!(MLXLMDriver::default().recognises_process(command_line), "{command_line}");
+        }
+    }
+
+    #[test]
+    fn does_not_recognise_non_mlx_lm_server_processes() {
+        for command_line in [
+            "python3 -m http.server 8090",
+            "grep mlx_lm.server",
+            "python -m mlx_lm.generate --model m --prompt hi",
+            "python -m mlx_lm convert --hf-path m",
+            "vim mlx_lm/server.py",
+            "tail -f mlx_lm.server.log",
+            "ollama serve",
+            "",
+        ] {
+            assert!(!MLXLMDriver::default().recognises_process(command_line), "{command_line}");
+        }
+    }
 
     #[test]
     fn switch_requires_restart_is_true() {

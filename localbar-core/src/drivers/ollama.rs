@@ -1,10 +1,14 @@
 use uuid::Uuid;
 
+use super::process_match;
 use crate::driver::{HealthStatus, LaunchPlan, ModelMetadata, ServerDriver, ShutdownPlan};
 use crate::types::{
     CanonicalParam, ModelRef, ParamDescriptor, ParamValue, ParamValues, ServerInstanceConfig,
     ServerType,
 };
+
+const OLLAMA_EXECUTABLE: &str = "ollama";
+const OLLAMA_SERVE_SUBCOMMAND: &str = "serve";
 
 pub struct OllamaDriver;
 
@@ -54,6 +58,11 @@ impl ServerDriver for OllamaDriver {
             }
             Err(_) => HealthStatus::Unreachable,
         }
+    }
+
+    fn recognises_process(&self, command_line: &str) -> bool {
+        let tokens = process_match::tokens(command_line);
+        process_match::executable_is(&tokens, OLLAMA_EXECUTABLE) && tokens[1..].contains(&OLLAMA_SERVE_SUBCOMMAND)
     }
 
     fn list_models(&self, config: &ServerInstanceConfig) -> Result<Vec<ModelRef>, String> {
@@ -363,6 +372,31 @@ mistral:7b       6577803aa9a0    4.4 GB    6 days ago";
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn recognises_ollama_serve_processes() {
+        for command_line in [
+            "ollama serve",
+            "/Applications/Ollama.app/Contents/Resources/ollama serve",
+            "/usr/local/bin/ollama serve",
+        ] {
+            assert!(OllamaDriver.recognises_process(command_line), "{command_line}");
+        }
+    }
+
+    #[test]
+    fn does_not_recognise_non_ollama_serve_processes() {
+        for command_line in [
+            "python3 -m http.server 8090",
+            "ollama run llama3",
+            "/usr/bin/ollama-helper serve",
+            "/Applications/Ollama.app/Contents/MacOS/Ollama",
+            "grep ollama serve",
+            "",
+        ] {
+            assert!(!OllamaDriver.recognises_process(command_line), "{command_line}");
+        }
+    }
 
     fn test_schema() -> Vec<ParamDescriptor> {
         vec![
