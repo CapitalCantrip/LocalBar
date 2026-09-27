@@ -51,6 +51,21 @@ export function GeneralTab() {
           When off, servers LocalBar started are stopped on quit. Adopted and external servers are always left running.
         </span>
       </div>
+      <div style={s.field}>
+        <span style={s.fieldLabel}>On launch</span>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
+          <input
+            type="checkbox"
+            checked={settings.restore_running_servers_on_launch}
+            disabled={busy}
+            onChange={e => void persist({ ...settings, restore_running_servers_on_launch: e.target.checked })}
+          />
+          Restore servers that were running when LocalBar quit
+        </label>
+        <span style={{ fontSize: 11, color: '#aaa' }}>
+          Start on launch instances always start, regardless of this setting.
+        </span>
+      </div>
     </div>
   )
 }

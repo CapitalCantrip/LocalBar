@@ -17,7 +17,7 @@ use localbar_core::drivers::ollama::{self, OllamaDriver};
 use localbar_core::lifecycle::{self, displayed_pid, LifecycleEvent, StopKill, PollContext, PollOutcome, SwitchPlan};
 use localbar_core::net::port_is_open;
 use localbar_core::persistence::FilePersistence;
-use localbar_core::quit::{ids_to_stop_on_quit, quit_sequence_for, quit_shutdown_budget_secs, ExitSignal, QuitCandidate, QuitSequence};
+use localbar_core::quit::{ids_to_start_on_launch, ids_to_stop_on_quit, quit_sequence_for, quit_shutdown_budget_secs, ExitSignal, QuitCandidate, QuitSequence};
 use localbar_core::registry::InstanceRegistry;
 use localbar_core::types::{
     AppSettings, DiscoveryConfig, InstanceError, InstanceErrorKind, InstancePhase, ModelMemoryKey, ModelRef,
@@ -1282,15 +1282,15 @@ fn on_startup(app: &tauri::App) {
         app.emit("startup-error", e.clone()).ok();
     }
 
-    let configs: Vec<_> = state.registry.lock().unwrap().all_configs().cloned().collect();
-    for config in configs {
-        if config.was_running_when_quit || config.start_on_launch {
-            let handle = app.handle().clone();
-            let id = config.id;
-            tauri::async_runtime::spawn(async move {
-                tauri::async_runtime::spawn_blocking(move || launch_instance(handle, id)).await.ok();
-            });
-        }
+    let (configs, settings) = {
+        let reg = state.registry.lock().unwrap();
+        (reg.all_configs().cloned().collect::<Vec<_>>(), reg.get_app_settings().clone())
+    };
+    for id in ids_to_start_on_launch(&configs, &settings) {
+        let handle = app.handle().clone();
+        tauri::async_runtime::spawn(async move {
+            tauri::async_runtime::spawn_blocking(move || launch_instance(handle, id)).await.ok();
+        });
     }
 }
 
