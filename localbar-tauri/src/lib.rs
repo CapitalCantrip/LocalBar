@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::process::Child;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use tauri::{AppHandle, Emitter, Listener, Manager, State, WindowEvent};
@@ -15,9 +16,10 @@ use localbar_core::drivers::mlx_lm::MLXLMDriver;
 use localbar_core::drivers::ollama::{self, OllamaDriver};
 use localbar_core::lifecycle::{self, LifecycleEvent, PollContext, PollOutcome, SwitchPlan};
 use localbar_core::persistence::FilePersistence;
+use localbar_core::quit::{ids_to_stop_on_quit, quit_shutdown_budget_secs, QuitCandidate};
 use localbar_core::registry::InstanceRegistry;
 use localbar_core::types::{
-    DiscoveryConfig, InstanceError, InstanceErrorKind, InstancePhase, ModelMemoryKey, ModelRef,
+    AppSettings, DiscoveryConfig, InstanceError, InstanceErrorKind, InstancePhase, ModelMemoryKey, ModelRef,
     ParamValues, ServerInstanceConfig, ServerType,
 };
 use localbar_core::{adopt_external_as_new_instance, set_active_profile, set_instance_params};
@@ -52,6 +54,7 @@ pub struct AppState {
     pub registry: Mutex<InstanceRegistry>,
     pub processes: Mutex<HashMap<Uuid, Child>>,
     pub load_error: Option<String>,
+    pub quitting: AtomicBool,
 }
 
 impl AppState {
@@ -62,6 +65,7 @@ impl AppState {
             registry: Mutex::new(registry),
             processes: Mutex::new(HashMap::new()),
             load_error: None,
+            quitting: AtomicBool::new(false),
         }
     }
 }
@@ -1039,6 +1043,16 @@ fn quit_app(app: AppHandle) {
 }
 
 #[tauri::command]
+fn get_app_settings(state: State<'_, AppState>) -> AppSettings {
+    state.registry.lock().unwrap().get_app_settings().clone()
+}
+
+#[tauri::command]
+fn set_app_settings(state: State<'_, AppState>, settings: AppSettings) -> Result<(), String> {
+    state.registry.lock().unwrap().set_app_settings(settings)
+}
+
+#[tauri::command]
 fn open_url(url: String) {
     let _ = std::process::Command::new("open").arg(&url).spawn();
 }
@@ -1054,6 +1068,69 @@ fn mark_running_instances_for_reconnect(app: &AppHandle) {
         reg.update_config(id, |c| c.was_running_when_quit = true).ok();
     }
     reg.save().ok();
+}
+
+struct QuitStop {
+    id: Uuid,
+    child: Child,
+    grace: f64,
+}
+
+fn quit_candidates(state: &AppState) -> Vec<QuitCandidate> {
+    let spawned: Vec<Uuid> = state.processes.lock().unwrap().keys().copied().collect();
+    let reg = state.registry.lock().unwrap();
+    reg.all_configs()
+        .map(|c| QuitCandidate { id: c.id, has_child: spawned.contains(&c.id), server_type: c.server_type })
+        .collect()
+}
+
+fn grace_for(app: &AppHandle, id: Uuid) -> f64 {
+    clone_config(app, id)
+        .map(|c| driver_for(&c, &DiscoveryConfig::default()).stop(&c).grace_period_secs)
+        .unwrap_or(0.0)
+}
+
+fn take_quit_stops(app: &AppHandle) -> Vec<QuitStop> {
+    let state = app.state::<AppState>();
+    let settings = state.registry.lock().unwrap().get_app_settings().clone();
+    let ids = ids_to_stop_on_quit(&quit_candidates(&state), &settings);
+    ids.into_iter()
+        .filter_map(|id| take_child(&state, id).map(|child| QuitStop { id, child, grace: grace_for(app, id) }))
+        .collect()
+}
+
+fn stop_all_for_quit(app: &AppHandle, stops: Vec<QuitStop>) {
+    let graces: Vec<f64> = stops.iter().map(|s| s.grace).collect();
+    let budget = std::time::Duration::from_secs_f64(quit_shutdown_budget_secs(&graces));
+    let deadline = std::time::Instant::now() + budget;
+    let (tx, rx) = std::sync::mpsc::channel();
+    for stop in stops {
+        set_phase_emit(app, stop.id, InstancePhase::Stopping);
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            graceful_kill(stop.child, stop.grace);
+            let _ = tx.send(());
+        });
+    }
+    drop(tx);
+    while rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).is_ok() {}
+}
+
+fn handle_exit_requested(app: &AppHandle, api: &tauri::ExitRequestApi) {
+    if app.state::<AppState>().quitting.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    mark_running_instances_for_reconnect(app);
+    let stops = take_quit_stops(app);
+    if stops.is_empty() {
+        return;
+    }
+    api.prevent_exit();
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        stop_all_for_quit(&handle, stops);
+        handle.exit(0);
+    });
 }
 
 fn on_startup(app: &tauri::App) {
@@ -1236,6 +1313,7 @@ fn load_persisted_state(state: &mut AppState) {
         reg.load_model_memory().ok();
         reg.load_profiles().ok();
         reg.load_discovery_config().ok();
+        reg.load_app_settings().ok();
     }
 }
 
@@ -1274,15 +1352,15 @@ pub fn run() {
             switch_model_cmd, update_instance_params, set_active_profile_cmd,
             list_models_cmd, list_models_for_type, fetch_model_metadata_cmd, get_resolved_params, get_param_schema,
             list_all_discovered_models,
-            get_discovery_config, set_discovery_config, set_model_search_path_override,
+            get_discovery_config, set_discovery_config, get_app_settings, set_app_settings, set_model_search_path_override,
             adopt_as_external_instance,
             open_settings, quit_app, open_url,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            if let tauri::RunEvent::ExitRequested { .. } = event {
-                mark_running_instances_for_reconnect(app);
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                handle_exit_requested(app, &api);
             }
         });
 }

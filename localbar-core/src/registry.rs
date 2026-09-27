@@ -4,7 +4,7 @@ use std::time::Instant;
 use uuid::Uuid;
 
 use crate::persistence::Persistence;
-use crate::types::{DiscoveryConfig, InstancePhase, ModelMemory, ModelMemoryKey, NamedProfile, ParamValues, ServerInstanceConfig, ServerType};
+use crate::types::{AppSettings, DiscoveryConfig, InstancePhase, ModelMemory, ModelMemoryKey, NamedProfile, ParamValues, ServerInstanceConfig, ServerType};
 
 pub struct InstanceRecord {
     pub config: ServerInstanceConfig,
@@ -16,6 +16,7 @@ pub struct InstanceRegistry {
     profiles: Vec<NamedProfile>,
     model_memory: HashMap<ModelMemoryKey, ModelMemory>,
     discovery_config: DiscoveryConfig,
+    app_settings: AppSettings,
     persistence: Box<dyn Persistence>,
     start_times: HashMap<Uuid, Instant>,
     adopted_pids: HashMap<Uuid, u32>,
@@ -28,6 +29,7 @@ impl InstanceRegistry {
             profiles: Vec::new(),
             model_memory: HashMap::new(),
             discovery_config: DiscoveryConfig::default(),
+            app_settings: AppSettings::default(),
             persistence,
             start_times: HashMap::new(),
             adopted_pids: HashMap::new(),
@@ -150,6 +152,21 @@ impl InstanceRegistry {
 
     pub fn load_discovery_config(&mut self) -> Result<(), String> {
         self.discovery_config = self.persistence.load_discovery_config()?;
+        Ok(())
+    }
+
+    pub fn get_app_settings(&self) -> &AppSettings {
+        &self.app_settings
+    }
+
+    pub fn set_app_settings(&mut self, settings: AppSettings) -> Result<(), String> {
+        self.persistence.save_app_settings(&settings)?;
+        self.app_settings = settings;
+        Ok(())
+    }
+
+    pub fn load_app_settings(&mut self) -> Result<(), String> {
+        self.app_settings = self.persistence.load_app_settings()?;
         Ok(())
     }
 

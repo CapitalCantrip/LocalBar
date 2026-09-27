@@ -42,3 +42,12 @@ Rationale:
 - `startOnAppLaunch` + LaunchAgent for LocalBar itself (`launchd` keeping LocalBar alive) is the recommended pattern for users who want persistent availability.
 - Post-MVP, if demand exists for server persistence across LocalBar restarts, `LifecycleOwnership.attached` (sketched in the architecture doc) provides a clean extension path without changing the driver protocol or the existing managed path.
 - The architecture doc note requesting an *explicit product call* on this question is hereby resolved.
+
+---
+
+## Addendum (2026-09-27, #61): quit behaviour in the Tauri rewrite
+
+- On quit, LocalBar stops only the servers it spawned (those with a `Child` in `AppState.processes`, whatever their phase, so Starting and SwitchingModel are included). Adopted servers (`adopted_pids`) and External instances are left running, because LocalBar did not start them.
+- `was_running_when_quit` is recorded before any stop, so the next launch restarts spawned servers and re-adopts the rest.
+- The app-level setting `AppSettings.keep_servers_running_on_quit` (persisted under `settings` in state.json, default off) turns the stop off entirely.
+- The decision is the pure fn `localbar_core::quit::ids_to_stop_on_quit`. The Tauri shell calls `prevent_exit`, runs `graceful_kill` for each server on its own thread, waits at most `quit_shutdown_budget_secs` (largest grace capped at `MAX_QUIT_GRACE_SECS`, plus `QUIT_KILL_SLACK_SECS`), then calls `exit(0)`. The `AppState.quitting` flag lets that second `ExitRequested` pass straight through. A kill that hangs past the budget cannot block quit.

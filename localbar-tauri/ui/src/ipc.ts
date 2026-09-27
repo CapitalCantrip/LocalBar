@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { CanonicalParam, DiscoveredModel, DiscoveryConfig, InstancePhase, ModelMetadata, ModelRef, ParamValues, ServerInstanceConfig } from './types'
+import type { AppSettings, CanonicalParam, DiscoveredModel, DiscoveryConfig, InstancePhase, ModelMetadata, ModelRef, ParamValues, ServerInstanceConfig } from './types'
 
 export interface ParamSchemaEntry {
   key: CanonicalParam
@@ -83,6 +83,12 @@ export const ipc = {
 
   setDiscoveryConfig: (config: DiscoveryConfig): Promise<void> =>
     invoke('set_discovery_config', { config }),
+
+  getAppSettings: (): Promise<AppSettings> =>
+    invoke('get_app_settings'),
+
+  setAppSettings: (settings: AppSettings): Promise<void> =>
+    invoke('set_app_settings', { settings }),
 
   setModelSearchPathOverride: (id: string, path: string | null): Promise<void> =>
     invoke('set_model_search_path_override', { id, path }),
