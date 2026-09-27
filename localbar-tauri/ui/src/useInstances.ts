@@ -21,19 +21,23 @@ export function useInstances(onRemoved?: () => void): {
   const [pids, setPids] = useState<Record<string, InstancePidDto | null>>({})
   const onRemovedRef = useCallback(() => onRemoved?.(), [onRemoved])
 
-  const refresh = useCallback(async () => {
+  const refreshState = useCallback(async () => {
     const [insts, ph] = await Promise.all([ipc.listInstances(), ipc.listInstancePhases()])
     setInstances(insts)
     setPhases(ph)
-    setPids(await fetchPids(insts))
+    return insts
   }, [])
 
+  const refreshWithPids = useCallback(async () => {
+    setPids(await fetchPids(await refreshState()))
+  }, [refreshState])
+
   useEffect(() => {
-    refresh()
-    const id = setInterval(refresh, 1500)
-    const unlisten = listen('phase-changed', refresh)
+    refreshWithPids()
+    const id = setInterval(refreshState, 1500)
+    const unlisten = listen('phase-changed', refreshWithPids)
     const unlistenRemoved = listen('instance-removed', async () => {
-      await refresh()
+      await refreshWithPids()
       onRemovedRef()
     })
     return () => {
@@ -41,7 +45,7 @@ export function useInstances(onRemoved?: () => void): {
       unlisten.then(f => f())
       unlistenRemoved.then(f => f())
     }
-  }, [refresh, onRemovedRef])
+  }, [refreshState, refreshWithPids, onRemovedRef])
 
-  return { instances, phases, pids, refresh }
+  return { instances, phases, pids, refresh: refreshWithPids }
 }
