@@ -14,6 +14,7 @@ pub struct MockDriver {
     pub health_status: HealthStatus,
     pub manages_lifecycle: bool,
     pub switch_requires_restart: bool,
+    pub recognises_process: bool,
     pub managed_config_calls: Arc<Mutex<Vec<(String, String)>>>,
     pub delete_config_calls: Arc<Mutex<Vec<String>>>,
 }
@@ -26,6 +27,7 @@ impl MockDriver {
             health_status: HealthStatus::Healthy,
             manages_lifecycle: true,
             switch_requires_restart: false,
+            recognises_process: true,
             managed_config_calls: Arc::new(Mutex::new(Vec::new())),
             delete_config_calls: Arc::new(Mutex::new(Vec::new())),
         }
@@ -123,6 +125,10 @@ impl ServerDriver for MockDriver {
 
     fn health_check(&self, _config: &ServerInstanceConfig) -> HealthStatus {
         self.health_status.clone()
+    }
+
+    fn recognises_process(&self, _command_line: &str) -> bool {
+        self.recognises_process
     }
 
     fn manages_lifecycle(&self) -> bool {

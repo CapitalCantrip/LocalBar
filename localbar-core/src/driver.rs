@@ -54,6 +54,8 @@ pub trait ServerDriver: Send + Sync {
 
     fn health_check(&self, config: &ServerInstanceConfig) -> HealthStatus;
 
+    fn recognises_process(&self, command_line: &str) -> bool;
+
     fn manages_lifecycle(&self) -> bool {
         true
     }

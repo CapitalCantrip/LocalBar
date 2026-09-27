@@ -446,16 +446,22 @@ fn detect_and_correct_adopted_model(
     reg.save().ok();
 }
 
+fn find_listener(port: u16) -> Option<lifecycle::Listener> {
+    let pid = find_listening_pid(port)?;
+    let command_line = ps_args_for_pid(pid).unwrap_or_default();
+    Some(lifecycle::Listener { pid, command_line })
+}
+
 fn launch_instance(app: AppHandle, id: Uuid) {
     let Some(config) = clone_config(&app, id) else { return };
     let discovery = discovery_config(&app);
     let driver = driver_for(&config, &discovery);
 
-    let listener_pid = find_listening_pid(config.port);
+    let listener = find_listener(config.port);
     let (plan, events) = {
         let state = app.state::<AppState>();
         let mut reg = state.registry.lock().unwrap();
-        lifecycle::start(&mut reg, id, &*driver, listener_pid)
+        lifecycle::start(&mut reg, id, &*driver, listener)
     };
     emit_lifecycle_events(&app, events);
 
