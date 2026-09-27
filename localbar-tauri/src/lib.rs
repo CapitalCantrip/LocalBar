@@ -17,7 +17,7 @@ use localbar_core::drivers::ollama::{self, OllamaDriver};
 use localbar_core::lifecycle::{self, displayed_pid, LifecycleEvent, StopKill, PollContext, PollOutcome, SwitchPlan};
 use localbar_core::net::port_is_open;
 use localbar_core::persistence::FilePersistence;
-use localbar_core::quit::{ids_to_stop_on_quit, quit_shutdown_budget_secs, QuitCandidate};
+use localbar_core::quit::{ids_to_stop_on_quit, quit_sequence_for, quit_shutdown_budget_secs, ExitSignal, QuitCandidate, QuitSequence};
 use localbar_core::registry::InstanceRegistry;
 use localbar_core::types::{
     AppSettings, DiscoveryConfig, InstanceError, InstanceErrorKind, InstancePhase, ModelMemoryKey, ModelRef,
@@ -69,11 +69,37 @@ pub struct AdoptResultDto {
     pub warning: Option<String>,
 }
 
+#[derive(serde::Serialize, Clone)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[serde(rename_all = "camelCase")]
+pub struct ReconnectNoticeDto {
+    pub id: String,
+    pub seq: u32,
+    pub message: String,
+}
+
+#[derive(Default)]
+pub struct ReconnectNotices {
+    next_seq: u32,
+    latest: HashMap<Uuid, ReconnectNoticeDto>,
+}
+
+impl ReconnectNotices {
+    fn record(&mut self, id: Uuid, message: String) -> ReconnectNoticeDto {
+        self.next_seq += 1;
+        let notice = ReconnectNoticeDto { id: id.to_string(), seq: self.next_seq, message };
+        self.latest.insert(id, notice.clone());
+        notice
+    }
+}
+
 pub struct AppState {
     pub registry: Mutex<InstanceRegistry>,
     pub processes: Mutex<HashMap<Uuid, Child>>,
     pub load_error: Option<String>,
     pub quitting: AtomicBool,
+    pub reconnect_notices: Mutex<ReconnectNotices>,
 }
 
 impl AppState {
@@ -85,6 +111,7 @@ impl AppState {
             processes: Mutex::new(HashMap::new()),
             load_error: None,
             quitting: AtomicBool::new(false),
+            reconnect_notices: Mutex::new(ReconnectNotices::default()),
         }
     }
 }
@@ -267,6 +294,11 @@ fn emit_lifecycle_events(app: &AppHandle, events: Vec<LifecycleEvent>) {
         match e {
             LifecycleEvent::PhaseChanged(id, _phase) => {
                 app.emit("phase-changed", id.to_string()).ok();
+            }
+            LifecycleEvent::Reconnected { id, pid } => {
+                let notice = app.state::<AppState>().reconnect_notices.lock().unwrap()
+                    .record(id, lifecycle::reconnect_notice(pid));
+                app.emit("instance-reconnected", notice).ok();
             }
         }
     }
@@ -549,6 +581,11 @@ async fn get_instance_pid(state: State<'_, AppState>, id: String) -> Result<Opti
         None
     };
     Ok(displayed_pid(ctx.spawned, ctx.adopted, listener).map(instance_pid_to_dto))
+}
+
+#[tauri::command]
+fn list_reconnect_notices(state: State<'_, AppState>) -> Vec<ReconnectNoticeDto> {
+    state.reconnect_notices.lock().unwrap().latest.values().cloned().collect()
 }
 
 #[tauri::command]
@@ -1206,11 +1243,25 @@ fn stop_all_for_quit(app: &AppHandle, stops: Vec<QuitStop>) {
     while rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).is_ok() {}
 }
 
+fn begin_quit(app: &AppHandle, signal: ExitSignal) -> QuitSequence {
+    let already_quitting = app.state::<AppState>().quitting.swap(true, Ordering::SeqCst);
+    let sequence = quit_sequence_for(signal, already_quitting);
+    if sequence != QuitSequence::AlreadyRan {
+        mark_running_instances_for_reconnect(app);
+    }
+    sequence
+}
+
+fn handle_exit(app: &AppHandle) {
+    if begin_quit(app, ExitSignal::Terminating) == QuitSequence::Inline {
+        stop_all_for_quit(app, take_quit_stops(app));
+    }
+}
+
 fn handle_exit_requested(app: &AppHandle, api: &tauri::ExitRequestApi) {
-    if app.state::<AppState>().quitting.swap(true, Ordering::SeqCst) {
+    if begin_quit(app, ExitSignal::Requested) != QuitSequence::InBackground {
         return;
     }
-    mark_running_instances_for_reconnect(app);
     let stops = take_quit_stops(app);
     if stops.is_empty() {
         return;
@@ -1438,7 +1489,7 @@ pub fn run() {
         .setup(setup_handler)
         .invoke_handler(tauri::generate_handler![
             list_instances, list_instance_phases, add_instance, remove_instance,
-            get_start_warning, get_instance_pid, check_memory_warning, start_instance, stop_instance,
+            get_start_warning, list_reconnect_notices, get_instance_pid, check_memory_warning, start_instance, stop_instance,
             set_start_on_launch, rename_instance, set_instance_port, set_selected_model,
             switch_model_cmd, update_instance_params, set_active_profile_cmd,
             list_models_cmd, list_models_for_type, fetch_model_metadata_cmd, get_resolved_params, get_param_schema,
@@ -1450,8 +1501,10 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                handle_exit_requested(app, &api);
+            match event {
+                tauri::RunEvent::ExitRequested { api, .. } => handle_exit_requested(app, &api),
+                tauri::RunEvent::Exit => handle_exit(app),
+                _ => {}
             }
         });
 }

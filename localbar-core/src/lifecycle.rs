@@ -16,6 +16,7 @@ pub struct Listener {
 #[derive(Debug, Clone)]
 pub enum LifecycleEvent {
     PhaseChanged(Uuid, InstancePhase),
+    Reconnected { id: Uuid, pid: Option<u32> },
 }
 
 #[derive(Debug, Clone)]
@@ -87,7 +88,12 @@ fn start_from_stopped_config(
     let health = driver.health_check(config);
 
     if health == HealthStatus::Healthy {
-        return (None, adopt_as_running(reg, id, recognised_pid(driver, listener.as_ref())));
+        let pid = recognised_pid(driver, listener.as_ref());
+        let mut events = adopt_as_running(reg, id, pid);
+        if driver.manages_lifecycle() {
+            events.push(LifecycleEvent::Reconnected { id, pid });
+        }
+        return (None, events);
     }
 
     if port_is_open(&config.host, config.port) {
@@ -117,7 +123,9 @@ fn handle_port_conflict(
 ) -> (Option<LaunchPlan>, Vec<LifecycleEvent>) {
     if driver.manages_lifecycle() {
         if let Some(pid) = recognised_pid(driver, listener) {
-            return (None, adopt_as_running(reg, id, Some(pid)));
+            let mut events = adopt_as_running(reg, id, Some(pid));
+            events.push(LifecycleEvent::Reconnected { id, pid: Some(pid) });
+            return (None, events);
         }
     }
     (None, error_events(
@@ -330,6 +338,13 @@ pub fn adopted_poll_continues(phase: Option<&InstancePhase>) -> bool {
     }
 }
 
+pub fn reconnect_notice(pid: Option<u32>) -> String {
+    match pid {
+        Some(pid) => format!("Reconnected to running server (PID {pid})"),
+        None => "Reconnected to running server".to_string(),
+    }
+}
+
 pub fn adopt_health_warning(health: HealthStatus, port: u16) -> Option<String> {
     (health != HealthStatus::Healthy).then(|| format!(
         "The process on port {port} doesn't answer as an LLM server. It was adopted anyway, but will likely show as unreachable."
@@ -397,7 +412,7 @@ mod tests {
 
     use super::{
         adopt, adopt_health_warning, adopted_poll_continues, displayed_pid, finish_warm_load, poll_adopted,
-        poll_once, start, stop, stop_outcome, switch_model, InstancePid, LifecycleEvent, Listener, PollContext,
+        poll_once, reconnect_notice, start, stop, stop_outcome, switch_model, InstancePid, LifecycleEvent, Listener, PollContext,
         PollOutcome, StopKill, SwitchPlan,
     };
 
@@ -465,9 +480,75 @@ mod tests {
     }
 
     fn phase_of(events: &[LifecycleEvent]) -> Option<InstancePhase> {
-        events.iter().rev().map(|e| match e {
-            LifecycleEvent::PhaseChanged(_, p) => p.clone(),
-        }).next()
+        events.iter().rev().find_map(|e| match e {
+            LifecycleEvent::PhaseChanged(_, p) => Some(p.clone()),
+            LifecycleEvent::Reconnected { .. } => None,
+        })
+    }
+
+    fn reconnected_pid(events: &[LifecycleEvent]) -> Option<Option<u32>> {
+        events.iter().find_map(|e| match e {
+            LifecycleEvent::Reconnected { pid, .. } => Some(*pid),
+            LifecycleEvent::PhaseChanged(..) => None,
+        })
+    }
+
+    #[test]
+    fn start_reports_reconnect_with_pid_when_adopting_recognised_healthy_server() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(ollama_config("a"));
+        let driver = MockDriver::new(ServerType::Ollama);
+
+        let (_, events) = start(&mut reg, id, &driver, listener_with_pid(4242));
+        assert_eq!(reconnected_pid(&events), Some(Some(4242)));
+    }
+
+    #[test]
+    fn start_reports_reconnect_without_pid_when_healthy_listener_unrecognised() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(ollama_config("a"));
+        let driver = MockDriver { recognises_process: false, ..MockDriver::new(ServerType::Ollama) };
+
+        let listener = Listener { pid: 8888, command_line: UNRELATED_COMMAND_LINE.into() };
+        let (_, events) = start(&mut reg, id, &driver, Some(listener));
+        assert_eq!(reconnected_pid(&events), Some(None));
+    }
+
+    #[test]
+    fn start_reports_reconnect_when_adopting_recognised_unhealthy_listener() {
+        let mut reg = make_registry();
+        let (id, _socket) = occupied_ollama_instance(&mut reg);
+        let driver = MockDriver::new_unhealthy(ServerType::Ollama);
+
+        let (_, events) = start(&mut reg, id, &driver, listener_with_pid(5151));
+        assert_eq!(reconnected_pid(&events), Some(Some(5151)));
+    }
+
+    #[test]
+    fn start_does_not_report_reconnect_when_launching_a_new_server() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(ollama_config("a"));
+        let driver = MockDriver::new_unhealthy(ServerType::Ollama);
+
+        let (_, events) = start(&mut reg, id, &driver, None);
+        assert_eq!(reconnected_pid(&events), None);
+    }
+
+    #[test]
+    fn start_does_not_report_reconnect_for_external_instance() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(external_config("lm-studio"));
+        let driver = MockDriver { manages_lifecycle: false, ..MockDriver::new(ServerType::External) };
+
+        let (_, events) = start(&mut reg, id, &driver, None);
+        assert_eq!(reg.get_phase(id), Some(&InstancePhase::Running));
+        assert_eq!(reconnected_pid(&events), None);
+    }
+
+    #[test]
+    fn reconnect_notice_names_the_pid_when_known() {
+        assert_eq!(reconnect_notice(Some(123)), "Reconnected to running server (PID 123)");
+        assert_eq!(reconnect_notice(None), "Reconnected to running server");
     }
 
     #[test]
@@ -478,9 +559,7 @@ mod tests {
 
         let (plan, events) = start(&mut reg, id, &driver, None);
         assert!(plan.is_some(), "should return a LaunchPlan");
-        assert_eq!(events.first().map(|e| match e {
-            LifecycleEvent::PhaseChanged(_, p) => p.clone(),
-        }), Some(InstancePhase::Starting), "must emit Starting first");
+        assert!(matches!(events.first(), Some(LifecycleEvent::PhaseChanged(_, InstancePhase::Starting))), "must emit Starting first");
     }
 
     #[test]

@@ -26,6 +26,27 @@ pub fn ids_to_stop_on_quit(candidates: &[QuitCandidate], settings: &AppSettings)
         .collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitSignal {
+    Requested,
+    Terminating,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitSequence {
+    AlreadyRan,
+    InBackground,
+    Inline,
+}
+
+pub fn quit_sequence_for(signal: ExitSignal, already_quitting: bool) -> QuitSequence {
+    match (already_quitting, signal) {
+        (true, _) => QuitSequence::AlreadyRan,
+        (false, ExitSignal::Requested) => QuitSequence::InBackground,
+        (false, ExitSignal::Terminating) => QuitSequence::Inline,
+    }
+}
+
 pub fn quit_shutdown_budget_secs(grace_periods: &[f64]) -> f64 {
     let largest = grace_periods
         .iter()
@@ -72,6 +93,22 @@ mod tests {
     fn quit_with_keep_running_setting_stops_nothing() {
         let c = candidate(true, ServerType::MlxLm);
         assert!(ids_to_stop_on_quit(&[c], &keep_running()).is_empty());
+    }
+
+    #[test]
+    fn exit_request_runs_quit_sequence_in_background_so_exit_can_wait() {
+        assert_eq!(quit_sequence_for(ExitSignal::Requested, false), QuitSequence::InBackground);
+    }
+
+    #[test]
+    fn termination_without_exit_request_still_runs_quit_sequence_inline() {
+        assert_eq!(quit_sequence_for(ExitSignal::Terminating, false), QuitSequence::Inline);
+    }
+
+    #[test]
+    fn quit_sequence_runs_once_even_when_both_exit_signals_arrive() {
+        assert_eq!(quit_sequence_for(ExitSignal::Requested, true), QuitSequence::AlreadyRan);
+        assert_eq!(quit_sequence_for(ExitSignal::Terminating, true), QuitSequence::AlreadyRan);
     }
 
     #[test]
