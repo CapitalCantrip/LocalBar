@@ -87,7 +87,7 @@ export function ModelList({ instance, phase, onRefresh }: {
       {models.length === 0 && !loading && (
         <span style={{ ...s.fieldValue, color: '#aaa', fontSize: 11 }}>No models found</span>
       )}
-      <div style={s.modelList}>
+      <div style={{ ...s.modelList, ...s.detailModelList }}>
         {models.map(m => (
           <div
             key={m.key}

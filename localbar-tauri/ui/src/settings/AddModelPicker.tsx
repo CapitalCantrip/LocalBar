@@ -44,21 +44,21 @@ export function AddModelPicker({ serverType, selectedModelKey, onSelect }: {
   if (!PICKER_TYPES.includes(serverType)) return null
 
   if (loading) return (
-    <div style={s.field}>
+    <div style={s.sheetModelField}>
       <span style={s.fieldLabel}>Model</span>
       <span style={{ ...s.fieldValue, color: '#aaa', fontSize: 11 }}>Scanning…</span>
     </div>
   )
 
   if (scanError) return (
-    <div style={s.field}>
+    <div style={s.sheetModelField}>
       <span style={s.fieldLabel}>Model</span>
       <span style={{ ...s.fieldValue, color: '#ef4444', fontSize: 11 }}>Scan failed: {scanError}</span>
     </div>
   )
 
   if (ollamaUnreachable) return (
-    <div style={s.field}>
+    <div style={s.sheetModelField}>
       <span style={s.fieldLabel}>Model</span>
       <input
         style={s.input}
@@ -71,7 +71,7 @@ export function AddModelPicker({ serverType, selectedModelKey, onSelect }: {
   )
 
   if (models !== null && models.length === 0) return (
-    <div style={s.field}>
+    <div style={s.sheetModelField}>
       <span style={s.fieldLabel}>Model</span>
       <span style={{ ...s.fieldValue, color: '#aaa', fontSize: 11 }}>
         {serverType === 'mlx-lm'
@@ -84,7 +84,7 @@ export function AddModelPicker({ serverType, selectedModelKey, onSelect }: {
   if (!models) return null
 
   return (
-    <div style={s.field}>
+    <div style={s.sheetModelField}>
       <span style={s.fieldLabel}>Model</span>
       <div style={s.modelList}>
         {models.map(m => (

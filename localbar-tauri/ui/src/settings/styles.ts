@@ -1,3 +1,6 @@
+export const SHEET_VIEWPORT_MARGIN_PX = 48
+export const DETAIL_MODEL_LIST_MAX_HEIGHT_PX = 240
+
 export const s = {
   root: {
     fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
@@ -69,15 +72,25 @@ export const s = {
     background: 'white', borderRadius: 10, padding: 20, width: 340,
     boxShadow: '0 8px 32px rgba(0,0,0,0.2)',
     display: 'flex', flexDirection: 'column' as const, gap: 12,
+    maxHeight: `calc(100vh - ${SHEET_VIEWPORT_MARGIN_PX}px)`,
+    overflow: 'hidden' as const,
   },
-  sheetTitle: { fontWeight: 600, fontSize: 15, margin: 0 },
+  sheetTitle: { fontWeight: 600, fontSize: 15, margin: 0, flexShrink: 0 },
   input: {
     padding: '6px 10px', border: '1px solid #ccc', borderRadius: 6,
     fontSize: 13, fontFamily: 'inherit', width: '100%', boxSizing: 'border-box' as const,
   },
-  sheetBtns: { display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 },
+  sheetBtns: { display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4, flexShrink: 0 },
   checkbox: { display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 },
-  modelList: { display: 'flex', flexDirection: 'column' as const, gap: 2 },
+  sheetModelField: {
+    display: 'flex', flexDirection: 'column' as const, gap: 4,
+    flex: 1, minHeight: 0,
+  },
+  modelList: {
+    display: 'flex', flexDirection: 'column' as const, gap: 2,
+    flex: 1, minHeight: 0, overflowY: 'auto' as const,
+  },
+  detailModelList: { maxHeight: DETAIL_MODEL_LIST_MAX_HEIGHT_PX },
   modelRow: (selected: boolean): React.CSSProperties => ({
     display: 'flex', alignItems: 'center', gap: 8,
     padding: '6px 10px', borderRadius: 6, cursor: 'pointer',
