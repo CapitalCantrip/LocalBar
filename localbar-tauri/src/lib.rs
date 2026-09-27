@@ -148,6 +148,24 @@ fn find_listening_pid(_port: u16) -> Option<u32> {
 }
 
 #[cfg(unix)]
+fn ps_args_for_pid(pid: u32) -> Option<String> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "args=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+#[cfg(not(unix))]
+fn ps_args_for_pid(_pid: u32) -> Option<String> {
+    None
+}
+
+#[cfg(unix)]
 fn pid_is_alive(pid: u32) -> bool {
     // SAFETY: kill(2) with signal 0 only probes for the pid's existence and permission; it sends no signal.
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
@@ -403,7 +421,13 @@ fn detect_and_correct_adopted_model(
     config: &ServerInstanceConfig,
     driver: &dyn ServerDriver,
 ) {
-    let Some(reported) = localbar_core::model_probe::detect_loaded_model(config) else { return };
+    let pid = app.state::<AppState>().registry.lock().unwrap().get_adopted_pid(id);
+    let Some(reported) = pid
+        .and_then(ps_args_for_pid)
+        .and_then(|args| localbar_core::model_probe::served_model_from_args(&args))
+    else {
+        return;
+    };
     let already_matches = config
         .selected_model_key
         .as_deref()
