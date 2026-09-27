@@ -19,8 +19,8 @@ export default function SettingsApp() {
   const { instances, phases, pids, refresh } = useInstances(clearSelected)
   const [showAddSheet, setShowAddSheet] = useState(false)
 
-  const handleAdd = async (name: string, serverType: string, port: number, execPath: string, selectedModelKey: string | null) => {
-    const id = await ipc.addInstance(name, serverType, port, execPath)
+  const handleAdd = async (name: string, serverType: string, port: number, execPath: string, selectedModelKey: string | null, modelFolder: string | null) => {
+    const id = await ipc.addInstance(name, serverType, port, execPath, modelFolder)
     if (selectedModelKey) {
       await ipc.setSelectedModel(id, selectedModelKey).catch(ignoreModelSelectionFailure)
     }

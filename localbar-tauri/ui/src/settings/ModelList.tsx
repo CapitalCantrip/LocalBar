@@ -51,7 +51,9 @@ export function ModelList({ instance, phase, models, loading, error, onRefetch, 
     return (
       <div style={s.field}>
         <span style={s.fieldLabel}>Models <span style={s.refreshNote}>(unavailable)</span></span>
-        <span style={{ ...s.fieldValue, color: '#ef4444', fontSize: 11 }}>{error}</span>
+        <span style={{ ...s.fieldValue, color: '#ef4444', fontSize: 11 }}>
+          {error === 'OLLAMA_UNREACHABLE' ? 'Ollama not reachable and no models found in its model folder' : error}
+        </span>
       </div>
     )
   }

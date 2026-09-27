@@ -118,12 +118,53 @@ impl AppState {
 
 fn driver_for(config: &ServerInstanceConfig, discovery: &DiscoveryConfig) -> Box<dyn ServerDriver> {
     match config.server_type {
-        ServerType::Ollama => Box::new(OllamaDriver),
+        ServerType::Ollama => Box::new(OllamaDriver::new(ollama::explicit_models_dir(&explicit_ollama_candidates(config, discovery)))),
         ServerType::MlxLm => {
             let paths = discovery.resolved_mlx_paths(config.model_search_path_override.as_deref());
             Box::new(MLXLMDriver::new(paths))
         }
         ServerType::External => Box::new(ExternalDriver),
+    }
+}
+
+fn explicit_ollama_candidates<'a>(
+    config: &'a ServerInstanceConfig,
+    discovery: &'a DiscoveryConfig,
+) -> ollama::ModelsDirCandidates<'a> {
+    ollama::ModelsDirCandidates {
+        instance_override: config.model_search_path_override.as_deref(),
+        discovery_setting: discovery.ollama_models_dir.as_deref(),
+        ..Default::default()
+    }
+}
+
+fn resolve_ollama_models_dir(
+    config: &ServerInstanceConfig,
+    discovery: &DiscoveryConfig,
+) -> Option<ollama::ResolvedModelsDir> {
+    let explicit = explicit_ollama_candidates(config, discovery);
+    if let Some(dir) = ollama::explicit_models_dir(&explicit) {
+        return Some(dir);
+    }
+    detect_ollama_models_dir_blocking()
+}
+
+fn detect_ollama_models_dir_blocking() -> Option<ollama::ResolvedModelsDir> {
+    let env_value = std::env::var(ollama::OLLAMA_MODELS_ENV_VAR).ok();
+    let home = std::env::var(HOME_ENV_VAR).ok();
+    let app_setting = home.as_deref().and_then(ollama_app_models_setting);
+    ollama::resolve_models_dir(&ollama::ModelsDirCandidates {
+        env_value: env_value.as_deref(),
+        app_setting: app_setting.as_deref(),
+        home: home.as_deref(),
+        ..Default::default()
+    })
+}
+
+fn listing_driver_for(config: &ServerInstanceConfig, discovery: &DiscoveryConfig) -> Box<dyn ServerDriver> {
+    match config.server_type {
+        ServerType::Ollama => Box::new(OllamaDriver::new(resolve_ollama_models_dir(config, discovery))),
+        _ => driver_for(config, discovery),
     }
 }
 
@@ -461,14 +502,14 @@ fn launch_from_plan(app: &AppHandle, id: Uuid, plan: &localbar_core::driver::Lau
     tauri::async_runtime::spawn(run_health_poll(app.clone(), id));
 }
 
-fn finish_adoption_if_running(app: &AppHandle, id: Uuid, config: &ServerInstanceConfig, driver: &dyn ServerDriver) {
+fn finish_adoption_if_running(app: &AppHandle, id: Uuid, config: &ServerInstanceConfig) {
     let running = matches!(
         app.state::<AppState>().registry.lock().unwrap().get_phase(id),
         Some(InstancePhase::Running)
     );
     if running {
         if localbar_core::model_probe::reports_loaded_model(config.server_type) {
-            detect_and_correct_adopted_model(app, id, config, driver);
+            detect_and_correct_adopted_model(app, id, config);
         }
         tauri::async_runtime::spawn(run_adopted_health_poll(app.clone(), id));
     }
@@ -478,7 +519,6 @@ fn detect_and_correct_adopted_model(
     app: &AppHandle,
     id: Uuid,
     config: &ServerInstanceConfig,
-    driver: &dyn ServerDriver,
 ) {
     let pid = app.state::<AppState>().registry.lock().unwrap().get_adopted_pid(id);
     let Some(reported) = pid
@@ -494,7 +534,8 @@ fn detect_and_correct_adopted_model(
     if already_matches {
         return;
     }
-    let candidates: Vec<String> = driver
+    let discovery = discovery_config(app);
+    let candidates: Vec<String> = listing_driver_for(config, &discovery)
         .list_models(config)
         .map(|models| models.into_iter().map(|m| m.key).collect())
         .unwrap_or_default();
@@ -526,7 +567,7 @@ fn launch_instance(app: AppHandle, id: Uuid) {
 
     match plan {
         Some(plan) => launch_from_plan(&app, id, &plan),
-        None => finish_adoption_if_running(&app, id, &config, &*driver),
+        None => finish_adoption_if_running(&app, id, &config),
     }
 }
 
@@ -604,7 +645,7 @@ async fn check_memory_warning(state: State<'_, AppState>, id: String) -> Result<
     let Some(config) = config else { return Ok(None) };
     let Some(model_key) = config.selected_model_key.clone() else { return Ok(None) };
     let models = tauri::async_runtime::spawn_blocking(move || {
-        driver_for(&config, &discovery).list_models(&config)
+        listing_driver_for(&config, &discovery).list_models(&config)
     }).await.map_err(|e| e.to_string())??;
     let size_bytes = match models.iter().find(|m| m.key == model_key).and_then(|m| m.size_bytes) {
         Some(s) => s as u64,
@@ -638,12 +679,14 @@ fn add_instance(
     host: Option<String>,
     port: u16,
     executable_path: String,
+    model_search_path_override: Option<String>,
 ) -> Result<String, String> {
     let stype = parse_server_type(&server_type)?;
     let mut config = ServerInstanceConfig::new(name, stype, port, executable_path);
     if let Some(h) = host {
         config.host = h;
     }
+    config.model_search_path_override = non_blank(model_search_path_override);
     let id = config.id;
     let mut reg = state.registry.lock().unwrap();
     reg.add_instance(config);
@@ -947,12 +990,7 @@ fn set_active_profile_cmd(
     set_active_profile(&mut reg, uuid, pid, &*driver)
 }
 
-fn list_non_ollama_models(stype: ServerType, discovery: &DiscoveryConfig) -> Result<Vec<ModelRef>, String> {
-    let probe = ServerInstanceConfig::new("probe", stype, 0, "");
-    driver_for(&probe, discovery).list_models(&probe)
-}
-
-const OLLAMA_UNREACHABLE: &str = "OLLAMA_UNREACHABLE";
+const OLLAMA_DEFAULT_PORT: u16 = 11434;
 const HOME_ENV_VAR: &str = "HOME";
 const OLLAMA_APP_SUPPORT_RELATIVE_PATH: &str = "Library/Application Support/Ollama/db.sqlite";
 const SQLITE3_EXECUTABLE: &str = "/usr/bin/sqlite3";
@@ -972,29 +1010,37 @@ fn ollama_app_models_setting(home: &str) -> Option<String> {
     ollama::parse_app_models_setting(&output.stdout)
 }
 
-fn list_ollama_models_with_fallback(discovery: &DiscoveryConfig) -> Result<Vec<ModelRef>, String> {
-    let probe = ServerInstanceConfig::new("probe", ServerType::Ollama, 11434, "");
-    if let Ok(models) = driver_for(&probe, discovery).list_models(&probe) {
-        return Ok(models);
+fn non_blank(value: Option<String>) -> Option<String> {
+    value.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty())
+}
+
+fn list_models_in_folder(stype: ServerType, folder: Option<String>, discovery: &DiscoveryConfig) -> Result<Vec<ModelRef>, String> {
+    let mut probe = ServerInstanceConfig::new("probe", stype, 0, "");
+    if stype == ServerType::Ollama {
+        probe.port = OLLAMA_DEFAULT_PORT;
     }
-    let env_value = std::env::var(ollama::OLLAMA_MODELS_ENV_VAR).ok();
-    let home = std::env::var(HOME_ENV_VAR).ok();
-    let app_setting = home.as_deref().and_then(ollama_app_models_setting);
-    let models_dir = ollama::resolve_models_dir(env_value.as_deref(), app_setting.as_deref(), home.as_deref())
-        .ok_or_else(|| OLLAMA_UNREACHABLE.to_string())?;
-    ollama::list_models_from_manifests(&models_dir).map_err(|_| OLLAMA_UNREACHABLE.to_string())
+    probe.model_search_path_override = non_blank(folder);
+    listing_driver_for(&probe, discovery).list_models(&probe)
 }
 
 #[tauri::command]
-async fn list_models_for_type(state: State<'_, AppState>, server_type: String) -> Result<Vec<ModelRef>, String> {
+async fn list_models_for_type(
+    state: State<'_, AppState>,
+    server_type: String,
+    model_folder: Option<String>,
+) -> Result<Vec<ModelRef>, String> {
     let stype = parse_server_type(&server_type)?;
     let discovery = state.registry.lock().unwrap().get_discovery_config().clone();
-    tauri::async_runtime::spawn_blocking(move || match stype {
-        ServerType::Ollama => list_ollama_models_with_fallback(&discovery),
-        _ => list_non_ollama_models(stype, &discovery),
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || list_models_in_folder(stype, model_folder, &discovery))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn detect_ollama_models_dir() -> Result<Option<ollama::ResolvedModelsDir>, String> {
+    tauri::async_runtime::spawn_blocking(detect_ollama_models_dir_blocking)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[derive(serde::Serialize)]
@@ -1035,9 +1081,9 @@ fn discover_mlx_models(discovery: &DiscoveryConfig) -> Vec<DiscoveredModel> {
     }).collect()
 }
 
-fn discover_ollama_models(_discovery: &DiscoveryConfig) -> Vec<DiscoveredModel> {
-    let probe = ServerInstanceConfig::new("probe", ServerType::Ollama, 11434, "");
-    driver_for(&probe, &DiscoveryConfig::default())
+fn discover_ollama_models(discovery: &DiscoveryConfig) -> Vec<DiscoveredModel> {
+    let probe = ServerInstanceConfig::new("probe", ServerType::Ollama, OLLAMA_DEFAULT_PORT, "");
+    listing_driver_for(&probe, discovery)
         .list_models(&probe)
         .unwrap_or_default()
         .into_iter()
@@ -1078,7 +1124,7 @@ async fn list_models_cmd(state: State<'_, AppState>, id: String) -> Result<Vec<M
     };
     let Some(config) = config else { return Err(format!("instance {id} not found")) };
     tauri::async_runtime::spawn_blocking(move || {
-        driver_for(&config, &discovery).list_models(&config)
+        listing_driver_for(&config, &discovery).list_models(&config)
     }).await.map_err(|e| e.to_string())?
 }
 
@@ -1503,7 +1549,7 @@ pub fn run() {
             switch_model_cmd, update_instance_params, set_active_profile_cmd,
             list_models_cmd, list_models_for_type, fetch_model_metadata_cmd, get_resolved_params, get_param_schema,
             list_all_discovered_models,
-            get_discovery_config, set_discovery_config, get_app_settings, set_app_settings, set_model_search_path_override,
+            get_discovery_config, set_discovery_config, get_app_settings, set_app_settings, set_model_search_path_override, detect_ollama_models_dir,
             adopt_as_external_instance,
             open_settings, quit_app, open_url,
         ])

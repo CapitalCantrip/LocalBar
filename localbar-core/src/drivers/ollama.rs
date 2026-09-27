@@ -18,7 +18,43 @@ const MANIFESTS_DIR_NAME: &str = "manifests";
 const DEFAULT_REGISTRY: &str = "registry.ollama.ai";
 const DEFAULT_NAMESPACE: &str = "library";
 
-pub struct OllamaDriver;
+pub const OLLAMA_UNREACHABLE: &str = "OLLAMA_UNREACHABLE";
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OllamaDriver {
+    models_dir: Option<ResolvedModelsDir>,
+}
+
+impl OllamaDriver {
+    pub fn new(models_dir: Option<ResolvedModelsDir>) -> Self {
+        Self { models_dir }
+    }
+
+    fn list_models_via_http(&self, config: &ServerInstanceConfig) -> Result<Vec<ModelRef>, String> {
+        let resp = super::http::quick_agent().get(&tags_url(config)).call().map_err(|e| e.to_string())?;
+        let json: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
+        parse_tags_response(&json)
+    }
+}
+
+pub fn list_models_with_fallback(
+    http: impl FnOnce() -> Result<Vec<ModelRef>, String>,
+    models_dir: Option<&Path>,
+) -> Result<Vec<ModelRef>, String> {
+    if let Ok(models) = http() {
+        return Ok(models);
+    }
+    let dir = models_dir.ok_or_else(|| OLLAMA_UNREACHABLE.to_string())?;
+    list_models_from_manifests(dir).map_err(|_| OLLAMA_UNREACHABLE.to_string())
+}
+
+pub fn launch_environment(host: &str, port: u16, models_dir: Option<&ResolvedModelsDir>) -> Vec<(String, String)> {
+    let mut environment = vec![("OLLAMA_HOST".to_string(), format!("{host}:{port}"))];
+    if let Some(dir) = models_dir.filter(|d| d.source.is_explicit()) {
+        environment.push((OLLAMA_MODELS_ENV_VAR.to_string(), dir.path.to_string_lossy().into_owned()));
+    }
+    environment
+}
 
 impl ServerDriver for OllamaDriver {
     fn server_type(&self) -> ServerType {
@@ -48,7 +84,7 @@ impl ServerDriver for OllamaDriver {
         Ok(LaunchPlan {
             executable: config.executable_path.clone(),
             arguments: vec!["serve".to_string()],
-            environment: vec![("OLLAMA_HOST".to_string(), format!("{}:{}", config.host, config.port))],
+            environment: launch_environment(&config.host, config.port, self.models_dir.as_ref()),
             working_directory: None,
         })
     }
@@ -74,9 +110,10 @@ impl ServerDriver for OllamaDriver {
     }
 
     fn list_models(&self, config: &ServerInstanceConfig) -> Result<Vec<ModelRef>, String> {
-        let resp = super::http::quick_agent().get(&tags_url(config)).call().map_err(|e| e.to_string())?;
-        let json: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
-        parse_tags_response(&json)
+        list_models_with_fallback(
+            || self.list_models_via_http(config),
+            self.models_dir.as_ref().map(|d| d.path.as_path()),
+        )
     }
 
     fn switch_model(
@@ -221,26 +258,68 @@ fn model_ref_from_json(m: &serde_json::Value) -> Result<ModelRef, String> {
     Ok(ModelRef { display_name: key.clone(), key, publisher: None, architecture: None, size_bytes: m["size"].as_i64(), modified_secs: None })
 }
 
-pub fn resolve_models_dir(
-    env_value: Option<&str>,
-    app_setting: Option<&str>,
-    home: Option<&str>,
-) -> Option<PathBuf> {
-    if let Some(dir) = env_value {
-        if !dir.is_empty() {
-            return Some(PathBuf::from(dir));
-        }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[serde(rename_all = "snake_case")]
+pub enum ModelsDirSource {
+    Instance,
+    Discovery,
+    Env,
+    OllamaApp,
+    Default,
+}
+
+impl ModelsDirSource {
+    pub fn is_explicit(self) -> bool {
+        matches!(self, Self::Instance | Self::Discovery)
     }
-    if let Some(dir) = app_setting {
-        if !dir.is_empty() && Path::new(dir).is_dir() {
-            return Some(PathBuf::from(dir));
-        }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct ResolvedModelsDir {
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
+    pub path: PathBuf,
+    pub source: ModelsDirSource,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ModelsDirCandidates<'a> {
+    pub instance_override: Option<&'a str>,
+    pub discovery_setting: Option<&'a str>,
+    pub env_value: Option<&'a str>,
+    pub app_setting: Option<&'a str>,
+    pub home: Option<&'a str>,
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|v| !v.is_empty())
+}
+
+pub fn explicit_models_dir(candidates: &ModelsDirCandidates) -> Option<ResolvedModelsDir> {
+    let resolved = |path: &str, source| ResolvedModelsDir { path: PathBuf::from(path), source };
+    non_empty(candidates.instance_override)
+        .map(|p| resolved(p, ModelsDirSource::Instance))
+        .or_else(|| non_empty(candidates.discovery_setting).map(|p| resolved(p, ModelsDirSource::Discovery)))
+}
+
+pub fn resolve_models_dir(candidates: &ModelsDirCandidates) -> Option<ResolvedModelsDir> {
+    if let Some(explicit) = explicit_models_dir(candidates) {
+        return Some(explicit);
     }
-    let home = home?;
-    if home.is_empty() {
-        return None;
+    if let Some(dir) = non_empty(candidates.env_value) {
+        return Some(ResolvedModelsDir { path: PathBuf::from(dir), source: ModelsDirSource::Env });
     }
-    Some(Path::new(home).join(OLLAMA_HOME_DIR_NAME).join(OLLAMA_MODELS_DIR_NAME))
+    if let Some(dir) = non_empty(candidates.app_setting).filter(|d| Path::new(d).is_dir()) {
+        return Some(ResolvedModelsDir { path: PathBuf::from(dir), source: ModelsDirSource::OllamaApp });
+    }
+    let home = non_empty(candidates.home)?;
+    Some(ResolvedModelsDir {
+        path: Path::new(home).join(OLLAMA_HOME_DIR_NAME).join(OLLAMA_MODELS_DIR_NAME),
+        source: ModelsDirSource::Default,
+    })
 }
 
 pub fn parse_app_models_setting(output: &[u8]) -> Option<String> {
@@ -494,67 +573,186 @@ mod manifest_tests {
         assert_eq!(models.len(), 1);
     }
 
-    #[test]
-    fn resolve_models_dir_prefers_env_override() {
-        let dir = resolve_models_dir(Some("/custom/models"), None, Some("/Users/someone")).unwrap();
-        assert_eq!(dir, PathBuf::from("/custom/models"));
+    const HOME: &str = "/Users/someone";
+    const HOME_MODELS: &str = "/Users/someone/.ollama/models";
+
+    fn existing_dir(tmp: &TempDir, name: &str) -> String {
+        let dir = tmp.path().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.to_str().unwrap().to_owned()
+    }
+
+    fn resolved(candidates: ModelsDirCandidates) -> (PathBuf, ModelsDirSource) {
+        let dir = resolve_models_dir(&candidates).unwrap();
+        (dir.path, dir.source)
     }
 
     #[test]
-    fn resolve_models_dir_falls_back_to_home() {
-        let dir = resolve_models_dir(None, None, Some("/Users/someone")).unwrap();
-        assert_eq!(dir, PathBuf::from("/Users/someone/.ollama/models"));
-    }
-
-    #[test]
-    fn resolve_models_dir_empty_env_falls_back_to_home() {
-        let dir = resolve_models_dir(Some(""), None, Some("/Users/someone")).unwrap();
-        assert_eq!(dir, PathBuf::from("/Users/someone/.ollama/models"));
-    }
-
-    #[test]
-    fn resolve_models_dir_no_env_no_home_is_none() {
-        assert!(resolve_models_dir(None, None, None).is_none());
-    }
-
-    #[test]
-    fn resolve_models_dir_empty_home_is_none() {
-        assert!(resolve_models_dir(None, None, Some("")).is_none());
-    }
-
-    #[test]
-    fn resolve_models_dir_env_wins_over_app_setting() {
+    fn instance_override_wins_over_every_other_source() {
         let tmp = TempDir::new().unwrap();
-        let app_dir = tmp.path().join("app-models");
-        std::fs::create_dir_all(&app_dir).unwrap();
-        let dir = resolve_models_dir(
-            Some("/custom/models"),
-            Some(app_dir.to_str().unwrap()),
-            Some("/Users/someone"),
-        )
-        .unwrap();
-        assert_eq!(dir, PathBuf::from("/custom/models"));
+        let app = existing_dir(&tmp, "app");
+        let candidates = ModelsDirCandidates {
+            instance_override: Some("/instance"),
+            discovery_setting: Some("/discovery"),
+            env_value: Some("/env"),
+            app_setting: Some(&app),
+            home: Some(HOME),
+        };
+        assert_eq!(resolved(candidates), (PathBuf::from("/instance"), ModelsDirSource::Instance));
     }
 
     #[test]
-    fn resolve_models_dir_app_setting_wins_over_home() {
+    fn discovery_setting_wins_over_env_app_and_home() {
         let tmp = TempDir::new().unwrap();
-        let app_dir = tmp.path().join("app-models");
-        std::fs::create_dir_all(&app_dir).unwrap();
-        let dir = resolve_models_dir(None, Some(app_dir.to_str().unwrap()), Some("/Users/someone")).unwrap();
-        assert_eq!(dir, app_dir);
+        let app = existing_dir(&tmp, "app");
+        let candidates = ModelsDirCandidates {
+            discovery_setting: Some("/discovery"),
+            env_value: Some("/env"),
+            app_setting: Some(&app),
+            home: Some(HOME),
+            ..Default::default()
+        };
+        assert_eq!(resolved(candidates), (PathBuf::from("/discovery"), ModelsDirSource::Discovery));
     }
 
     #[test]
-    fn resolve_models_dir_empty_app_setting_falls_back_to_home() {
-        let dir = resolve_models_dir(None, Some(""), Some("/Users/someone")).unwrap();
-        assert_eq!(dir, PathBuf::from("/Users/someone/.ollama/models"));
+    fn blank_instance_override_falls_through_to_discovery_setting() {
+        let candidates = ModelsDirCandidates {
+            instance_override: Some("  "),
+            discovery_setting: Some("/discovery"),
+            home: Some(HOME),
+            ..Default::default()
+        };
+        assert_eq!(resolved(candidates), (PathBuf::from("/discovery"), ModelsDirSource::Discovery));
     }
 
     #[test]
-    fn resolve_models_dir_missing_app_setting_dir_falls_back_to_home() {
-        let dir = resolve_models_dir(None, Some("/no/such/dir/for/localbar/tests"), Some("/Users/someone")).unwrap();
-        assert_eq!(dir, PathBuf::from("/Users/someone/.ollama/models"));
+    fn empty_discovery_setting_means_auto_detect() {
+        let candidates = ModelsDirCandidates { discovery_setting: Some(""), home: Some(HOME), ..Default::default() };
+        assert_eq!(resolved(candidates), (PathBuf::from(HOME_MODELS), ModelsDirSource::Default));
+    }
+
+    #[test]
+    fn env_wins_over_app_setting_and_home() {
+        let tmp = TempDir::new().unwrap();
+        let app = existing_dir(&tmp, "app");
+        let candidates = ModelsDirCandidates { env_value: Some("/env"), app_setting: Some(&app), home: Some(HOME), ..Default::default() };
+        assert_eq!(resolved(candidates), (PathBuf::from("/env"), ModelsDirSource::Env));
+    }
+
+    #[test]
+    fn empty_env_falls_back_to_home() {
+        let candidates = ModelsDirCandidates { env_value: Some(""), home: Some(HOME), ..Default::default() };
+        assert_eq!(resolved(candidates), (PathBuf::from(HOME_MODELS), ModelsDirSource::Default));
+    }
+
+    #[test]
+    fn app_setting_wins_over_home() {
+        let tmp = TempDir::new().unwrap();
+        let app = existing_dir(&tmp, "app");
+        let candidates = ModelsDirCandidates { app_setting: Some(&app), home: Some(HOME), ..Default::default() };
+        assert_eq!(resolved(candidates), (PathBuf::from(&app), ModelsDirSource::OllamaApp));
+    }
+
+    #[test]
+    fn empty_app_setting_falls_back_to_home() {
+        let candidates = ModelsDirCandidates { app_setting: Some(""), home: Some(HOME), ..Default::default() };
+        assert_eq!(resolved(candidates), (PathBuf::from(HOME_MODELS), ModelsDirSource::Default));
+    }
+
+    #[test]
+    fn missing_app_setting_dir_falls_back_to_home() {
+        let candidates = ModelsDirCandidates {
+            app_setting: Some("/no/such/dir/for/localbar/tests"),
+            home: Some(HOME),
+            ..Default::default()
+        };
+        assert_eq!(resolved(candidates), (PathBuf::from(HOME_MODELS), ModelsDirSource::Default));
+    }
+
+    #[test]
+    fn no_sources_and_no_home_resolve_to_none() {
+        assert!(resolve_models_dir(&ModelsDirCandidates::default()).is_none());
+    }
+
+    #[test]
+    fn empty_home_resolves_to_none() {
+        assert!(resolve_models_dir(&ModelsDirCandidates { home: Some(""), ..Default::default() }).is_none());
+    }
+
+    #[test]
+    fn only_instance_and_discovery_sources_are_explicit() {
+        assert!(ModelsDirSource::Instance.is_explicit());
+        assert!(ModelsDirSource::Discovery.is_explicit());
+        assert!(!ModelsDirSource::Env.is_explicit());
+        assert!(!ModelsDirSource::OllamaApp.is_explicit());
+        assert!(!ModelsDirSource::Default.is_explicit());
+    }
+
+    #[test]
+    fn explicit_models_dir_ignores_env_app_and_home() {
+        let candidates = ModelsDirCandidates { env_value: Some("/env"), home: Some(HOME), ..Default::default() };
+        assert!(explicit_models_dir(&candidates).is_none());
+    }
+
+    fn launch_env_for(dir: Option<ResolvedModelsDir>) -> Vec<(String, String)> {
+        let config = ServerInstanceConfig::new("o", ServerType::Ollama, 11434, "/usr/local/bin/ollama");
+        OllamaDriver::new(dir).launch(&config, None, &ParamValues::default()).unwrap().environment
+    }
+
+    fn models_env(env: &[(String, String)]) -> Option<&str> {
+        env.iter().find(|(k, _)| k == OLLAMA_MODELS_ENV_VAR).map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn launch_passes_ollama_models_for_instance_override() {
+        let env = launch_env_for(Some(ResolvedModelsDir { path: "/instance".into(), source: ModelsDirSource::Instance }));
+        assert_eq!(models_env(&env), Some("/instance"));
+    }
+
+    #[test]
+    fn launch_passes_ollama_models_for_discovery_setting() {
+        let env = launch_env_for(Some(ResolvedModelsDir { path: "/discovery".into(), source: ModelsDirSource::Discovery }));
+        assert_eq!(models_env(&env), Some("/discovery"));
+    }
+
+    #[test]
+    fn launch_omits_ollama_models_for_auto_detected_dirs() {
+        for source in [ModelsDirSource::Env, ModelsDirSource::OllamaApp, ModelsDirSource::Default] {
+            let env = launch_env_for(Some(ResolvedModelsDir { path: "/auto".into(), source }));
+            assert_eq!(models_env(&env), None, "{source:?}");
+        }
+        assert_eq!(models_env(&launch_env_for(None)), None);
+    }
+
+    #[test]
+    fn launch_always_sets_ollama_host() {
+        let env = launch_env_for(None);
+        assert!(env.contains(&("OLLAMA_HOST".to_string(), "127.0.0.1:11434".to_string())), "{env:?}");
+    }
+
+    #[test]
+    fn http_listing_is_authoritative_when_server_answers() {
+        let tmp = TempDir::new().unwrap();
+        write_manifest(tmp.path(), "registry.ollama.ai", "library", "on-disk", "latest", SAMPLE_MANIFEST);
+        let served = vec![ModelRef { key: "served:1b".into(), display_name: "served:1b".into(), publisher: None, architecture: None, size_bytes: None, modified_secs: None }];
+        let models = list_models_with_fallback(|| Ok(served.clone()), Some(tmp.path())).unwrap();
+        assert_eq!(models, served);
+    }
+
+    #[test]
+    fn unreachable_server_falls_back_to_manifests() {
+        let tmp = TempDir::new().unwrap();
+        write_manifest(tmp.path(), "registry.ollama.ai", "library", "on-disk", "latest", SAMPLE_MANIFEST);
+        let models = list_models_with_fallback(|| Err("refused".into()), Some(tmp.path())).unwrap();
+        assert_eq!(models.iter().map(|m| m.key.as_str()).collect::<Vec<_>>(), vec!["on-disk:latest"]);
+    }
+
+    #[test]
+    fn unreachable_server_without_manifests_reports_unreachable_sentinel() {
+        let tmp = TempDir::new().unwrap();
+        assert_eq!(list_models_with_fallback(|| Err("refused".into()), Some(tmp.path())), Err(OLLAMA_UNREACHABLE.to_string()));
+        assert_eq!(list_models_with_fallback(|| Err("refused".into()), None), Err(OLLAMA_UNREACHABLE.to_string()));
     }
 
     #[test]
@@ -590,7 +788,7 @@ mod tests {
             "/Applications/Ollama.app/Contents/Resources/ollama serve",
             "/usr/local/bin/ollama serve",
         ] {
-            assert!(OllamaDriver.recognises_process(command_line), "{command_line}");
+            assert!(OllamaDriver::default().recognises_process(command_line), "{command_line}");
         }
     }
 
@@ -604,7 +802,7 @@ mod tests {
             "grep ollama serve",
             "",
         ] {
-            assert!(!OllamaDriver.recognises_process(command_line), "{command_line}");
+            assert!(!OllamaDriver::default().recognises_process(command_line), "{command_line}");
         }
     }
 

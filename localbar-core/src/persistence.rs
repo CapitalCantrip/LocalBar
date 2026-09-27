@@ -228,6 +228,19 @@ mod tests {
         let mut p = FilePersistence::new(dir.path().join("state.json"));
         let cfg = crate::types::DiscoveryConfig {
             mlx_lm_search_paths: vec!["/models".into()],
+            ..crate::types::DiscoveryConfig::default()
+        };
+        p.save_discovery_config(&cfg).unwrap();
+        assert_eq!(p.load_discovery_config().unwrap(), cfg);
+    }
+
+    #[test]
+    fn file_persistence_ollama_models_dir_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = FilePersistence::new(dir.path().join("state.json"));
+        let cfg = crate::types::DiscoveryConfig {
+            ollama_models_dir: Some("/Volumes/Models/Ollama".into()),
+            ..crate::types::DiscoveryConfig::default()
         };
         p.save_discovery_config(&cfg).unwrap();
         assert_eq!(p.load_discovery_config().unwrap(), cfg);
@@ -245,7 +258,7 @@ mod tests {
         let p = FilePersistence::new(path);
         assert_eq!(
             p.load_discovery_config().unwrap(),
-            crate::types::DiscoveryConfig { mlx_lm_search_paths: vec!["/models".into()] }
+            crate::types::DiscoveryConfig { mlx_lm_search_paths: vec!["/models".into()], ..crate::types::DiscoveryConfig::default() }
         );
     }
 
@@ -265,6 +278,7 @@ mod tests {
         p.save_instances(&[ollama_config()]).unwrap();
         p.save_discovery_config(&crate::types::DiscoveryConfig {
             mlx_lm_search_paths: vec!["/x".into()],
+            ..crate::types::DiscoveryConfig::default()
         }).unwrap();
         assert_eq!(p.load_instances().unwrap().len(), 1);
     }
@@ -274,6 +288,7 @@ mod tests {
         let mut p = InMemoryPersistence::default();
         let cfg = crate::types::DiscoveryConfig {
             mlx_lm_search_paths: vec!["/tmp/models".into()],
+            ..crate::types::DiscoveryConfig::default()
         };
         p.save_discovery_config(&cfg).unwrap();
         assert_eq!(p.load_discovery_config().unwrap(), cfg);
@@ -319,7 +334,7 @@ mod tests {
     fn file_persistence_save_app_settings_preserves_discovery() {
         let dir = tempfile::tempdir().unwrap();
         let mut p = FilePersistence::new(dir.path().join("state.json"));
-        let cfg = crate::types::DiscoveryConfig { mlx_lm_search_paths: vec!["/x".into()] };
+        let cfg = crate::types::DiscoveryConfig { mlx_lm_search_paths: vec!["/x".into()], ..crate::types::DiscoveryConfig::default() };
         p.save_discovery_config(&cfg).unwrap();
         p.save_app_settings(&AppSettings { keep_servers_running_on_quit: true, ..AppSettings::default() }).unwrap();
         assert_eq!(p.load_discovery_config().unwrap(), cfg);

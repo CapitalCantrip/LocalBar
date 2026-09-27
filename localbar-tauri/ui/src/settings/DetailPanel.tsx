@@ -145,9 +145,6 @@ export function DetailPanel({ instance, phase, pid, onRefresh }: {
           </div>
           {modelsOpen && (
             <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {instance.server_type === 'mlx-lm' && (
-                <ModelPathOverrideField instance={instance} onRefresh={onRefresh} />
-              )}
               <ModelList
                 instance={instance}
                 phase={phase}
@@ -160,6 +157,9 @@ export function DetailPanel({ instance, phase, pid, onRefresh }: {
             </div>
           )}
         </div>
+        {(instance.server_type === 'mlx-lm' || instance.server_type === 'ollama') && (
+          <ModelPathOverrideField instance={instance} onRefresh={() => { onRefresh(); refreshModels() }} />
+        )}
         <div style={s.field}>
           <span style={s.fieldLabel}>Server type</span>
           <span style={s.fieldValue}>{instance.server_type}</span>

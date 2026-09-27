@@ -6,8 +6,9 @@ import type { ServerTypeOption } from './AddInstanceSheet'
 
 export const PICKER_TYPES: ServerTypeOption[] = ['mlx-lm', 'ollama']
 
-export function AddModelPicker({ serverType, selectedModelKey, onSelect }: {
+export function AddModelPicker({ serverType, modelFolder, selectedModelKey, onSelect }: {
   serverType: ServerTypeOption
+  modelFolder: string | null
   selectedModelKey: string | null
   onSelect: (key: string | null) => void
 }) {
@@ -28,7 +29,7 @@ export function AddModelPicker({ serverType, selectedModelKey, onSelect }: {
     setScanError(null)
     setOllamaUnreachable(false)
     setFreeText('')
-    ipc.listModelsForType(serverType)
+    ipc.listModelsForType(serverType, modelFolder)
       .then(list => { if (seq === scanRef.current) { setModels(list); setLoading(false) } })
       .catch(e => {
         if (seq !== scanRef.current) return
@@ -39,7 +40,7 @@ export function AddModelPicker({ serverType, selectedModelKey, onSelect }: {
         }
         setLoading(false)
       })
-  }, [serverType])
+  }, [serverType, modelFolder])
 
   if (!PICKER_TYPES.includes(serverType)) return null
 
@@ -74,9 +75,11 @@ export function AddModelPicker({ serverType, selectedModelKey, onSelect }: {
     <div style={s.sheetModelField}>
       <span style={s.fieldLabel}>Model</span>
       <span style={{ ...s.fieldValue, color: '#aaa', fontSize: 11 }}>
-        {serverType === 'mlx-lm'
-          ? 'No models found — configure model paths in Settings → Discovery.'
-          : 'No models found'}
+        {modelFolder
+          ? 'No models found in this folder'
+          : serverType === 'mlx-lm'
+            ? 'No models found — configure model paths in Settings → Discovery.'
+            : 'No models found'}
       </span>
     </div>
   )
