@@ -306,6 +306,36 @@ pub fn poll_adopted(reg: &mut InstanceRegistry, id: Uuid, health: bool) -> Vec<L
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopKill {
+    SpawnedChild,
+    AdoptedPid,
+    Nothing,
+}
+
+pub fn stop_outcome(kill: StopKill, port: u16, port_still_open: bool) -> Result<(), String> {
+    match (kill, port_still_open) {
+        (StopKill::Nothing, true) => Err(format!(
+            "LocalBar didn't start this server, so it wasn't stopped. It is still listening on port {port}."
+        )),
+        _ => Ok(()),
+    }
+}
+
+pub fn adopted_poll_continues(phase: Option<&InstancePhase>) -> bool {
+    match phase {
+        Some(InstancePhase::Running) => true,
+        Some(InstancePhase::Error(e)) => e.kind != InstanceErrorKind::StopFailed,
+        _ => false,
+    }
+}
+
+pub fn adopt_health_warning(health: HealthStatus, port: u16) -> Option<String> {
+    (health != HealthStatus::Healthy).then(|| format!(
+        "The process on port {port} doesn't answer as an LLM server. It was adopted anyway, but will likely show as unreachable."
+    ))
+}
+
 fn phase_events(reg: &mut InstanceRegistry, id: Uuid, phase: InstancePhase) -> Vec<LifecycleEvent> {
     reg.set_phase(id, phase.clone()).ok();
     vec![LifecycleEvent::PhaseChanged(id, phase)]
@@ -366,8 +396,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        adopt, displayed_pid, finish_warm_load, poll_adopted, poll_once, start, stop, switch_model, InstancePid,
-        LifecycleEvent, Listener, PollContext, PollOutcome, SwitchPlan,
+        adopt, adopt_health_warning, adopted_poll_continues, displayed_pid, finish_warm_load, poll_adopted,
+        poll_once, start, stop, stop_outcome, switch_model, InstancePid, LifecycleEvent, Listener, PollContext,
+        PollOutcome, StopKill, SwitchPlan,
     };
 
     fn make_registry() -> InstanceRegistry {
@@ -968,5 +999,58 @@ mod tests {
     #[test]
     fn displayed_pid_none_when_nothing_known() {
         assert_eq!(displayed_pid(None, None, None), None);
+    }
+
+    #[test]
+    fn stop_of_spawned_child_succeeds_even_if_port_still_open() {
+        assert_eq!(stop_outcome(StopKill::SpawnedChild, 8090, true), Ok(()));
+    }
+
+    #[test]
+    fn stop_of_killable_adopted_pid_succeeds_even_if_port_still_open() {
+        assert_eq!(stop_outcome(StopKill::AdoptedPid, 8090, true), Ok(()));
+    }
+
+    #[test]
+    fn stop_without_kill_reports_server_still_listening_when_port_open() {
+        let err = stop_outcome(StopKill::Nothing, 8090, true).unwrap_err();
+        assert!(err.contains("wasn't stopped"));
+        assert!(err.contains("8090"));
+    }
+
+    #[test]
+    fn stop_without_kill_succeeds_when_port_closed() {
+        assert_eq!(stop_outcome(StopKill::Nothing, 8090, false), Ok(()));
+    }
+
+    #[test]
+    fn adopted_poll_stops_after_a_failed_stop() {
+        let phase = InstancePhase::Error(crate::types::InstanceError {
+            kind: crate::types::InstanceErrorKind::StopFailed,
+            message: "still listening".into(),
+        });
+        assert!(!adopted_poll_continues(Some(&phase)));
+    }
+
+    #[test]
+    fn adopted_poll_continues_while_running_or_unreachable() {
+        let unreachable = InstancePhase::Error(crate::types::InstanceError {
+            kind: crate::types::InstanceErrorKind::HealthCheckFailed,
+            message: "server is no longer reachable".into(),
+        });
+        assert!(adopted_poll_continues(Some(&InstancePhase::Running)));
+        assert!(adopted_poll_continues(Some(&unreachable)));
+        assert!(!adopted_poll_continues(Some(&InstancePhase::Stopped)));
+    }
+
+    #[test]
+    fn adopting_a_non_llm_server_warns() {
+        let warning = adopt_health_warning(crate::driver::HealthStatus::Unhealthy("404".into()), 8090).unwrap();
+        assert!(warning.contains("8090"));
+    }
+
+    #[test]
+    fn adopting_a_healthy_server_does_not_warn() {
+        assert_eq!(adopt_health_warning(crate::driver::HealthStatus::Healthy, 8090), None);
     }
 }

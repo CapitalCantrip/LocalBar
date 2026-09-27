@@ -49,8 +49,9 @@ export function DetailPanel({ instance, phase, pid, onRefresh }: {
   }
 
   const handleAdopt = async () => {
-    await ipc.adoptAsExternalInstance(instance.id)
+    const { warning } = await ipc.adoptAsExternalInstance(instance.id)
     onRefresh()
+    if (warning) window.alert(warning)
   }
 
   const handleRemove = async () => {

@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
-import type { AppSettings, CanonicalParam, DiscoveredModel, DiscoveryConfig, InstancePhase, InstancePidDto, ModelMetadata, ModelRef, ParamValues, ServerInstanceConfig } from './types'
+import type { AdoptResultDto, AppSettings, CanonicalParam, DiscoveredModel, DiscoveryConfig, InstancePhase, InstancePidDto, ModelMetadata, ModelRef, ParamValues, ServerInstanceConfig } from './types'
 
 export async function pickPath(options: { directory: boolean }): Promise<string | null> {
   const result = await open({ directory: options.directory, multiple: false })
@@ -33,7 +33,7 @@ export const ipc = {
   removeInstance: (id: string): Promise<void> =>
     invoke('remove_instance', { id }),
 
-  adoptAsExternalInstance: (conflictingId: string): Promise<string> =>
+  adoptAsExternalInstance: (conflictingId: string): Promise<AdoptResultDto> =>
     invoke('adopt_as_external_instance', { conflictingId }),
 
   getStartWarning: (id: string): Promise<string | null> =>

@@ -42,3 +42,8 @@ Three responses were considered:
 - `portOccupant()` is currently a stub (always nil). A proper implementation using `lsof` would let us detect port conflicts before spawning and give a better error message.
 - Process ownership is now ambiguous: LocalBar can stop an adopted server, but it did not start it — launchd may restart it automatically. This is surfaced in the UI implicitly (the instance will transition back to Running after the next health poll cycle), but no explicit "managed by launchd" label exists yet.
 - In the Rust driver layer (`localbar-core/src/drivers/external.rs`), `ExternalDriver::launch` and `ExternalDriver::stop` are deliberate no-ops that return an empty plan; phase is derived entirely from `health_check`, which reports Healthy on a 200 from `/v1/models` or `/health` and Unhealthy/Unreachable otherwise.
+
+## Addendum (#75): Stop and Adopt feedback for External instances
+
+- Stop on an External instance, or an adopted one with no killable PID, decides by whether the port is still open, not by health (`lifecycle::stop_outcome`). If nothing was killed and the port is still open, the instance goes to `Error(StopFailed)` with "LocalBar didn't start this server, so it wasn't stopped. It is still listening on port N." Showing Stopped would misreport a live listener. The adopted health poll ends on a `StopFailed` error (`lifecycle::adopted_poll_continues`), so the message stays until the user acts. Start re-adopts the server if it answers as healthy.
+- Adopt as External runs one health check. If it isn't Healthy, the adoption goes ahead and `adopt_as_external_instance` returns a warning (`AdoptResultDto.warning`) that the UI shows.
