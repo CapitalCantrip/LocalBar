@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::types::{DiscoveryConfig, ModelMemory, ModelMemoryKey, NamedProfile, ServerInstanceConfig};
+use crate::types::{AppSettings, DiscoveryConfig, ModelMemory, ModelMemoryKey, NamedProfile, ServerInstanceConfig};
 
 pub trait Persistence: Send + Sync {
     fn save_instances(&mut self, configs: &[ServerInstanceConfig]) -> Result<(), String>;
@@ -12,6 +12,8 @@ pub trait Persistence: Send + Sync {
     fn upsert_model_memory(&mut self, entry: ModelMemory) -> Result<(), String>;
     fn save_discovery_config(&mut self, config: &DiscoveryConfig) -> Result<(), String>;
     fn load_discovery_config(&self) -> Result<DiscoveryConfig, String>;
+    fn save_app_settings(&mut self, settings: &AppSettings) -> Result<(), String>;
+    fn load_app_settings(&self) -> Result<AppSettings, String>;
 }
 
 #[derive(Debug, Default)]
@@ -20,6 +22,7 @@ pub struct InMemoryPersistence {
     profiles: Vec<NamedProfile>,
     model_memory: HashMap<ModelMemoryKey, ModelMemory>,
     discovery_config: DiscoveryConfig,
+    app_settings: AppSettings,
 }
 
 impl Persistence for InMemoryPersistence {
@@ -58,6 +61,15 @@ impl Persistence for InMemoryPersistence {
     fn load_discovery_config(&self) -> Result<DiscoveryConfig, String> {
         Ok(self.discovery_config.clone())
     }
+
+    fn save_app_settings(&mut self, settings: &AppSettings) -> Result<(), String> {
+        self.app_settings = settings.clone();
+        Ok(())
+    }
+
+    fn load_app_settings(&self) -> Result<AppSettings, String> {
+        Ok(self.app_settings.clone())
+    }
 }
 
 pub struct FilePersistence {
@@ -74,6 +86,8 @@ struct StorageFile {
     model_memory: HashMap<ModelMemoryKey, ModelMemory>,
     #[serde(default)]
     discovery: DiscoveryConfig,
+    #[serde(default)]
+    settings: AppSettings,
 }
 
 impl FilePersistence {
@@ -138,6 +152,16 @@ impl Persistence for FilePersistence {
 
     fn load_discovery_config(&self) -> Result<DiscoveryConfig, String> {
         Ok(self.read()?.discovery)
+    }
+
+    fn save_app_settings(&mut self, settings: &AppSettings) -> Result<(), String> {
+        let mut file = self.read()?;
+        file.settings = settings.clone();
+        self.write(&file)
+    }
+
+    fn load_app_settings(&self) -> Result<AppSettings, String> {
+        Ok(self.read()?.settings)
     }
 }
 
@@ -239,6 +263,39 @@ mod tests {
             ollama_executable_path: None,
         };
         p.save_discovery_config(&cfg).unwrap();
+        assert_eq!(p.load_discovery_config().unwrap(), cfg);
+    }
+
+    #[test]
+    fn file_persistence_app_settings_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = FilePersistence::new(dir.path().join("state.json"));
+        let settings = AppSettings { keep_servers_running_on_quit: true };
+        p.save_app_settings(&settings).unwrap();
+        assert_eq!(p.load_app_settings().unwrap(), settings);
+    }
+
+    #[test]
+    fn file_persistence_missing_settings_key_gives_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, r#"{"instances":[],"discovery":{}}"#).unwrap();
+        let p = FilePersistence::new(path);
+        assert_eq!(p.load_app_settings().unwrap(), AppSettings::default());
+    }
+
+    #[test]
+    fn app_settings_default_stops_servers_on_quit() {
+        assert!(!AppSettings::default().keep_servers_running_on_quit);
+    }
+
+    #[test]
+    fn file_persistence_save_app_settings_preserves_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = FilePersistence::new(dir.path().join("state.json"));
+        let cfg = crate::types::DiscoveryConfig { mlx_lm_search_paths: vec!["/x".into()], ollama_executable_path: None };
+        p.save_discovery_config(&cfg).unwrap();
+        p.save_app_settings(&AppSettings { keep_servers_running_on_quit: true }).unwrap();
         assert_eq!(p.load_discovery_config().unwrap(), cfg);
     }
 }

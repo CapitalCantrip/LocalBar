@@ -160,6 +160,14 @@ pub struct DiscoveryConfig {
     pub ollama_executable_path: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct AppSettings {
+    #[serde(default)]
+    pub keep_servers_running_on_quit: bool,
+}
+
 impl DiscoveryConfig {
     pub fn resolved_mlx_paths(&self, override_path: Option<&str>) -> Vec<String> {
         match override_path {

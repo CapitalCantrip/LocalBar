@@ -7,6 +7,7 @@ pub mod lifecycle;
 pub mod model_probe;
 pub mod net;
 pub mod persistence;
+pub mod quit;
 pub mod registry;
 pub mod testing;
 pub mod types;
@@ -175,6 +176,12 @@ mod tests {
         }
         fn load_discovery_config(&self) -> Result<crate::types::DiscoveryConfig, String> {
             self.0.lock().unwrap().load_discovery_config()
+        }
+        fn save_app_settings(&mut self, settings: &crate::types::AppSettings) -> Result<(), String> {
+            self.0.lock().unwrap().save_app_settings(settings)
+        }
+        fn load_app_settings(&self) -> Result<crate::types::AppSettings, String> {
+            self.0.lock().unwrap().load_app_settings()
         }
     }
 

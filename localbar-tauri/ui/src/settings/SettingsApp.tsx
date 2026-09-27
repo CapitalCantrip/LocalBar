@@ -6,8 +6,9 @@ import { s } from './styles'
 import { AddInstanceSheet } from './AddInstanceSheet'
 import { DetailPanel } from './DetailPanel'
 import { DiscoveryTab } from './DiscoveryTab'
+import { GeneralTab } from './GeneralTab'
 
-type SettingsTab = 'servers' | 'discovery'
+type SettingsTab = 'servers' | 'discovery' | 'general'
 
 function ignoreModelSelectionFailure() {}
 
@@ -38,8 +39,11 @@ export default function SettingsApp() {
       <div style={s.toolbar}>
         <button style={s.tabBtn(activeTab === 'servers')} onClick={() => setActiveTab('servers')}>Servers</button>
         <button style={s.tabBtn(activeTab === 'discovery')} onClick={() => setActiveTab('discovery')}>Discovery</button>
+        <button style={s.tabBtn(activeTab === 'general')} onClick={() => setActiveTab('general')}>General</button>
       </div>
-      {activeTab === 'discovery' ? (
+      {activeTab === 'general' ? (
+        <GeneralTab />
+      ) : activeTab === 'discovery' ? (
         <DiscoveryTab />
       ) : (
         <div style={s.body}>
