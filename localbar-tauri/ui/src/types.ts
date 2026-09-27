@@ -9,9 +9,12 @@ export type { DiscoveryConfig } from './generated/DiscoveryConfig'
 export type { AppSettings } from './generated/AppSettings'
 export type { DiscoveredModel } from './generated/DiscoveredModel'
 export type { ErrorKindDto } from './generated/ErrorKindDto'
+export type { InstancePidDto } from './generated/InstancePidDto'
 
 import type { InstancePhaseDto as InstancePhase } from './generated/InstancePhaseDto'
 export type { InstancePhase }
+
+import type { InstancePidDto } from './generated/InstancePidDto'
 
 export function phaseLabel(phase: InstancePhase | undefined): string {
   if (!phase) return 'Unknown'
@@ -40,4 +43,11 @@ export function phaseColor(phase: InstancePhase | undefined): string {
 export function isActive(phase: InstancePhase | undefined): boolean {
   if (!phase) return false
   return phase.type === 'running' || phase.type === 'starting' || phase.type === 'switchingModel'
+}
+
+const UNKNOWN_PID_LABEL = '—'
+
+export function pidLabel(pid: InstancePidDto | null | undefined): string {
+  if (!pid) return UNKNOWN_PID_LABEL
+  return pid.adopted ? `${pid.pid} (adopted)` : `${pid.pid}`
 }

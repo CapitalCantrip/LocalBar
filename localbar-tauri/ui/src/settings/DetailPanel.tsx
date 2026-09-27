@@ -2,10 +2,12 @@ import { useState } from 'react'
 import { ipc } from '../ipc'
 import {
   type InstancePhase,
+  type InstancePidDto,
   type ServerInstanceConfig,
   isActive,
   phaseColor,
   phaseLabel,
+  pidLabel,
 } from '../types'
 import { startWithWarnings } from '../startWithWarnings'
 import { s } from './styles'
@@ -14,13 +16,15 @@ import { ModelPathOverrideField } from './ModelPathOverrideField'
 import { ModelList } from './ModelList'
 import { ParamEditor } from './ParamEditor'
 
-export function DetailPanel({ instance, phase, onRefresh }: {
+export function DetailPanel({ instance, phase, pid, onRefresh }: {
   instance: ServerInstanceConfig
   phase: InstancePhase | undefined
+  pid: InstancePidDto | null | undefined
   onRefresh: () => void
 }) {
   const active = isActive(phase)
   const transitioning = phase?.type === 'starting' || phase?.type === 'stopping'
+  const showPid = phase?.type === 'running' || phase?.type === 'switchingModel'
   const isPortConflict = phase?.type === 'error' && phase.kind.kind === 'portConflict'
   const [confirmingRemove, setConfirmingRemove] = useState(false)
   const [modelsOpen, setModelsOpen] = useState(false)
@@ -113,6 +117,12 @@ export function DetailPanel({ instance, phase, onRefresh }: {
           <span style={s.fieldLabel}>Endpoint</span>
           <span style={{ ...s.fieldValue, fontSize: 11, color: '#555', fontFamily: 'monospace' }}>{endpoint}</span>
         </div>
+        {showPid && (
+          <div style={s.field}>
+            <span style={s.fieldLabel}>PID</span>
+            <span style={{ ...s.fieldValue, fontSize: 11, color: '#555', fontFamily: 'monospace' }}>{pidLabel(pid)}</span>
+          </div>
+        )}
         <div style={s.field}>
           <span style={s.fieldLabel}>Model</span>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>

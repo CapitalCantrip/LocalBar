@@ -35,6 +35,19 @@ pub enum PollOutcome {
     Done,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstancePid {
+    pub pid: u32,
+    pub adopted: bool,
+}
+
+pub fn displayed_pid(spawned: Option<u32>, adopted: Option<u32>, listener: Option<u32>) -> Option<InstancePid> {
+    if let Some(pid) = adopted {
+        return Some(InstancePid { pid, adopted: true });
+    }
+    spawned.map(|child_pid| InstancePid { pid: listener.unwrap_or(child_pid), adopted: false })
+}
+
 pub fn start(
     reg: &mut InstanceRegistry,
     id: Uuid,
@@ -353,8 +366,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        adopt, finish_warm_load, poll_adopted, poll_once, start, stop, switch_model, LifecycleEvent, Listener,
-        PollContext, PollOutcome, SwitchPlan,
+        adopt, displayed_pid, finish_warm_load, poll_adopted, poll_once, start, stop, switch_model, InstancePid,
+        LifecycleEvent, Listener, PollContext, PollOutcome, SwitchPlan,
     };
 
     fn make_registry() -> InstanceRegistry {
@@ -932,5 +945,28 @@ mod tests {
         let t = reg.consume_start_time(id);
         assert!(t.is_some(), "should have instant after record");
         assert!(reg.consume_start_time(id).is_none(), "consumed once means gone");
+    }
+
+    #[test]
+    fn displayed_pid_adopted_wins_over_spawned_and_listener() {
+        let result = displayed_pid(Some(111), Some(222), Some(333));
+        assert_eq!(result, Some(InstancePid { pid: 222, adopted: true }));
+    }
+
+    #[test]
+    fn displayed_pid_prefers_listener_over_spawned_child() {
+        let result = displayed_pid(Some(111), None, Some(333));
+        assert_eq!(result, Some(InstancePid { pid: 333, adopted: false }));
+    }
+
+    #[test]
+    fn displayed_pid_falls_back_to_spawned_child_without_listener() {
+        let result = displayed_pid(Some(111), None, None);
+        assert_eq!(result, Some(InstancePid { pid: 111, adopted: false }));
+    }
+
+    #[test]
+    fn displayed_pid_none_when_nothing_known() {
+        assert_eq!(displayed_pid(None, None, None), None);
     }
 }

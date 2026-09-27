@@ -14,7 +14,7 @@ use localbar_core::driver::{HealthStatus, ModelMetadata, ServerDriver};
 use localbar_core::drivers::external::ExternalDriver;
 use localbar_core::drivers::mlx_lm::MLXLMDriver;
 use localbar_core::drivers::ollama::{self, OllamaDriver};
-use localbar_core::lifecycle::{self, LifecycleEvent, PollContext, PollOutcome, SwitchPlan};
+use localbar_core::lifecycle::{self, displayed_pid, LifecycleEvent, PollContext, PollOutcome, SwitchPlan};
 use localbar_core::persistence::FilePersistence;
 use localbar_core::quit::{ids_to_stop_on_quit, quit_shutdown_budget_secs, QuitCandidate};
 use localbar_core::registry::InstanceRegistry;
@@ -48,6 +48,15 @@ pub enum InstancePhaseDto {
     Stopping,
     SwitchingModel,
     Error { kind: ErrorKindDto, message: String },
+}
+
+#[derive(serde::Serialize, Clone, Copy)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[serde(rename_all = "camelCase")]
+pub struct InstancePidDto {
+    pub pid: u32,
+    pub adopted: bool,
 }
 
 pub struct AppState {
@@ -117,6 +126,10 @@ fn phase_to_dto(phase: &InstancePhase) -> InstancePhaseDto {
             message: e.message.clone(),
         },
     }
+}
+
+fn instance_pid_to_dto(pid: lifecycle::InstancePid) -> InstancePidDto {
+    InstancePidDto { pid: pid.pid, adopted: pid.adopted }
 }
 
 fn spawn_from_plan(plan: &localbar_core::driver::LaunchPlan) -> Result<Child, String> {
@@ -486,6 +499,46 @@ fn list_instance_phases(state: State<'_, AppState>) -> HashMap<String, InstanceP
     reg.all_configs()
         .filter_map(|c| reg.get_phase(c.id).map(|p| (c.id.to_string(), phase_to_dto(p))))
         .collect()
+}
+
+struct PidLookup {
+    port: u16,
+    external: bool,
+    spawned: Option<u32>,
+    adopted: Option<u32>,
+    probe_listener: bool,
+}
+
+fn pid_lookup(state: &AppState, id: Uuid) -> Option<PidLookup> {
+    let reg = state.registry.lock().unwrap();
+    let config = reg.get_config(id)?;
+    let external = config.server_type == ServerType::External;
+    let port = config.port;
+    let probe_listener = matches!(
+        reg.get_phase(id),
+        Some(InstancePhase::Running) | Some(InstancePhase::SwitchingModel)
+    );
+    let adopted = reg.get_adopted_pid(id);
+    drop(reg);
+    let spawned = state.processes.lock().unwrap().get(&id).map(Child::id);
+    Some(PidLookup { port, external, spawned, adopted, probe_listener })
+}
+
+#[tauri::command]
+async fn get_instance_pid(state: State<'_, AppState>, id: String) -> Result<Option<InstancePidDto>, String> {
+    let uuid = parse_uuid(&id)?;
+    let Some(ctx) = pid_lookup(&state, uuid) else { return Ok(None) };
+    if ctx.external {
+        return Ok(None);
+    }
+    let listener = if ctx.probe_listener {
+        tauri::async_runtime::spawn_blocking(move || find_listening_pid(ctx.port))
+            .await
+            .unwrap_or(None)
+    } else {
+        None
+    };
+    Ok(displayed_pid(ctx.spawned, ctx.adopted, listener).map(instance_pid_to_dto))
 }
 
 #[tauri::command]
@@ -1351,7 +1404,7 @@ pub fn run() {
         .setup(setup_handler)
         .invoke_handler(tauri::generate_handler![
             list_instances, list_instance_phases, add_instance, remove_instance,
-            get_start_warning, check_memory_warning, start_instance, stop_instance,
+            get_start_warning, get_instance_pid, check_memory_warning, start_instance, stop_instance,
             set_start_on_launch, rename_instance, set_instance_port, set_selected_model,
             switch_model_cmd, update_instance_params, set_active_profile_cmd,
             list_models_cmd, list_models_for_type, fetch_model_metadata_cmd, get_resolved_params, get_param_schema,

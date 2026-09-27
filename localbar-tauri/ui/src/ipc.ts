@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
-import type { AppSettings, CanonicalParam, DiscoveredModel, DiscoveryConfig, InstancePhase, ModelMetadata, ModelRef, ParamValues, ServerInstanceConfig } from './types'
+import type { AppSettings, CanonicalParam, DiscoveredModel, DiscoveryConfig, InstancePhase, InstancePidDto, ModelMetadata, ModelRef, ParamValues, ServerInstanceConfig } from './types'
 
 export async function pickPath(options: { directory: boolean }): Promise<string | null> {
   const result = await open({ directory: options.directory, multiple: false })
@@ -38,6 +38,9 @@ export const ipc = {
 
   getStartWarning: (id: string): Promise<string | null> =>
     invoke('get_start_warning', { id }),
+
+  getInstancePid: (id: string): Promise<InstancePidDto | null> =>
+    invoke('get_instance_pid', { id }),
 
   checkMemoryWarning: (id: string): Promise<string | null> =>
     invoke('check_memory_warning', { id }),
