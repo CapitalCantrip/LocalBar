@@ -2,10 +2,12 @@ import { useState } from 'react'
 import { ipc } from '../ipc'
 import {
   type InstancePhase,
+  type InstancePidDto,
   type ServerInstanceConfig,
   isActive,
   phaseColor,
   phaseLabel,
+  pidLabel,
 } from '../types'
 import { useInstances } from '../useInstances'
 import { startWithWarnings } from '../startWithWarnings'
@@ -82,9 +84,10 @@ function ConfirmDialog({ message, onConfirm, onCancel }: {
   )
 }
 
-function InstanceRow({ instance, phase, onStart, onStop, onAdopt }: {
+function InstanceRow({ instance, phase, pid, onStart, onStop, onAdopt }: {
   instance: ServerInstanceConfig
   phase: InstancePhase | undefined
+  pid: InstancePidDto | null | undefined
   onStart: () => void
   onStop: () => void
   onAdopt: () => void
@@ -92,10 +95,12 @@ function InstanceRow({ instance, phase, onStart, onStop, onAdopt }: {
   const active = isActive(phase)
   const transitioning = phase?.type === 'starting' || phase?.type === 'stopping'
   const isPortConflict = phase?.type === 'error' && phase.kind.kind === 'portConflict'
+  const showPid = phase?.type === 'running' || phase?.type === 'switchingModel'
+  const rowTitle = showPid ? `${instance.name} — PID ${pidLabel(pid)}` : instance.name
   return (
-    <div style={s.row}>
+    <div style={s.row} title={rowTitle}>
       <div style={s.dot(phaseColor(phase))} title={phaseLabel(phase)} />
-      <span style={s.name} title={instance.name}>{instance.name}</span>
+      <span style={s.name}>{instance.name}</span>
       <span style={s.label}>{phaseLabel(phase)}</span>
       {active && !transitioning && (
         <button style={s.btn()} onClick={onStop}>Stop</button>
@@ -111,7 +116,7 @@ function InstanceRow({ instance, phase, onStart, onStop, onAdopt }: {
 }
 
 export default function PopoverApp() {
-  const { instances, phases, refresh } = useInstances()
+  const { instances, phases, pids, refresh } = useInstances()
   const [confirm, setConfirm] = useState<{ id: string; msg: string; resolve: (v: boolean) => void } | null>(null)
 
   const promptWarning = (id: string, msg: string): Promise<boolean> =>
@@ -155,6 +160,7 @@ export default function PopoverApp() {
               key={inst.id}
               instance={inst}
               phase={phases[inst.id]}
+              pid={pids[inst.id]}
               onStart={() => handleStart(inst.id)}
               onStop={() => handleStop(inst.id)}
               onAdopt={() => handleAdopt(inst.id)}

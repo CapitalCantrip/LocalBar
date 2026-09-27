@@ -16,7 +16,7 @@ export default function SettingsApp() {
   const [activeTab, setActiveTab] = useState<SettingsTab>('servers')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const clearSelected = useCallback(() => setSelectedId(null), [])
-  const { instances, phases, refresh } = useInstances(clearSelected)
+  const { instances, phases, pids, refresh } = useInstances(clearSelected)
   const [showAddSheet, setShowAddSheet] = useState(false)
 
   const handleAdd = async (name: string, serverType: string, port: number, execPath: string, selectedModelKey: string | null) => {
@@ -72,7 +72,7 @@ export default function SettingsApp() {
           </div>
           <div style={s.detailPane}>
             {selected ? (
-              <DetailPanel instance={selected} phase={phases[selected.id]} onRefresh={refresh} />
+              <DetailPanel instance={selected} phase={phases[selected.id]} pid={pids[selected.id]} onRefresh={refresh} />
             ) : (
               <p style={s.placeholder}>Select a server to configure it</p>
             )}
