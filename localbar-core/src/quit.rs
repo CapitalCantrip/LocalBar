@@ -42,6 +42,17 @@ pub fn ids_to_start_on_launch(
         .collect()
 }
 
+pub fn ids_to_forget_reconnect_on_launch(
+    configs: &[ServerInstanceConfig],
+    settings: &AppSettings,
+) -> Vec<Uuid> {
+    configs
+        .iter()
+        .filter(|c| c.was_running_when_quit && !should_start_on_launch(c, settings))
+        .map(|c| c.id)
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitSignal {
     Requested,
@@ -163,6 +174,19 @@ mod tests {
         let c = launch_config(false, true);
         let settings = AppSettings { restore_running_servers_on_launch: false, ..AppSettings::default() };
         assert!(!should_start_on_launch(&c, &settings));
+    }
+
+    #[test]
+    fn unrestored_reconnect_flag_is_forgotten_so_a_later_restore_does_not_revive_it() {
+        let c = launch_config(false, true);
+        let settings = AppSettings { restore_running_servers_on_launch: false, ..AppSettings::default() };
+        assert_eq!(ids_to_forget_reconnect_on_launch(std::slice::from_ref(&c), &settings), vec![c.id]);
+    }
+
+    #[test]
+    fn restored_reconnect_flag_is_kept_until_stop() {
+        let c = launch_config(false, true);
+        assert!(ids_to_forget_reconnect_on_launch(&[c], &AppSettings::default()).is_empty());
     }
 
     #[test]
