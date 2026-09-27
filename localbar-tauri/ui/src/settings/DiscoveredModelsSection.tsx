@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ipc } from '../ipc'
 import { type DiscoveredModel } from '../types'
+import { formatModelKey } from '../modelLabel'
 import { s } from './styles'
 
 function fmtBytes(b: number | null): string {
@@ -19,7 +20,7 @@ function fmtDate(secs: number | null): string {
 
 function hfLink(m: DiscoveredModel): { href: string; label: string } {
   if (m.server_type === 'mlx-lm') {
-    const slug = m.publisher ? `${m.publisher}/${m.display_name}` : m.key.split('/').slice(-2).join('/')
+    const slug = m.publisher ? `${m.publisher}/${m.display_name}` : formatModelKey(m.key)
     return { href: `https://huggingface.co/${slug}`, label: 'HuggingFace ↗' }
   }
   const name = m.key.split(':')[0]

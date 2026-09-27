@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ipc } from '../ipc'
 import {
   type InstancePhase,
@@ -9,42 +9,26 @@ import {
 } from '../types'
 import { s } from './styles'
 
-export function ModelList({ instance, phase, onRefresh }: {
+export function ModelList({ instance, phase, models, loading, error, onRefetch, onRefresh }: {
   instance: ServerInstanceConfig
   phase: InstancePhase | undefined
+  models: ModelRef[]
+  loading: boolean
+  error: string | null
+  onRefetch: () => Promise<void>
   onRefresh: () => void
 }) {
-  const [models, setModels] = useState<ModelRef[]>([])
   const [metaMap, setMetaMap] = useState<Record<string, ModelMetadata | null>>({})
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
   const fetchRef = useRef(0)
 
-  const fetchModels = useCallback(async () => {
+  useEffect(() => {
     const seq = ++fetchRef.current
-    setLoading(true)
-    setError(null)
-    try {
-      const list = await ipc.listModels(instance.id)
+    models.forEach(async m => {
+      const meta = await ipc.fetchModelMetadata(instance.id, m.key).catch(() => null)
       if (seq !== fetchRef.current) return
-      setModels(list)
-
-      const prefetchModelMetadata = () => {
-        list.forEach(async m => {
-          const meta = await ipc.fetchModelMetadata(instance.id, m.key).catch(() => null)
-          if (seq !== fetchRef.current) return
-          setMetaMap(prev => ({ ...prev, [m.key]: meta }))
-        })
-      }
-      prefetchModelMetadata()
-    } catch (e) {
-      if (seq === fetchRef.current) setError(String(e))
-    } finally {
-      if (seq === fetchRef.current) setLoading(false)
-    }
-  }, [instance.id])
-
-  useEffect(() => { fetchModels() }, [fetchModels])
+      setMetaMap(prev => ({ ...prev, [m.key]: meta }))
+    })
+  }, [instance.id, models])
 
   const handleSelect = async (key: string) => {
     if (key === instance.selected_model_key) return
@@ -80,7 +64,7 @@ export function ModelList({ instance, phase, onRefresh }: {
         {!loading && (
           <button
             style={{ ...s.btn(), padding: '1px 6px', fontSize: 11 }}
-            onClick={fetchModels}
+            onClick={() => void onRefetch()}
           >↺</button>
         )}
       </div>
