@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use uuid::Uuid;
 
 use super::process_match;
@@ -9,6 +11,12 @@ use crate::types::{
 
 const OLLAMA_EXECUTABLE: &str = "ollama";
 const OLLAMA_SERVE_SUBCOMMAND: &str = "serve";
+pub const OLLAMA_MODELS_ENV_VAR: &str = "OLLAMA_MODELS";
+const OLLAMA_HOME_DIR_NAME: &str = ".ollama";
+const OLLAMA_MODELS_DIR_NAME: &str = "models";
+const MANIFESTS_DIR_NAME: &str = "manifests";
+const DEFAULT_REGISTRY: &str = "registry.ollama.ai";
+const DEFAULT_NAMESPACE: &str = "library";
 
 pub struct OllamaDriver;
 
@@ -213,47 +221,111 @@ fn model_ref_from_json(m: &serde_json::Value) -> Result<ModelRef, String> {
     Ok(ModelRef { display_name: key.clone(), key, publisher: None, architecture: None, size_bytes: m["size"].as_i64(), modified_secs: None })
 }
 
-pub fn list_models_cli(executable: &str) -> Result<Vec<ModelRef>, String> {
-    let output = std::process::Command::new(executable)
-        .arg("list")
-        .output()
-        .map_err(|e| format!("ollama list spawn: {e}"))?;
-    if !output.status.success() {
-        return Err(format!("ollama list exited with status {}", output.status));
+pub fn resolve_models_dir(env_value: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
+    if let Some(dir) = env_value {
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir));
+        }
     }
-    Ok(parse_ollama_list_output(&String::from_utf8_lossy(&output.stdout)))
+    let home = home?;
+    if home.is_empty() {
+        return None;
+    }
+    Some(Path::new(home).join(OLLAMA_HOME_DIR_NAME).join(OLLAMA_MODELS_DIR_NAME))
 }
 
-pub fn parse_ollama_list_output(raw: &str) -> Vec<ModelRef> {
-    raw.lines()
-        .filter(|l| !is_ollama_header_line(l))
-        .filter_map(parse_ollama_list_row)
-        .collect()
+pub fn list_models_from_manifests(models_dir: &Path) -> Result<Vec<ModelRef>, String> {
+    let manifests_root = models_dir.join(MANIFESTS_DIR_NAME);
+    if !manifests_root.is_dir() {
+        return Err(format!("no manifests directory at {}", manifests_root.display()));
+    }
+    let mut models = Vec::new();
+    scan_registries(&manifests_root, &mut models);
+    Ok(models)
 }
 
-fn is_ollama_header_line(line: &str) -> bool {
-    line.split_whitespace().next().map(|t| t.eq_ignore_ascii_case("NAME")).unwrap_or(false)
+fn scan_registries(manifests_root: &Path, models: &mut Vec<ModelRef>) {
+    for entry in read_subdirs(manifests_root) {
+        let registry = entry_name(&entry);
+        scan_namespaces(&entry.path(), &registry, models);
+    }
 }
 
-fn parse_ollama_list_row(line: &str) -> Option<ModelRef> {
-    let mut cols = line.split_whitespace();
-    let name = cols.next()?.to_owned();
-    let _id = cols.next();
-    let size_bytes = parse_size_cols(cols.next(), cols.next());
-    Some(ModelRef { display_name: name.clone(), key: name, publisher: None, architecture: None, size_bytes, modified_secs: None })
+fn scan_namespaces(registry_dir: &Path, registry: &str, models: &mut Vec<ModelRef>) {
+    for entry in read_subdirs(registry_dir) {
+        let namespace = entry_name(&entry);
+        scan_models(&entry.path(), registry, &namespace, models);
+    }
 }
 
-fn parse_size_cols(value_col: Option<&str>, unit_col: Option<&str>) -> Option<i64> {
-    let value: f64 = value_col?.parse().ok()?;
-    let multiplier: f64 = match unit_col?.to_ascii_uppercase().as_str() {
-        "B"  | "IB"  => 1.0,
-        "KB" | "KIB" => 1_000.0,
-        "MB" | "MIB" => 1_000_000.0,
-        "GB" | "GIB" => 1_000_000_000.0,
-        "TB" | "TIB" => 1_000_000_000_000.0,
-        _             => return None,
-    };
-    Some((value * multiplier) as i64)
+fn scan_models(namespace_dir: &Path, registry: &str, namespace: &str, models: &mut Vec<ModelRef>) {
+    for entry in read_subdirs(namespace_dir) {
+        let model = entry_name(&entry);
+        scan_tags(&entry.path(), registry, namespace, &model, models);
+    }
+}
+
+fn scan_tags(model_dir: &Path, registry: &str, namespace: &str, model: &str, models: &mut Vec<ModelRef>) {
+    let Ok(entries) = std::fs::read_dir(model_dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(tag) = entry.file_name().to_str().map(str::to_owned) else { continue };
+        if let Some(model_ref) = parse_manifest_file(registry, namespace, model, &tag, &path) {
+            models.push(model_ref);
+        }
+    }
+}
+
+fn read_subdirs(dir: &Path) -> Vec<std::fs::DirEntry> {
+    std::fs::read_dir(dir)
+        .map(|rd| rd.flatten().filter(|e| e.path().is_dir()).collect())
+        .unwrap_or_default()
+}
+
+fn entry_name(entry: &std::fs::DirEntry) -> String {
+    entry.file_name().to_string_lossy().into_owned()
+}
+
+pub fn manifest_key(registry: &str, namespace: &str, model: &str, tag: &str) -> String {
+    if registry == DEFAULT_REGISTRY && namespace == DEFAULT_NAMESPACE {
+        return format!("{model}:{tag}");
+    }
+    if registry == DEFAULT_REGISTRY {
+        return format!("{namespace}/{model}:{tag}");
+    }
+    format!("{registry}/{namespace}/{model}:{tag}")
+}
+
+fn parse_manifest_file(registry: &str, namespace: &str, model: &str, tag: &str, path: &Path) -> Option<ModelRef> {
+    let bytes = std::fs::read(path).ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let key = manifest_key(registry, namespace, model, tag);
+    Some(ModelRef {
+        display_name: key.clone(),
+        key,
+        publisher: None,
+        architecture: None,
+        size_bytes: Some(manifest_size_bytes(&json)),
+        modified_secs: manifest_mtime_secs(path),
+    })
+}
+
+pub fn manifest_size_bytes(json: &serde_json::Value) -> i64 {
+    let config_size = json["config"]["size"].as_i64().unwrap_or(0);
+    let layers_size: i64 = json["layers"]
+        .as_array()
+        .map(|layers| layers.iter().filter_map(|l| l["size"].as_i64()).sum())
+        .unwrap_or(0);
+    config_size + layers_size
+}
+
+fn manifest_mtime_secs(path: &Path) -> Option<i64> {
+    std::fs::metadata(path).ok()?.modified().ok()?
+        .duration_since(std::time::UNIX_EPOCH).ok()
+        .map(|d| d.as_secs() as i64)
 }
 
 #[cfg(test)]
@@ -294,77 +366,141 @@ mod tag_tests {
 }
 
 #[cfg(test)]
-mod cli_tests {
+mod manifest_tests {
     use super::*;
+    use tempfile::TempDir;
 
-    const TYPICAL_OUTPUT: &str = "\
-NAME             ID              SIZE      MODIFIED
-bge-m3:latest    1a0efc6c2574    1.2 GB    20 hours ago
-mistral:7b       6577803aa9a0    4.4 GB    6 days ago";
+    fn write_manifest(models_dir: &Path, registry: &str, namespace: &str, model: &str, tag: &str, body: &str) {
+        let dir = models_dir.join(MANIFESTS_DIR_NAME).join(registry).join(namespace).join(model);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(tag), body).unwrap();
+    }
+
+    const SAMPLE_MANIFEST: &str = r#"{
+        "config": {"size": 490},
+        "layers": [
+            {"size": 8149180896},
+            {"size": 358},
+            {"size": 8432}
+        ]
+    }"#;
 
     #[test]
-    fn typical_output_parses_two_models() {
-        let models = parse_ollama_list_output(TYPICAL_OUTPUT);
-        assert_eq!(models.len(), 2);
-        assert_eq!(models[0].key, "bge-m3:latest");
-        assert_eq!(models[0].display_name, "bge-m3:latest");
-        assert_eq!(models[1].key, "mistral:7b");
+    fn key_default_registry_and_namespace() {
+        assert_eq!(manifest_key("registry.ollama.ai", "library", "gemma3", "latest"), "gemma3:latest");
     }
 
     #[test]
-    fn typical_output_parses_size_bytes() {
-        let models = parse_ollama_list_output(TYPICAL_OUTPUT);
-        assert_eq!(models[0].size_bytes, Some(1_200_000_000));
-        assert_eq!(models[1].size_bytes, Some(4_400_000_000));
+    fn key_default_registry_other_namespace() {
+        assert_eq!(manifest_key("registry.ollama.ai", "someuser", "gemma3", "latest"), "someuser/gemma3:latest");
     }
 
     #[test]
-    fn empty_output_returns_empty_vec() {
-        assert!(parse_ollama_list_output("").is_empty());
+    fn key_other_registry() {
+        assert_eq!(manifest_key("my.registry.example", "someuser", "gemma3", "latest"), "my.registry.example/someuser/gemma3:latest");
     }
 
     #[test]
-    fn header_only_returns_empty_vec() {
-        assert!(parse_ollama_list_output("NAME    ID    SIZE    MODIFIED").is_empty());
+    fn size_bytes_sums_config_and_layers() {
+        let json: serde_json::Value = serde_json::from_str(SAMPLE_MANIFEST).unwrap();
+        assert_eq!(manifest_size_bytes(&json), 490 + 8149180896 + 358 + 8432);
     }
 
     #[test]
-    fn header_row_excluded_even_with_preceding_preamble() {
-        let raw = "warning: some preamble\nNAME    ID    SIZE    MODIFIED\nllama3:8b    abc    4.9 GB    yesterday";
-        let models = parse_ollama_list_output(raw);
-        assert!(models.iter().all(|m| m.key != "NAME"));
+    fn size_bytes_missing_fields_default_to_zero() {
+        let json: serde_json::Value = serde_json::from_str("{}").unwrap();
+        assert_eq!(manifest_size_bytes(&json), 0);
     }
 
     #[test]
-    fn gb_lowercase_parses_size() {
-        let raw = "NAME    ID    SIZE    MODIFIED\nfoo:bar    abc123    2.0 gb    yesterday";
-        let models = parse_ollama_list_output(raw);
-        assert_eq!(models[0].size_bytes, Some(2_000_000_000));
+    fn missing_manifests_dir_is_an_error() {
+        let tmp = TempDir::new().unwrap();
+        assert!(list_models_from_manifests(tmp.path()).is_err());
     }
 
     #[test]
-    fn malformed_row_name_only_yields_model_without_size() {
-        let raw = "NAME    ID    SIZE    MODIFIED\njust-a-name";
-        let models = parse_ollama_list_output(raw);
+    fn scans_manifests_into_model_refs() {
+        let tmp = TempDir::new().unwrap();
+        write_manifest(tmp.path(), "registry.ollama.ai", "library", "gemma3", "latest", SAMPLE_MANIFEST);
+        write_manifest(tmp.path(), "registry.ollama.ai", "library", "qwen3-hermes", "latest", SAMPLE_MANIFEST);
+        let models = list_models_from_manifests(tmp.path()).unwrap();
+        let mut keys: Vec<_> = models.iter().map(|m| m.key.clone()).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["gemma3:latest", "qwen3-hermes:latest"]);
+    }
+
+    #[test]
+    fn scanned_model_display_name_matches_key() {
+        let tmp = TempDir::new().unwrap();
+        write_manifest(tmp.path(), "registry.ollama.ai", "library", "gemma3", "latest", SAMPLE_MANIFEST);
+        let models = list_models_from_manifests(tmp.path()).unwrap();
+        assert_eq!(models[0].display_name, models[0].key);
+    }
+
+    #[test]
+    fn scanned_model_size_bytes_is_summed_from_manifest() {
+        let tmp = TempDir::new().unwrap();
+        write_manifest(tmp.path(), "registry.ollama.ai", "library", "gemma3", "latest", SAMPLE_MANIFEST);
+        let models = list_models_from_manifests(tmp.path()).unwrap();
+        assert_eq!(models[0].size_bytes, Some(490 + 8149180896 + 358 + 8432));
+    }
+
+    #[test]
+    fn unparseable_manifest_is_skipped_not_fatal() {
+        let tmp = TempDir::new().unwrap();
+        write_manifest(tmp.path(), "registry.ollama.ai", "library", "broken", "latest", "not json");
+        write_manifest(tmp.path(), "registry.ollama.ai", "library", "gemma3", "latest", SAMPLE_MANIFEST);
+        let models = list_models_from_manifests(tmp.path()).unwrap();
         assert_eq!(models.len(), 1);
-        assert_eq!(models[0].key, "just-a-name");
-        assert_eq!(models[0].size_bytes, None);
+        assert_eq!(models[0].key, "gemma3:latest");
     }
 
     #[test]
-    fn unknown_size_unit_yields_none_size() {
-        let raw = "NAME    ID    SIZE    MODIFIED\nfoo:bar    abc123    1.0 XB    yesterday";
-        let models = parse_ollama_list_output(raw);
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].size_bytes, None);
+    fn non_file_entry_at_tag_level_is_skipped() {
+        let tmp = TempDir::new().unwrap();
+        let model_dir = tmp.path().join(MANIFESTS_DIR_NAME).join("registry.ollama.ai").join("library").join("gemma3");
+        std::fs::create_dir_all(model_dir.join("latest")).unwrap();
+        let models = list_models_from_manifests(tmp.path()).unwrap();
+        assert!(models.is_empty());
     }
 
     #[test]
-    fn blank_lines_are_skipped() {
-        let raw = "NAME    ID    SIZE    MODIFIED\n\nllama3:8b    abc    4.9 GB    yesterday\n";
-        let models = parse_ollama_list_output(raw);
+    fn stray_file_at_registry_level_is_skipped() {
+        let tmp = TempDir::new().unwrap();
+        let manifests_root = tmp.path().join(MANIFESTS_DIR_NAME);
+        std::fs::create_dir_all(&manifests_root).unwrap();
+        std::fs::write(manifests_root.join(".DS_Store"), b"").unwrap();
+        write_manifest(tmp.path(), "registry.ollama.ai", "library", "gemma3", "latest", SAMPLE_MANIFEST);
+        let models = list_models_from_manifests(tmp.path()).unwrap();
         assert_eq!(models.len(), 1);
-        assert_eq!(models[0].key, "llama3:8b");
+    }
+
+    #[test]
+    fn resolve_models_dir_prefers_env_override() {
+        let dir = resolve_models_dir(Some("/custom/models"), Some("/Users/someone")).unwrap();
+        assert_eq!(dir, PathBuf::from("/custom/models"));
+    }
+
+    #[test]
+    fn resolve_models_dir_falls_back_to_home() {
+        let dir = resolve_models_dir(None, Some("/Users/someone")).unwrap();
+        assert_eq!(dir, PathBuf::from("/Users/someone/.ollama/models"));
+    }
+
+    #[test]
+    fn resolve_models_dir_empty_env_falls_back_to_home() {
+        let dir = resolve_models_dir(Some(""), Some("/Users/someone")).unwrap();
+        assert_eq!(dir, PathBuf::from("/Users/someone/.ollama/models"));
+    }
+
+    #[test]
+    fn resolve_models_dir_no_env_no_home_is_none() {
+        assert!(resolve_models_dir(None, None).is_none());
+    }
+
+    #[test]
+    fn resolve_models_dir_empty_home_is_none() {
+        assert!(resolve_models_dir(None, Some("")).is_none());
     }
 }
 

@@ -847,15 +847,18 @@ fn list_non_ollama_models(stype: ServerType, discovery: &DiscoveryConfig) -> Res
 }
 
 const OLLAMA_UNREACHABLE: &str = "OLLAMA_UNREACHABLE";
+const HOME_ENV_VAR: &str = "HOME";
 
 fn list_ollama_models_with_fallback(discovery: &DiscoveryConfig) -> Result<Vec<ModelRef>, String> {
     let probe = ServerInstanceConfig::new("probe", ServerType::Ollama, 11434, "");
     if let Ok(models) = driver_for(&probe, discovery).list_models(&probe) {
         return Ok(models);
     }
-    let raw_exe = discovery.ollama_executable_path.as_deref().unwrap_or("");
-    let exe = if raw_exe.is_empty() { "ollama" } else { raw_exe };
-    ollama::list_models_cli(exe).map_err(|_| OLLAMA_UNREACHABLE.to_string())
+    let env_value = std::env::var(ollama::OLLAMA_MODELS_ENV_VAR).ok();
+    let home = std::env::var(HOME_ENV_VAR).ok();
+    let models_dir = ollama::resolve_models_dir(env_value.as_deref(), home.as_deref())
+        .ok_or_else(|| OLLAMA_UNREACHABLE.to_string())?;
+    ollama::list_models_from_manifests(&models_dir).map_err(|_| OLLAMA_UNREACHABLE.to_string())
 }
 
 #[tauri::command]
