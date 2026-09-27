@@ -11,6 +11,7 @@ import {
 } from '../types'
 import { useInstances } from '../useInstances'
 import { startWithWarnings } from '../startWithWarnings'
+import { useReconnectNotices } from '../useReconnectNotices'
 
 const s = {
   root: {
@@ -24,6 +25,10 @@ const s = {
     flexDirection: 'column' as const,
   },
   body: { flex: 1, padding: '8px 0' },
+  reconnectNotice: {
+    fontSize: 11, color: '#15803d', padding: '0 14px 4px 30px',
+    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const,
+  },
   row: {
     display: 'flex',
     alignItems: 'center',
@@ -100,10 +105,11 @@ function ConfirmDialog({ message, onConfirm, onCancel }: {
   )
 }
 
-function InstanceRow({ instance, phase, pid, onStart, onStop, onAdopt }: {
+function InstanceRow({ instance, phase, pid, reconnectNotice, onStart, onStop, onAdopt }: {
   instance: ServerInstanceConfig
   phase: InstancePhase | undefined
   pid: InstancePidDto | null | undefined
+  reconnectNotice: string | undefined
   onStart: () => void
   onStop: () => void
   onAdopt: () => void
@@ -114,6 +120,7 @@ function InstanceRow({ instance, phase, pid, onStart, onStop, onAdopt }: {
   const showPid = phase?.type === 'running' || phase?.type === 'switchingModel'
   const rowTitle = showPid ? `${instance.name} — PID ${pidLabel(pid)}` : instance.name
   return (
+    <>
     <div style={s.row} title={rowTitle}>
       <div style={s.dot(phaseColor(phase))} title={phaseLabel(phase)} />
       <span style={s.name}>{instance.name}</span>
@@ -128,11 +135,16 @@ function InstanceRow({ instance, phase, pid, onStart, onStop, onAdopt }: {
         <button style={s.btn()} onClick={onAdopt} title="Track the already-running server as a new external instance">Adopt</button>
       )}
     </div>
+    {reconnectNotice && phase?.type === 'running' && (
+      <div style={s.reconnectNotice} role="status">{reconnectNotice}</div>
+    )}
+    </>
   )
 }
 
 export default function PopoverApp() {
   const { instances, phases, pids, refresh } = useInstances()
+  const reconnectNotices = useReconnectNotices()
   const [notice, setNotice] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<{ id: string; msg: string; resolve: (v: boolean) => void } | null>(null)
 
@@ -180,6 +192,7 @@ export default function PopoverApp() {
               instance={inst}
               phase={phases[inst.id]}
               pid={pids[inst.id]}
+              reconnectNotice={reconnectNotices[inst.id]}
               onStart={() => handleStart(inst.id)}
               onStop={() => handleStop(inst.id)}
               onAdopt={() => handleAdopt(inst.id)}
