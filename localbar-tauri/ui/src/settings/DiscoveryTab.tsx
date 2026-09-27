@@ -32,7 +32,6 @@ export function DiscoveryTab() {
   const [config, setConfig] = useState<DiscoveryConfig | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [newPath, setNewPath] = useState('')
-  const [ollamaExe, setOllamaExe] = useState('')
   const [busy, setBusy] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
 
@@ -40,7 +39,6 @@ export function DiscoveryTab() {
     setLoadError(null)
     ipc.getDiscoveryConfig().then(c => {
       setConfig(c)
-      setOllamaExe(c.ollama_executable_path ?? '')
     }).catch(e => setLoadError(String(e)))
   }
 
@@ -67,19 +65,9 @@ export function DiscoveryTab() {
     if (picked) await addPath(picked)
   }
 
-  const chooseOllamaExe = async () => {
-    const picked = await pickPath({ directory: false })
-    if (picked) setOllamaExe(picked)
-  }
-
   const removePath = async (i: number) => {
     if (!config) return
     await persist({ ...config, mlx_lm_search_paths: config.mlx_lm_search_paths.filter((_, idx) => idx !== i) })
-  }
-
-  const saveOllamaExe = async () => {
-    if (!config) return
-    await persist({ ...config, ollama_executable_path: ollamaExe.trim() || null })
   }
 
   if (loadError) return (
@@ -105,21 +93,8 @@ export function DiscoveryTab() {
             placeholder="/path/to/models"
             onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); void addPath() } }}
           />
-          <button style={s.btn()} onClick={() => void addPath()} disabled={busy || !newPath.trim()}>Add</button>
           <button style={s.btn()} onClick={() => void choosePath()} disabled={busy}>Choose…</button>
-        </div>
-      </div>
-      <div style={s.field}>
-        <span style={s.fieldLabel}>Ollama — Executable path</span>
-        <div style={{ display: 'flex', gap: 6 }}>
-          <input
-            style={{ ...s.input, flex: 1 }}
-            value={ollamaExe}
-            onChange={e => setOllamaExe(e.target.value)}
-            placeholder="ollama (uses system PATH)"
-          />
-          <button style={s.btn()} onClick={() => void chooseOllamaExe()} disabled={busy}>Choose…</button>
-          <button style={s.btn()} onClick={() => void saveOllamaExe()} disabled={busy}>Save</button>
+          <button style={s.btn()} onClick={() => void addPath()} disabled={busy || !newPath.trim()}>Add</button>
         </div>
       </div>
       <DiscoveredModelsSection />

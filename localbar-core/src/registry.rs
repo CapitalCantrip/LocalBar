@@ -328,7 +328,6 @@ mod tests {
         let mut reg = make_registry();
         let cfg = crate::types::DiscoveryConfig {
             mlx_lm_search_paths: vec!["/models".into()],
-            ollama_executable_path: None,
         };
         reg.set_discovery_config(cfg.clone()).unwrap();
         assert_eq!(*reg.get_discovery_config(), cfg);
