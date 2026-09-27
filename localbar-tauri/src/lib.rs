@@ -901,6 +901,23 @@ fn list_non_ollama_models(stype: ServerType, discovery: &DiscoveryConfig) -> Res
 
 const OLLAMA_UNREACHABLE: &str = "OLLAMA_UNREACHABLE";
 const HOME_ENV_VAR: &str = "HOME";
+const OLLAMA_APP_SUPPORT_RELATIVE_PATH: &str = "Library/Application Support/Ollama/db.sqlite";
+const SQLITE3_EXECUTABLE: &str = "/usr/bin/sqlite3";
+
+fn ollama_app_models_setting(home: &str) -> Option<String> {
+    let db_path = std::path::Path::new(home).join(OLLAMA_APP_SUPPORT_RELATIVE_PATH);
+    let uri = format!("file:{}?mode=ro", db_path.display());
+    let output = std::process::Command::new(SQLITE3_EXECUTABLE)
+        .arg("-readonly")
+        .arg(uri)
+        .arg("select models from settings where id = 1")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    ollama::parse_app_models_setting(&output.stdout)
+}
 
 fn list_ollama_models_with_fallback(discovery: &DiscoveryConfig) -> Result<Vec<ModelRef>, String> {
     let probe = ServerInstanceConfig::new("probe", ServerType::Ollama, 11434, "");
@@ -909,7 +926,8 @@ fn list_ollama_models_with_fallback(discovery: &DiscoveryConfig) -> Result<Vec<M
     }
     let env_value = std::env::var(ollama::OLLAMA_MODELS_ENV_VAR).ok();
     let home = std::env::var(HOME_ENV_VAR).ok();
-    let models_dir = ollama::resolve_models_dir(env_value.as_deref(), home.as_deref())
+    let app_setting = home.as_deref().and_then(ollama_app_models_setting);
+    let models_dir = ollama::resolve_models_dir(env_value.as_deref(), app_setting.as_deref(), home.as_deref())
         .ok_or_else(|| OLLAMA_UNREACHABLE.to_string())?;
     ollama::list_models_from_manifests(&models_dir).map_err(|_| OLLAMA_UNREACHABLE.to_string())
 }
