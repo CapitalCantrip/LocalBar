@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ipc } from '../ipc'
+import { ipc, pickPath } from '../ipc'
 import { type DiscoveryConfig } from '../types'
 import { s } from './styles'
 import { DiscoveredModelsSection } from './DiscoveredModelsSection'
@@ -54,10 +54,22 @@ export function DiscoveryTab() {
     finally { setBusy(false) }
   }
 
-  const addPath = async () => {
-    if (!config || !newPath.trim()) return
-    const ok = await persist({ ...config, mlx_lm_search_paths: [...config.mlx_lm_search_paths, newPath.trim()] })
+  const addPath = async (path?: string) => {
+    if (!config) return
+    const value = (path ?? newPath).trim()
+    if (!value) return
+    const ok = await persist({ ...config, mlx_lm_search_paths: [...config.mlx_lm_search_paths, value] })
     if (ok) setNewPath('')
+  }
+
+  const choosePath = async () => {
+    const picked = await pickPath({ directory: true })
+    if (picked) await addPath(picked)
+  }
+
+  const chooseOllamaExe = async () => {
+    const picked = await pickPath({ directory: false })
+    if (picked) setOllamaExe(picked)
   }
 
   const removePath = async (i: number) => {
@@ -94,6 +106,7 @@ export function DiscoveryTab() {
             onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); void addPath() } }}
           />
           <button style={s.btn()} onClick={() => void addPath()} disabled={busy || !newPath.trim()}>Add</button>
+          <button style={s.btn()} onClick={() => void choosePath()} disabled={busy}>Choose…</button>
         </div>
       </div>
       <div style={s.field}>
@@ -105,6 +118,7 @@ export function DiscoveryTab() {
             onChange={e => setOllamaExe(e.target.value)}
             placeholder="ollama (uses system PATH)"
           />
+          <button style={s.btn()} onClick={() => void chooseOllamaExe()} disabled={busy}>Choose…</button>
           <button style={s.btn()} onClick={() => void saveOllamaExe()} disabled={busy}>Save</button>
         </div>
       </div>
