@@ -1,17 +1,20 @@
-use crate::drivers::external::{models_url, parse_openai_models};
-use crate::types::{ServerInstanceConfig, ServerType};
+use crate::types::ServerType;
 
 pub fn reports_loaded_model(server_type: ServerType) -> bool {
     matches!(server_type, ServerType::MlxLm)
 }
 
-pub fn detect_loaded_model(config: &ServerInstanceConfig) -> Option<String> {
-    let resp = crate::drivers::http::quick_agent()
-        .get(&models_url(config))
-        .call()
-        .ok()?;
-    let json: serde_json::Value = resp.into_json().ok()?;
-    parse_openai_models(&json).into_iter().next().map(|m| m.key)
+pub fn served_model_from_args(args: &str) -> Option<String> {
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+    for (i, token) in tokens.iter().enumerate() {
+        if let Some(value) = token.strip_prefix("--model=") {
+            return Some(value.to_string());
+        }
+        if *token == "--model" {
+            return tokens.get(i + 1).map(|v| v.to_string());
+        }
+    }
+    None
 }
 
 pub fn model_matches(candidate: &str, reported: &str) -> bool {
@@ -124,5 +127,48 @@ mod tests {
     fn best_matching_key_none_when_nothing_matches() {
         let candidates = vec!["mlx-community/Llama-3-8B-4bit".to_string()];
         assert_eq!(best_matching_key("totally-unrelated", &candidates), None);
+    }
+
+    #[test]
+    fn served_model_from_args_reads_hf_repo_id() {
+        assert_eq!(
+            served_model_from_args("--model mlx-community/Qwen3.5-4B-OptiQ-4bit --host 127.0.0.1"),
+            Some("mlx-community/Qwen3.5-4B-OptiQ-4bit".to_string())
+        );
+    }
+
+    #[test]
+    fn served_model_from_args_reads_absolute_path() {
+        assert_eq!(
+            served_model_from_args("--model /Users/x/SharedModels/mlx-community/Qwen3.5-4B-OptiQ-4bit"),
+            Some("/Users/x/SharedModels/mlx-community/Qwen3.5-4B-OptiQ-4bit".to_string())
+        );
+    }
+
+    #[test]
+    fn served_model_from_args_reads_equals_form() {
+        assert_eq!(
+            served_model_from_args("--model=mlx-community/Qwen3.5-4B-OptiQ-4bit --port 8080"),
+            Some("mlx-community/Qwen3.5-4B-OptiQ-4bit".to_string())
+        );
+    }
+
+    #[test]
+    fn served_model_from_args_none_when_flag_missing() {
+        assert_eq!(served_model_from_args("--host 127.0.0.1 --port 8080"), None);
+    }
+
+    #[test]
+    fn served_model_from_args_none_when_flag_is_last_token() {
+        assert_eq!(served_model_from_args("--host 127.0.0.1 --model"), None);
+    }
+
+    #[test]
+    fn served_model_from_args_reads_full_mlx_lm_command_line() {
+        let args = "/usr/bin/python -m mlx_lm.server --model mlx-community/Qwen3.5-4B-OptiQ-4bit --host 127.0.0.1 --port 8080";
+        assert_eq!(
+            served_model_from_args(args),
+            Some("mlx-community/Qwen3.5-4B-OptiQ-4bit".to_string())
+        );
     }
 }
