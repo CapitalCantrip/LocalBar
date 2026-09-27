@@ -32,6 +32,9 @@ A new `DiscoveryConfig` struct holds:
   HF-cached mlx-lm models. Empty means fall back to `$HF_HOME` /
   `~/.cache/huggingface/hub` at scan time (handled by `effective_search_paths`
   in the driver).
+- `ollama_models_dir: Option<String>` — the Ollama models folder set on the
+  Discovery tab (#83). `None` or blank means auto-detect; see D14 for the full
+  precedence order.
 
 `DiscoveryConfig` originally also held `ollama_executable_path: Option<String>`,
 an override for the ollama binary path. #62 removed the `ollama list` CLI
@@ -42,7 +45,10 @@ use `deny_unknown_fields`.
 `ServerInstanceConfig` gains `model_search_path_override: Option<String>`, a
 per-instance scan path that, when set, replaces the global list for that
 specific mlx-lm instance. Merging is handled by
-`DiscoveryConfig::resolved_mlx_paths(override_path)`.
+`DiscoveryConfig::resolved_mlx_paths(override_path)`. Since #83 the same field
+is also an Ollama instance's models folder, taking precedence over
+`ollama_models_dir`. The Add Instance sheet can set it on the new instance, and
+its model picker lists from that folder when set.
 
 The `Persistence` trait gains `save_discovery_config` / `load_discovery_config`
 methods, implemented by `FilePersistence` (reads/writes `state.json`) and
@@ -51,7 +57,9 @@ and exposes `get_discovery_config` / `set_discovery_config` /
 `load_discovery_config`.
 
 Two new Tauri IPC commands are exposed to the frontend:
-`get_discovery_config` and `set_discovery_config`.
+`get_discovery_config` and `set_discovery_config`. #83 adds
+`detect_ollama_models_dir`, which returns the auto-detected Ollama folder and
+its source (env, Ollama app, default) for the Discovery tab placeholder.
 
 `MLXLMDriver` is always constructed with `new(resolved_paths)` in the IPC path
 — `default()` (empty paths) is never used for list-models operations.

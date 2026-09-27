@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
-import type { AdoptResultDto, ReconnectNoticeDto, AppSettings, CanonicalParam, DiscoveredModel, DiscoveryConfig, InstancePhase, InstancePidDto, ModelMetadata, ModelRef, ParamValues, ServerInstanceConfig } from './types'
+import type { AdoptResultDto, ReconnectNoticeDto, AppSettings, CanonicalParam, DiscoveredModel, DiscoveryConfig, InstancePhase, InstancePidDto, ModelMetadata, ModelRef, ParamValues, ResolvedModelsDir, ServerInstanceConfig } from './types'
 
 export async function pickPath(options: { directory: boolean }): Promise<string | null> {
   const result = await open({ directory: options.directory, multiple: false })
@@ -27,8 +27,9 @@ export const ipc = {
     serverType: string,
     port: number,
     executablePath: string,
+    modelSearchPathOverride: string | null,
   ): Promise<string> =>
-    invoke('add_instance', { name, serverType, port, executablePath }),
+    invoke('add_instance', { name, serverType, port, executablePath, modelSearchPathOverride }),
 
   removeInstance: (id: string): Promise<void> =>
     invoke('remove_instance', { id }),
@@ -69,8 +70,11 @@ export const ipc = {
   listModels: (id: string): Promise<ModelRef[]> =>
     invoke('list_models_cmd', { id }),
 
-  listModelsForType: (serverType: string): Promise<ModelRef[]> =>
-    invoke('list_models_for_type', { serverType }),
+  listModelsForType: (serverType: string, modelFolder: string | null): Promise<ModelRef[]> =>
+    invoke('list_models_for_type', { serverType, modelFolder }),
+
+  detectOllamaModelsDir: (): Promise<ResolvedModelsDir | null> =>
+    invoke('detect_ollama_models_dir'),
 
   switchModel: (id: string, modelKey: string): Promise<void> =>
     invoke('switch_model_cmd', { id, modelKey }),

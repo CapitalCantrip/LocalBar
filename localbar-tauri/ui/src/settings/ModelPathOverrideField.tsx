@@ -3,6 +3,20 @@ import { ipc, pickPath } from '../ipc'
 import { type ServerInstanceConfig } from '../types'
 import { s } from './styles'
 
+const HF_CACHE_DEFAULT = '~/.cache/huggingface/hub'
+
+async function effectiveDiscoveryFolder(instance: ServerInstanceConfig): Promise<string | null> {
+  const discovery = await ipc.getDiscoveryConfig()
+  if (instance.server_type === 'ollama') {
+    if (discovery.ollama_models_dir?.trim()) return discovery.ollama_models_dir
+    return (await ipc.detectOllamaModelsDir())?.path ?? null
+  }
+  if (instance.server_type === 'mlx-lm') {
+    return discovery.mlx_lm_search_paths.length ? discovery.mlx_lm_search_paths.join(', ') : HF_CACHE_DEFAULT
+  }
+  return null
+}
+
 export function ModelPathOverrideField({ instance, onRefresh }: {
   instance: ServerInstanceConfig
   onRefresh: () => void
@@ -10,6 +24,13 @@ export function ModelPathOverrideField({ instance, onRefresh }: {
   const [value, setValue] = useState(instance.model_search_path_override ?? '')
   const [busy, setBusy] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
+  const [inherited, setInherited] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    effectiveDiscoveryFolder(instance).then(f => { if (!cancelled) setInherited(f) }).catch(() => {})
+    return () => { cancelled = true }
+  }, [instance.id, instance.server_type])
 
   useEffect(() => {
     setValue(instance.model_search_path_override ?? '')
@@ -33,20 +54,20 @@ export function ModelPathOverrideField({ instance, onRefresh }: {
 
   return (
     <div style={s.field}>
-      <span style={s.fieldLabel}>Model path override</span>
+      <span style={s.fieldLabel}>Model folder (overrides Discovery)</span>
       <div style={{ display: 'flex', gap: 6 }}>
         <input
           style={{ ...s.input, flex: 1 }}
           value={value}
           onChange={e => setValue(e.target.value)}
-          placeholder="Optional — overrides global search paths"
+          placeholder={inherited ?? 'Optional'}
         />
         <button style={s.btn()} onClick={() => void choosePath()} disabled={busy}>Choose…</button>
         <button style={s.btn()} onClick={() => void save()} disabled={busy}>Save</button>
       </div>
       {saveError && <span style={{ fontSize: 11, color: '#ef4444' }}>{saveError}</span>}
       {!saveError && !value.trim() && (
-        <span style={{ fontSize: 11, color: '#aaa' }}>Using global discovery paths</span>
+        <span style={{ fontSize: 11, color: '#aaa' }}>Using Settings → Discovery{inherited ? `: ${inherited}` : ''}</span>
       )}
     </div>
   )
