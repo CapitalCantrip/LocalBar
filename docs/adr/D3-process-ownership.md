@@ -51,3 +51,9 @@ Rationale:
 - `was_running_when_quit` is recorded before any stop, so the next launch restarts spawned servers and re-adopts the rest.
 - The app-level setting `AppSettings.keep_servers_running_on_quit` (persisted under `settings` in state.json, default off) turns the stop off entirely.
 - The decision is the pure fn `localbar_core::quit::ids_to_stop_on_quit`. The Tauri shell calls `prevent_exit`, runs `graceful_kill` for each server on its own thread, waits at most `quit_shutdown_budget_secs` (largest grace capped at `MAX_QUIT_GRACE_SECS`, plus `QUIT_KILL_SLACK_SECS`), then calls `exit(0)`. The `AppState.quitting` flag lets that second `ExitRequested` pass straight through. A kill that hangs past the budget cannot block quit.
+
+## Addendum (2026-09-28, #82): restoring servers on launch
+
+- `mark_running_instances_for_reconnect` always records `was_running_when_quit`, independent of any setting — the flag is a fact about what was running, not a decision about what to do with it.
+- `AppSettings.restore_running_servers_on_launch` (default true) is the decision: whether `was_running_when_quit` instances relaunch on the next startup. `start_on_launch` instances launch regardless of this setting.
+- The decision is the pure fn `localbar_core::quit::ids_to_start_on_launch`, called from `on_startup` in the Tauri shell.

@@ -283,7 +283,7 @@ mod tests {
     fn file_persistence_app_settings_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let mut p = FilePersistence::new(dir.path().join("state.json"));
-        let settings = AppSettings { keep_servers_running_on_quit: true };
+        let settings = AppSettings { keep_servers_running_on_quit: true, ..AppSettings::default() };
         p.save_app_settings(&settings).unwrap();
         assert_eq!(p.load_app_settings().unwrap(), settings);
     }
@@ -303,12 +303,25 @@ mod tests {
     }
 
     #[test]
+    fn file_persistence_legacy_settings_without_restore_key_loads_restore_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"instances":[],"discovery":{},"settings":{"keep_servers_running_on_quit":true}}"#,
+        )
+        .unwrap();
+        let p = FilePersistence::new(path);
+        assert!(p.load_app_settings().unwrap().restore_running_servers_on_launch);
+    }
+
+    #[test]
     fn file_persistence_save_app_settings_preserves_discovery() {
         let dir = tempfile::tempdir().unwrap();
         let mut p = FilePersistence::new(dir.path().join("state.json"));
         let cfg = crate::types::DiscoveryConfig { mlx_lm_search_paths: vec!["/x".into()] };
         p.save_discovery_config(&cfg).unwrap();
-        p.save_app_settings(&AppSettings { keep_servers_running_on_quit: true }).unwrap();
+        p.save_app_settings(&AppSettings { keep_servers_running_on_quit: true, ..AppSettings::default() }).unwrap();
         assert_eq!(p.load_discovery_config().unwrap(), cfg);
     }
 }

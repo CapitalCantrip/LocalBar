@@ -158,12 +158,24 @@ pub struct DiscoveryConfig {
     pub mlx_lm_search_paths: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(export))]
 pub struct AppSettings {
     #[serde(default)]
     pub keep_servers_running_on_quit: bool,
+    #[serde(default = "default_true")]
+    pub restore_running_servers_on_launch: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self { keep_servers_running_on_quit: false, restore_running_servers_on_launch: true }
+    }
 }
 
 impl DiscoveryConfig {

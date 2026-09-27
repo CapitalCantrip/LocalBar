@@ -1,6 +1,6 @@
 use uuid::Uuid;
 
-use crate::types::{AppSettings, ServerType};
+use crate::types::{AppSettings, ServerInstanceConfig, ServerType};
 
 pub const MAX_QUIT_GRACE_SECS: f64 = 60.0;
 pub const QUIT_KILL_SLACK_SECS: f64 = 2.0;
@@ -22,6 +22,33 @@ pub fn ids_to_stop_on_quit(candidates: &[QuitCandidate], settings: &AppSettings)
     candidates
         .iter()
         .filter(|c| should_stop_on_quit(c, settings))
+        .map(|c| c.id)
+        .collect()
+}
+
+pub fn should_start_on_launch(config: &ServerInstanceConfig, settings: &AppSettings) -> bool {
+    config.start_on_launch
+        || (config.was_running_when_quit && settings.restore_running_servers_on_launch)
+}
+
+pub fn ids_to_start_on_launch(
+    configs: &[ServerInstanceConfig],
+    settings: &AppSettings,
+) -> Vec<Uuid> {
+    configs
+        .iter()
+        .filter(|c| should_start_on_launch(c, settings))
+        .map(|c| c.id)
+        .collect()
+}
+
+pub fn ids_to_forget_reconnect_on_launch(
+    configs: &[ServerInstanceConfig],
+    settings: &AppSettings,
+) -> Vec<Uuid> {
+    configs
+        .iter()
+        .filter(|c| c.was_running_when_quit && !should_start_on_launch(c, settings))
         .map(|c| c.id)
         .collect()
 }
@@ -68,7 +95,14 @@ mod tests {
     }
 
     fn keep_running() -> AppSettings {
-        AppSettings { keep_servers_running_on_quit: true }
+        AppSettings { keep_servers_running_on_quit: true, ..AppSettings::default() }
+    }
+
+    fn launch_config(start_on_launch: bool, was_running_when_quit: bool) -> ServerInstanceConfig {
+        let mut c = ServerInstanceConfig::new("test", ServerType::MlxLm, 8080, "/bin/mlx");
+        c.start_on_launch = start_on_launch;
+        c.was_running_when_quit = was_running_when_quit;
+        c
     }
 
     #[test]
@@ -119,5 +153,51 @@ mod tests {
     #[test]
     fn quit_budget_caps_grace_so_quit_cannot_hang() {
         assert_eq!(quit_shutdown_budget_secs(&[f64::INFINITY]), MAX_QUIT_GRACE_SECS + QUIT_KILL_SLACK_SECS);
+    }
+
+    #[test]
+    fn start_on_launch_always_starts() {
+        let c = launch_config(true, false);
+        assert!(should_start_on_launch(&c, &stop_by_default()));
+        let settings = AppSettings { restore_running_servers_on_launch: false, ..AppSettings::default() };
+        assert!(should_start_on_launch(&c, &settings));
+    }
+
+    #[test]
+    fn was_running_and_restore_on_starts() {
+        let c = launch_config(false, true);
+        assert!(should_start_on_launch(&c, &AppSettings::default()));
+    }
+
+    #[test]
+    fn was_running_and_restore_off_does_not_start() {
+        let c = launch_config(false, true);
+        let settings = AppSettings { restore_running_servers_on_launch: false, ..AppSettings::default() };
+        assert!(!should_start_on_launch(&c, &settings));
+    }
+
+    #[test]
+    fn unrestored_reconnect_flag_is_forgotten_so_a_later_restore_does_not_revive_it() {
+        let c = launch_config(false, true);
+        let settings = AppSettings { restore_running_servers_on_launch: false, ..AppSettings::default() };
+        assert_eq!(ids_to_forget_reconnect_on_launch(std::slice::from_ref(&c), &settings), vec![c.id]);
+    }
+
+    #[test]
+    fn restored_reconnect_flag_is_kept_until_stop() {
+        let c = launch_config(false, true);
+        assert!(ids_to_forget_reconnect_on_launch(&[c], &AppSettings::default()).is_empty());
+    }
+
+    #[test]
+    fn neither_flag_does_not_start() {
+        let c = launch_config(false, false);
+        assert!(!should_start_on_launch(&c, &AppSettings::default()));
+    }
+
+    #[test]
+    fn legacy_state_without_restore_key_loads_with_restore_true() {
+        let settings: AppSettings = serde_json::from_str(r#"{"keep_servers_running_on_quit":true}"#).unwrap();
+        assert!(settings.restore_running_servers_on_launch);
     }
 }
