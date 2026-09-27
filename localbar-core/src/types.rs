@@ -156,8 +156,6 @@ pub enum ServerType {
 pub struct DiscoveryConfig {
     #[serde(default)]
     pub mlx_lm_search_paths: Vec<String>,
-    #[serde(default)]
-    pub ollama_executable_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -273,7 +271,6 @@ mod discovery_tests {
     fn global_paths_only_when_no_override() {
         let cfg = DiscoveryConfig {
             mlx_lm_search_paths: vec!["/a".into(), "/b".into()],
-            ollama_executable_path: None,
         };
         assert_eq!(cfg.resolved_mlx_paths(None), vec!["/a", "/b"]);
     }
@@ -282,7 +279,6 @@ mod discovery_tests {
     fn override_replaces_global_list() {
         let cfg = DiscoveryConfig {
             mlx_lm_search_paths: vec!["/a".into(), "/b".into()],
-            ollama_executable_path: None,
         };
         assert_eq!(cfg.resolved_mlx_paths(Some("/override")), vec!["/override"]);
     }

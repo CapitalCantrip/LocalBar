@@ -228,10 +228,25 @@ mod tests {
         let mut p = FilePersistence::new(dir.path().join("state.json"));
         let cfg = crate::types::DiscoveryConfig {
             mlx_lm_search_paths: vec!["/models".into()],
-            ollama_executable_path: Some("/usr/local/bin/ollama".into()),
         };
         p.save_discovery_config(&cfg).unwrap();
         assert_eq!(p.load_discovery_config().unwrap(), cfg);
+    }
+
+    #[test]
+    fn file_persistence_legacy_ollama_executable_path_key_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"instances":[],"discovery":{"mlx_lm_search_paths":["/models"],"ollama_executable_path":"/usr/local/bin/ollama"}}"#,
+        )
+        .unwrap();
+        let p = FilePersistence::new(path);
+        assert_eq!(
+            p.load_discovery_config().unwrap(),
+            crate::types::DiscoveryConfig { mlx_lm_search_paths: vec!["/models".into()] }
+        );
     }
 
     #[test]
@@ -250,7 +265,6 @@ mod tests {
         p.save_instances(&[ollama_config()]).unwrap();
         p.save_discovery_config(&crate::types::DiscoveryConfig {
             mlx_lm_search_paths: vec!["/x".into()],
-            ollama_executable_path: None,
         }).unwrap();
         assert_eq!(p.load_instances().unwrap().len(), 1);
     }
@@ -260,7 +274,6 @@ mod tests {
         let mut p = InMemoryPersistence::default();
         let cfg = crate::types::DiscoveryConfig {
             mlx_lm_search_paths: vec!["/tmp/models".into()],
-            ollama_executable_path: None,
         };
         p.save_discovery_config(&cfg).unwrap();
         assert_eq!(p.load_discovery_config().unwrap(), cfg);
@@ -293,7 +306,7 @@ mod tests {
     fn file_persistence_save_app_settings_preserves_discovery() {
         let dir = tempfile::tempdir().unwrap();
         let mut p = FilePersistence::new(dir.path().join("state.json"));
-        let cfg = crate::types::DiscoveryConfig { mlx_lm_search_paths: vec!["/x".into()], ollama_executable_path: None };
+        let cfg = crate::types::DiscoveryConfig { mlx_lm_search_paths: vec!["/x".into()] };
         p.save_discovery_config(&cfg).unwrap();
         p.save_app_settings(&AppSettings { keep_servers_running_on_quit: true }).unwrap();
         assert_eq!(p.load_discovery_config().unwrap(), cfg);

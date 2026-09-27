@@ -32,8 +32,12 @@ A new `DiscoveryConfig` struct holds:
   HF-cached mlx-lm models. Empty means fall back to `$HF_HOME` /
   `~/.cache/huggingface/hub` at scan time (handled by `effective_search_paths`
   in the driver).
-- `ollama_executable_path: Option<String>` — optional override for the ollama
-  binary path; `None` means resolve via system PATH.
+
+`DiscoveryConfig` originally also held `ollama_executable_path: Option<String>`,
+an override for the ollama binary path. #62 removed the `ollama list` CLI
+fallback that read it, leaving it dead; #77 removed the field. Old
+`state.json` files with the key still load, since `DiscoveryConfig` does not
+use `deny_unknown_fields`.
 
 `ServerInstanceConfig` gains `model_search_path_override: Option<String>`, a
 per-instance scan path that, when set, replaces the global list for that
