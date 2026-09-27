@@ -221,9 +221,18 @@ fn model_ref_from_json(m: &serde_json::Value) -> Result<ModelRef, String> {
     Ok(ModelRef { display_name: key.clone(), key, publisher: None, architecture: None, size_bytes: m["size"].as_i64(), modified_secs: None })
 }
 
-pub fn resolve_models_dir(env_value: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
+pub fn resolve_models_dir(
+    env_value: Option<&str>,
+    app_setting: Option<&str>,
+    home: Option<&str>,
+) -> Option<PathBuf> {
     if let Some(dir) = env_value {
         if !dir.is_empty() {
+            return Some(PathBuf::from(dir));
+        }
+    }
+    if let Some(dir) = app_setting {
+        if !dir.is_empty() && Path::new(dir).is_dir() {
             return Some(PathBuf::from(dir));
         }
     }
@@ -232,6 +241,16 @@ pub fn resolve_models_dir(env_value: Option<&str>, home: Option<&str>) -> Option
         return None;
     }
     Some(Path::new(home).join(OLLAMA_HOME_DIR_NAME).join(OLLAMA_MODELS_DIR_NAME))
+}
+
+pub fn parse_app_models_setting(output: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(output).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 pub fn list_models_from_manifests(models_dir: &Path) -> Result<Vec<ModelRef>, String> {
@@ -477,30 +496,85 @@ mod manifest_tests {
 
     #[test]
     fn resolve_models_dir_prefers_env_override() {
-        let dir = resolve_models_dir(Some("/custom/models"), Some("/Users/someone")).unwrap();
+        let dir = resolve_models_dir(Some("/custom/models"), None, Some("/Users/someone")).unwrap();
         assert_eq!(dir, PathBuf::from("/custom/models"));
     }
 
     #[test]
     fn resolve_models_dir_falls_back_to_home() {
-        let dir = resolve_models_dir(None, Some("/Users/someone")).unwrap();
+        let dir = resolve_models_dir(None, None, Some("/Users/someone")).unwrap();
         assert_eq!(dir, PathBuf::from("/Users/someone/.ollama/models"));
     }
 
     #[test]
     fn resolve_models_dir_empty_env_falls_back_to_home() {
-        let dir = resolve_models_dir(Some(""), Some("/Users/someone")).unwrap();
+        let dir = resolve_models_dir(Some(""), None, Some("/Users/someone")).unwrap();
         assert_eq!(dir, PathBuf::from("/Users/someone/.ollama/models"));
     }
 
     #[test]
     fn resolve_models_dir_no_env_no_home_is_none() {
-        assert!(resolve_models_dir(None, None).is_none());
+        assert!(resolve_models_dir(None, None, None).is_none());
     }
 
     #[test]
     fn resolve_models_dir_empty_home_is_none() {
-        assert!(resolve_models_dir(None, Some("")).is_none());
+        assert!(resolve_models_dir(None, None, Some("")).is_none());
+    }
+
+    #[test]
+    fn resolve_models_dir_env_wins_over_app_setting() {
+        let tmp = TempDir::new().unwrap();
+        let app_dir = tmp.path().join("app-models");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        let dir = resolve_models_dir(
+            Some("/custom/models"),
+            Some(app_dir.to_str().unwrap()),
+            Some("/Users/someone"),
+        )
+        .unwrap();
+        assert_eq!(dir, PathBuf::from("/custom/models"));
+    }
+
+    #[test]
+    fn resolve_models_dir_app_setting_wins_over_home() {
+        let tmp = TempDir::new().unwrap();
+        let app_dir = tmp.path().join("app-models");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        let dir = resolve_models_dir(None, Some(app_dir.to_str().unwrap()), Some("/Users/someone")).unwrap();
+        assert_eq!(dir, app_dir);
+    }
+
+    #[test]
+    fn resolve_models_dir_empty_app_setting_falls_back_to_home() {
+        let dir = resolve_models_dir(None, Some(""), Some("/Users/someone")).unwrap();
+        assert_eq!(dir, PathBuf::from("/Users/someone/.ollama/models"));
+    }
+
+    #[test]
+    fn resolve_models_dir_missing_app_setting_dir_falls_back_to_home() {
+        let dir = resolve_models_dir(None, Some("/no/such/dir/for/localbar/tests"), Some("/Users/someone")).unwrap();
+        assert_eq!(dir, PathBuf::from("/Users/someone/.ollama/models"));
+    }
+
+    #[test]
+    fn parse_app_models_setting_trims_whitespace() {
+        assert_eq!(
+            parse_app_models_setting(b"/Users/someone/SharedModels/Ollama\n").unwrap(),
+            "/Users/someone/SharedModels/Ollama"
+        );
+    }
+
+    #[test]
+    fn parse_app_models_setting_empty_is_none() {
+        assert!(parse_app_models_setting(b"").is_none());
+        assert!(parse_app_models_setting(b"\n").is_none());
+        assert!(parse_app_models_setting(b"   \n").is_none());
+    }
+
+    #[test]
+    fn parse_app_models_setting_invalid_utf8_is_none() {
+        assert!(parse_app_models_setting(&[0xff, 0xfe, 0xfd]).is_none());
     }
 }
 
