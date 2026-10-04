@@ -170,6 +170,14 @@ impl InstanceRegistry {
         Ok(())
     }
 
+    pub fn last_update_check(&self) -> Option<i64> {
+        self.persistence.load_last_update_check().ok().flatten()
+    }
+
+    pub fn record_update_check(&mut self, secs: i64) -> Result<(), String> {
+        self.persistence.save_last_update_check(secs)
+    }
+
     pub fn instance_count(&self) -> usize {
         self.instances.len()
     }

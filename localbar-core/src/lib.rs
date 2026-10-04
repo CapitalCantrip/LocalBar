@@ -13,6 +13,7 @@ pub mod quit;
 pub mod registry;
 pub mod testing;
 pub mod types;
+pub mod update_check;
 
 use uuid::Uuid;
 
@@ -184,6 +185,12 @@ mod tests {
         }
         fn load_app_settings(&self) -> Result<crate::types::AppSettings, String> {
             self.0.lock().unwrap().load_app_settings()
+        }
+        fn save_last_update_check(&mut self, secs: i64) -> Result<(), String> {
+            self.0.lock().unwrap().save_last_update_check(secs)
+        }
+        fn load_last_update_check(&self) -> Result<Option<i64>, String> {
+            self.0.lock().unwrap().load_last_update_check()
         }
     }
 

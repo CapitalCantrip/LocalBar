@@ -14,6 +14,8 @@ pub trait Persistence: Send + Sync {
     fn load_discovery_config(&self) -> Result<DiscoveryConfig, String>;
     fn save_app_settings(&mut self, settings: &AppSettings) -> Result<(), String>;
     fn load_app_settings(&self) -> Result<AppSettings, String>;
+    fn save_last_update_check(&mut self, secs: i64) -> Result<(), String>;
+    fn load_last_update_check(&self) -> Result<Option<i64>, String>;
 }
 
 #[derive(Debug, Default)]
@@ -23,6 +25,7 @@ pub struct InMemoryPersistence {
     model_memory: HashMap<ModelMemoryKey, ModelMemory>,
     discovery_config: DiscoveryConfig,
     app_settings: AppSettings,
+    last_update_check: Option<i64>,
 }
 
 impl Persistence for InMemoryPersistence {
@@ -70,6 +73,15 @@ impl Persistence for InMemoryPersistence {
     fn load_app_settings(&self) -> Result<AppSettings, String> {
         Ok(self.app_settings.clone())
     }
+
+    fn save_last_update_check(&mut self, secs: i64) -> Result<(), String> {
+        self.last_update_check = Some(secs);
+        Ok(())
+    }
+
+    fn load_last_update_check(&self) -> Result<Option<i64>, String> {
+        Ok(self.last_update_check)
+    }
 }
 
 pub struct FilePersistence {
@@ -88,6 +100,8 @@ struct StorageFile {
     discovery: DiscoveryConfig,
     #[serde(default)]
     settings: AppSettings,
+    #[serde(default)]
+    last_update_check_secs: Option<i64>,
 }
 
 impl FilePersistence {
@@ -162,6 +176,16 @@ impl Persistence for FilePersistence {
 
     fn load_app_settings(&self) -> Result<AppSettings, String> {
         Ok(self.read()?.settings)
+    }
+
+    fn save_last_update_check(&mut self, secs: i64) -> Result<(), String> {
+        let mut file = self.read()?;
+        file.last_update_check_secs = Some(secs);
+        self.write(&file)
+    }
+
+    fn load_last_update_check(&self) -> Result<Option<i64>, String> {
+        Ok(self.read()?.last_update_check_secs)
     }
 }
 
@@ -328,6 +352,31 @@ mod tests {
         .unwrap();
         let p = FilePersistence::new(path);
         assert!(p.load_app_settings().unwrap().restore_running_servers_on_launch);
+    }
+
+    #[test]
+    fn file_persistence_legacy_state_without_update_fields_loads_check_on_and_never_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"instances":[],"discovery":{},"settings":{"keep_servers_running_on_quit":true,"restore_running_servers_on_launch":false}}"#,
+        )
+        .unwrap();
+        let p = FilePersistence::new(path);
+        assert!(p.load_app_settings().unwrap().check_for_updates);
+        assert_eq!(p.load_last_update_check().unwrap(), None);
+    }
+
+    #[test]
+    fn file_persistence_last_update_check_round_trips_and_preserves_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = FilePersistence::new(dir.path().join("state.json"));
+        let settings = AppSettings { check_for_updates: false, ..AppSettings::default() };
+        p.save_app_settings(&settings).unwrap();
+        p.save_last_update_check(1_700_000_000).unwrap();
+        assert_eq!(p.load_last_update_check().unwrap(), Some(1_700_000_000));
+        assert_eq!(p.load_app_settings().unwrap(), settings);
     }
 
     #[test]
