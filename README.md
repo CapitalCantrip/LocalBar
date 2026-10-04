@@ -154,7 +154,9 @@ localbar/
 │   │   └── settings/       # Settings window (configuration surface)
 │   └── tauri.conf.json
 └── docs/
-    └── adr/                # Architecture decision records
+    ├── adr/                # Architecture decision records
+    ├── manual-tests/       # Dated checklists of tests to do by hand
+    └── releasing.md        # How to cut a release
 ```
 
 ---
@@ -173,6 +175,14 @@ localbar/
 | D8 | Concurrent servers allowed; warn before starting a second |
 | D9 | Dynamic activation policy — Cmd+Tab present while Settings is open, absent otherwise |
 | D10 | Model scan path persisted; HF cache default |
+| D11 | Model scan path persistence carried over to the Tauri app |
+| D12 | Lifecycle logic lives in `localbar-core`, not the Tauri layer |
+| D13 | No code comments; rationale lives in ADRs, issues and test names |
+| D14 | macOS shell workarounds |
+| D15 | TypeScript types generated from Rust with ts-rs |
+| D16 | Server executables found via the login-shell PATH plus common folders, so apps opened from Finder work |
+| D17 | mlx-lm launcher detection and the Install offer |
+| D18 | Version shown in the app; daily, opt-out check for new GitHub releases (notify only) |
 | D-G | Tauri rewrite — Rust core + React frontend, replaces the Swift prototype |
 | D-H | No in-app chat panel — LocalBar is a control plane, not a frontend |
 | D-I | Windows: CLI binary first, GUI later |
