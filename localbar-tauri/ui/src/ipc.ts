@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
-import type { AdoptResultDto, InstallPlanDto, MlxDetectionDto, ReconnectNoticeDto, AppSettings, CanonicalParam, DiscoveredModel, DiscoveryConfig, InstancePhase, InstancePidDto, ModelMetadata, ModelRef, ParamValues, ResolvedModelsDir, ServerInstanceConfig } from './types'
+import type { AdoptResultDto, InstallPlanDto, MlxDetectionDto, ReconnectNoticeDto, AppSettings, CanonicalParam, DiscoveredModel, DiscoveryConfig, InstancePhase, InstancePidDto, ModelMetadata, ModelRef, ParamValues, ResolvedModelsDir, ServerInstanceConfig, UpdateCheckOutcome } from './types'
 
 export async function pickPath(options: { directory: boolean }): Promise<string | null> {
   const result = await open({ directory: options.directory, multiple: false })
@@ -135,4 +135,13 @@ export const ipc = {
 
   openUrl: (url: string): Promise<void> =>
     invoke('open_url', { url }),
+
+  getAppVersion: (): Promise<string> =>
+    invoke('get_app_version'),
+
+  getUpdateStatus: (): Promise<UpdateCheckOutcome | null> =>
+    invoke('get_update_status'),
+
+  checkForUpdatesNow: (): Promise<UpdateCheckOutcome> =>
+    invoke('check_for_updates_now'),
 }

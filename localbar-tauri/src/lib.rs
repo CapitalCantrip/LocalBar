@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 mod exec_path;
 mod tool_install;
+mod update;
 
 use localbar_core::driver::{HealthStatus, ModelMetadata, ServerDriver};
 use localbar_core::drivers::external::ExternalDriver;
@@ -1499,7 +1500,7 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let tray = TrayIconBuilder::new()
         .icon(icon)
         .icon_as_template(true)
-        .tooltip(concat!("LocalBar v", env!("CARGO_PKG_VERSION")))
+        .tooltip(format!("LocalBar {}", update::app_version(app.handle())))
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click { button_state, .. } = event {
                 if button_state != tauri::tray::MouseButtonState::Up {
@@ -1640,6 +1641,7 @@ fn setup_handler(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
     install_popover_key_monitor(app);
     wire_settings_close(app);
     on_startup(app);
+    update::start(app);
     Ok(())
 }
 
@@ -1658,6 +1660,7 @@ pub fn run() {
             adopt_as_external_instance,
             open_settings, open_settings_for_instance, quit_app, open_url,
             detect_mlx_launcher, cancel_mlx_detection, get_install_plan, install_tool_for_instance,
+            update::get_app_version, update::get_update_status, update::check_for_updates_now,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

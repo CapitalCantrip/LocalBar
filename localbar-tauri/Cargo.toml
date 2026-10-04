@@ -18,6 +18,7 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 sysinfo = { workspace = true }
 tokio = { workspace = true }
+ureq = { workspace = true }
 ts-rs = { workspace = true, optional = true }
 
 [features]

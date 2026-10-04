@@ -17,6 +17,7 @@ export type { ReconnectNoticeDto } from './generated/ReconnectNoticeDto'
 export type { InstallPlanDto } from './generated/InstallPlanDto'
 export type { MlxDetectionDto } from './generated/MlxDetectionDto'
 export type { MlxDetectionProgressDto } from './generated/MlxDetectionProgressDto'
+export type { UpdateCheckOutcome } from './generated/UpdateCheckOutcome'
 
 import type { InstancePhaseDto as InstancePhase } from './generated/InstancePhaseDto'
 export type { InstancePhase }

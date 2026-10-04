@@ -13,6 +13,7 @@ import { useInstances } from '../useInstances'
 import { MissingExecutableActions, isExecutableNotFound } from '../MissingExecutableActions'
 import { startWithWarnings } from '../startWithWarnings'
 import { useReconnectNotices } from '../useReconnectNotices'
+import { UpdateAvailableLink, useVersionInfo } from '../useVersionInfo'
 
 const s = {
   root: {
@@ -55,6 +56,10 @@ const s = {
   },
   divider: { height: 1, background: '#ddd', margin: 0 },
   footer: { display: 'flex', gap: 8, padding: '10px 12px' },
+  versionLine: {
+    display: 'flex', justifyContent: 'space-between', gap: 8,
+    padding: '0 12px 8px', fontSize: 11, color: '#999',
+  },
   footerBtn: {
     flex: 1, padding: '5px 10px', border: '1px solid #ccc', borderRadius: 6,
     background: 'white', cursor: 'pointer', fontSize: 12, fontFamily: 'inherit',
@@ -150,6 +155,7 @@ function InstanceRow({ instance, phase, pid, reconnectNotice, onStart, onStop, o
 export default function PopoverApp() {
   const { instances, phases, pids, refresh } = useInstances()
   const reconnectNotices = useReconnectNotices()
+  const { version, update } = useVersionInfo()
   const [notice, setNotice] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<{ id: string; msg: string; resolve: (v: boolean) => void } | null>(null)
 
@@ -224,6 +230,12 @@ export default function PopoverApp() {
         )}
         <button style={s.footerBtn} onClick={() => ipc.quitApp()}>Quit</button>
       </div>
+      {version && (
+        <div style={s.versionLine}>
+          <span>LocalBar {version}</span>
+          <UpdateAvailableLink update={update} />
+        </div>
+      )}
     </div>
   )
 }

@@ -1812,6 +1812,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tokio",
  "ts-rs",
+ "ureq",
  "uuid",
 ]
 

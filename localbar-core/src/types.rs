@@ -172,11 +172,13 @@ pub struct AppSettings {
     pub keep_servers_running_on_quit: bool,
     #[serde(default = "default_true")]
     pub restore_running_servers_on_launch: bool,
+    #[serde(default = "default_true")]
+    pub check_for_updates: bool,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
-        Self { keep_servers_running_on_quit: false, restore_running_servers_on_launch: true }
+        Self { keep_servers_running_on_quit: false, restore_running_servers_on_launch: true, check_for_updates: true }
     }
 }
 
