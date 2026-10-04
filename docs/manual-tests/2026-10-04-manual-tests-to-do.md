@@ -23,7 +23,7 @@ Settings → General has two switches: **Keep servers running when LocalBar quit
 - [ ] In an instance's detail panel, the **"Model folder (overrides Discovery)"** field picks a folder and changes that instance's model list.
 - [ ] In **Add Instance**, the **Model folder** field works for both Ollama and mlx-lm.
 
-## B. Needs v0.3.2 (not released yet)
+## B. Needs v0.3.2 or later
 
 ### B1. Install button and mlx-lm detection (#88, PR #91, commit `a6ed156`)
 - [ ] **Add Instance → mlx-lm**: the executable field fills in by itself, probably with `uv` or `uvx`.
@@ -34,10 +34,18 @@ Settings → General has two switches: **Keep servers running when LocalBar quit
 - [ ] **Install… dialog:** it lists the exact commands before running anything. On your Mac it should only need `uv tool install mlx-lm`, since uv is already installed. Confirm it, and afterwards the instance should switch to `mlx_lm.server` and offer Start.
 - [ ] **Install… on an Ollama instance:** it should show a link to ollama.com/download and install nothing.
 
-### B2. Detection progress (#92, in progress)
+### B2. Detection progress (#92, PR #95, commit `7e15a0b`)
 - [ ] While Add Instance → mlx-lm is searching, a line shows each place it's checking, with a seconds counter.
 - [ ] **Skip** stops the search, and the form stays usable the whole time.
 - [ ] When it finishes, one plain line says what was found, or explains what to do if nothing was found.
 
+## C. Needs v0.3.3
+
+### C1. Version and update check (#97, PR #98, commit `ae5ebab`)
+- [ ] The version **"LocalBar 0.3.3"** appears in three places: the tray icon tooltip, the bottom of the menu bar popover, and the bottom of Settings → General.
+- [ ] **Settings → General → Updates:** "Check GitHub for new versions once a day" is ticked by default. Click **Check now**; it should say **"You're up to date"**.
+- [ ] **Seeing the notice:** this can only be tested properly once a newer release (v0.3.4 or later) exists. Open v0.3.3 then; within about 15 seconds the popover and General tab should show "v0.3.4 is available", and clicking it should open the release page in your browser.
+- [ ] Untick the checkbox. The notice should disappear, and **Check now** should still work when clicked.
+
 ## Related, but not a test
-- [ ] **Opening the unsigned app** (#93). You decided not to join the Apple Developer Program for now. When you install v0.3.2, check that the README's "Installation → Option 1" steps and the release-page instructions match what you actually see.
+- [ ] **Opening the unsigned app** (#93). You decided not to join the Apple Developer Program for now. When you install v0.3.3, check that the README's "Installation → Option 1" steps and the release-page instructions match what you actually see.
