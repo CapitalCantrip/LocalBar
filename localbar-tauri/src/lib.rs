@@ -825,8 +825,8 @@ fn set_instance_executable_path(state: State<'_, AppState>, id: String, path: St
 }
 
 #[tauri::command]
-async fn detect_mlx_launcher(app: AppHandle, force: bool) -> Result<tool_install::MlxDetectionDto, String> {
-    tauri::async_runtime::spawn_blocking(move || tool_install::detect_mlx_launcher(force, progress_emitter(app)))
+async fn detect_mlx_launcher(app: AppHandle, request_id: String, force: bool) -> Result<tool_install::MlxDetectionDto, String> {
+    tauri::async_runtime::spawn_blocking(move || tool_install::detect_mlx_launcher(&request_id, force, progress_emitter(app)))
         .await
         .map_err(|e| e.to_string())
 }
@@ -838,8 +838,8 @@ fn progress_emitter(app: AppHandle) -> impl FnMut(String) {
 }
 
 #[tauri::command]
-fn cancel_mlx_detection() {
-    tool_install::cancel_mlx_detection();
+fn cancel_mlx_detection(request_id: String) {
+    tool_install::cancel_mlx_detection(&request_id);
 }
 
 #[tauri::command]

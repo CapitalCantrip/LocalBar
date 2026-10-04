@@ -2,7 +2,7 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use localbar_core::executable::{self, TargetOs, PATH_ENV_VAR};
@@ -76,65 +76,119 @@ fn detection_dto(outcome: &MlxDetection) -> MlxDetectionDto {
 }
 
 type CancelToken = Arc<AtomicBool>;
+type ResultSlot = Arc<Mutex<Option<MlxDetection>>>;
+
+const INSTALL_DETECTION_REQUEST: &str = "install";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DetectionRequest<'a> {
+    pub id: &'a str,
+    pub force: bool,
+    pub owned_by_install: bool,
+}
+
+struct RunningDetection {
+    token: CancelToken,
+    requesters: Vec<String>,
+    owned_by_install: bool,
+    result: ResultSlot,
+}
 
 struct CoordinatorState {
-    current: Option<CancelToken>,
+    current: Option<RunningDetection>,
     cache: Option<MlxDetection>,
 }
 
 pub struct DetectionCoordinator {
     state: Mutex<CoordinatorState>,
+    changed: Condvar,
+}
+
+enum Joined {
+    Cached(MlxDetection),
+    Waiting(ResultSlot),
+    Started(CancelToken, ResultSlot),
 }
 
 impl DetectionCoordinator {
     const fn new() -> Self {
-        DetectionCoordinator { state: Mutex::new(CoordinatorState { current: None, cache: None }) }
+        DetectionCoordinator { state: Mutex::new(CoordinatorState { current: None, cache: None }), changed: Condvar::new() }
     }
 
-    fn begin(&self) -> CancelToken {
+    fn join_or_start(&self, request: DetectionRequest) -> Joined {
+        let mut state = self.state.lock().unwrap();
+        if !request.force {
+            if let Some(cached) = state.cache.clone() {
+                return Joined::Cached(cached);
+            }
+        }
         let token = CancelToken::default();
-        let mut state = self.state.lock().unwrap();
-        if let Some(previous) = state.current.replace(token.clone()) {
-            previous.store(true, Ordering::SeqCst);
-        }
-        token
+        let (requesters, result) = match state.current.take() {
+            Some(mut running) if !request.force || running.owned_by_install => {
+                running.requesters.push(request.id.to_string());
+                let result = running.result.clone();
+                state.current = Some(running);
+                return Joined::Waiting(result);
+            }
+            Some(superseded) => {
+                superseded.token.store(true, Ordering::SeqCst);
+                let mut requesters = superseded.requesters;
+                requesters.push(request.id.to_string());
+                (requesters, superseded.result)
+            }
+            None => (vec![request.id.to_string()], ResultSlot::default()),
+        };
+        state.current = Some(RunningDetection { token: token.clone(), requesters, owned_by_install: request.owned_by_install, result: result.clone() });
+        Joined::Started(token, result)
     }
 
-    fn cancel(&self) {
-        if let Some(current) = self.state.lock().unwrap().current.take() {
-            current.store(true, Ordering::SeqCst);
-        }
-    }
-
-    fn finish(&self, token: &CancelToken, outcome: &MlxDetection) {
+    fn finish(&self, token: &CancelToken, outcome: MlxDetection) {
         let mut state = self.state.lock().unwrap();
-        if !state.current.as_ref().is_some_and(|c| Arc::ptr_eq(c, token)) {
+        if !state.current.as_ref().is_some_and(|r| Arc::ptr_eq(&r.token, token)) {
             return;
         }
-        state.current = None;
+        let running = state.current.take().expect("checked above");
         if outcome.is_worth_caching() {
             state.cache = Some(outcome.clone());
         }
+        *running.result.lock().unwrap() = Some(outcome);
+        self.changed.notify_all();
     }
 
-    fn cached(&self) -> Option<MlxDetection> {
-        self.state.lock().unwrap().cache.clone()
+    fn wait_for(&self, request_id: &str, result: &ResultSlot) -> MlxDetection {
+        let still_waiting = |state: &mut CoordinatorState| {
+            result.lock().unwrap().is_none()
+                && state.current.as_ref().is_some_and(|r| Arc::ptr_eq(&r.result, result) && r.requesters.iter().any(|id| id == request_id))
+        };
+        let _state = self.changed.wait_while(self.state.lock().unwrap(), still_waiting).unwrap();
+        result.lock().unwrap().clone().unwrap_or(MlxDetection::Cancelled)
+    }
+
+    fn cancel(&self, request_id: &str) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(running) = state.current.as_mut() {
+            running.requesters.retain(|id| id != request_id);
+            if running.requesters.is_empty() {
+                running.token.store(true, Ordering::SeqCst);
+            }
+        }
+        self.changed.notify_all();
     }
 
     fn invalidate(&self) {
         self.state.lock().unwrap().cache = None;
     }
 
-    fn detect(&self, force: bool, run: impl FnOnce(&AtomicBool) -> MlxDetection) -> MlxDetection {
-        if !force {
-            if let Some(cached) = self.cached() {
-                return cached;
+    fn detect(&self, request: DetectionRequest, run: impl FnOnce(&AtomicBool) -> MlxDetection) -> MlxDetection {
+        match self.join_or_start(request) {
+            Joined::Cached(cached) => cached,
+            Joined::Waiting(result) => self.wait_for(request.id, &result),
+            Joined::Started(token, result) => {
+                let outcome = run(&token);
+                self.finish(&token, outcome);
+                self.wait_for(request.id, &result)
             }
         }
-        let token = self.begin();
-        let outcome = run(&token);
-        self.finish(&token, &outcome);
-        outcome
     }
 }
 
@@ -275,12 +329,13 @@ fn run_detection(cancel: &AtomicBool, mut on_progress: impl FnMut(String)) -> Ml
     )
 }
 
-pub fn detect_mlx_launcher(force: bool, on_progress: impl FnMut(String)) -> MlxDetectionDto {
-    detection_dto(&DETECTIONS.detect(force, |cancel| run_detection(cancel, on_progress)))
+pub fn detect_mlx_launcher(request_id: &str, force: bool, on_progress: impl FnMut(String)) -> MlxDetectionDto {
+    let request = DetectionRequest { id: request_id, force, owned_by_install: false };
+    detection_dto(&DETECTIONS.detect(request, |cancel| run_detection(cancel, on_progress)))
 }
 
-pub fn cancel_mlx_detection() {
-    DETECTIONS.cancel();
+pub fn cancel_mlx_detection(request_id: &str) {
+    DETECTIONS.cancel(request_id);
 }
 
 fn resolve_absolute(command: &str) -> Option<String> {
@@ -348,7 +403,8 @@ pub fn install_mlx_lm(on_progress: impl FnMut(String)) -> Result<String, String>
     )
     .map_err(|f| f.message())?;
     DETECTIONS.invalidate();
-    let found = detect_mlx_launcher(true, on_progress);
+    let request = DetectionRequest { id: INSTALL_DETECTION_REQUEST, force: true, owned_by_install: true };
+    let found = detection_dto(&DETECTIONS.detect(request, |cancel| run_detection(cancel, on_progress)));
     found.executable.ok_or_else(|| format!("mlx-lm was installed, but no launcher could be found afterwards. {}", found.message))
 }
 
@@ -458,15 +514,80 @@ mod tests {
         MlxDetection::Found { executable: "uv".into(), path: "/a/uv".into() }
     }
 
+    fn cached(coordinator: &DetectionCoordinator) -> Option<MlxDetection> {
+        coordinator.state.lock().unwrap().cache.clone()
+    }
+
+    fn add_instance(id: &str, force: bool) -> DetectionRequest<'_> {
+        DetectionRequest { id, force, owned_by_install: false }
+    }
+
+    const INSTALL: DetectionRequest<'static> = DetectionRequest { id: INSTALL_DETECTION_REQUEST, force: true, owned_by_install: true };
+
+    fn started(joined: Joined) -> (CancelToken, ResultSlot) {
+        match joined {
+            Joined::Started(token, result) => (token, result),
+            _ => panic!("expected a new detection to start"),
+        }
+    }
+
     #[test]
-    fn starting_a_detection_cancels_the_one_already_running() {
+    fn a_forced_request_supersedes_an_add_instance_detection() {
         let coordinator = DetectionCoordinator::new();
-        let first = coordinator.begin();
-        let second = coordinator.begin();
+        let (first, _) = started(coordinator.join_or_start(add_instance("a", false)));
+        let (second, _) = started(coordinator.join_or_start(add_instance("b", true)));
         assert!(first.load(Ordering::SeqCst));
         assert!(!second.load(Ordering::SeqCst));
-        coordinator.cancel();
-        assert!(second.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn cancelling_only_stops_the_detection_the_caller_requested() {
+        let coordinator = DetectionCoordinator::new();
+        let (token, _) = started(coordinator.join_or_start(add_instance("a", false)));
+        coordinator.cancel("someone-else");
+        assert!(!token.load(Ordering::SeqCst));
+        coordinator.cancel("a");
+        assert!(token.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_non_forced_request_during_a_running_detection_receives_its_result_without_starting_another() {
+        let coordinator = Arc::new(DetectionCoordinator::new());
+        let (token, _) = started(coordinator.join_or_start(add_instance("a", false)));
+        let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let joiner = {
+            let (coordinator, runs) = (coordinator.clone(), runs.clone());
+            std::thread::spawn(move || coordinator.detect(add_instance("b", false), |_| { runs.fetch_add(1, Ordering::SeqCst); MlxDetection::NotFound }))
+        };
+        while coordinator.state.lock().unwrap().current.as_ref().is_some_and(|r| r.requesters.len() < 2) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        coordinator.finish(&token, uv_found());
+        assert_eq!(joiner.join().unwrap(), uv_found());
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn closing_add_instance_during_an_install_re_detection_leaves_it_running_and_caches_its_result() {
+        let coordinator = DetectionCoordinator::new();
+        let (token, _) = started(coordinator.join_or_start(INSTALL));
+        assert!(matches!(coordinator.join_or_start(add_instance("sheet", false)), Joined::Waiting(_)));
+        coordinator.cancel("sheet");
+        assert!(matches!(coordinator.join_or_start(add_instance("again", true)), Joined::Waiting(_)));
+        coordinator.cancel("again");
+        assert!(!token.load(Ordering::SeqCst));
+        coordinator.finish(&token, uv_found());
+        assert_eq!(cached(&coordinator), Some(uv_found()));
+    }
+
+    #[test]
+    fn a_cancelled_requester_stops_waiting_while_the_detection_continues_for_others() {
+        let coordinator = DetectionCoordinator::new();
+        let (token, result) = started(coordinator.join_or_start(INSTALL));
+        coordinator.join_or_start(add_instance("sheet", false));
+        coordinator.cancel("sheet");
+        assert_eq!(coordinator.wait_for("sheet", &result), MlxDetection::Cancelled);
+        assert!(!token.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -474,31 +595,32 @@ mod tests {
         let coordinator = DetectionCoordinator::new();
         let runs = std::cell::Cell::new(0);
         let run = |_: &AtomicBool| { runs.set(runs.get() + 1); uv_found() };
-        assert_eq!(coordinator.detect(false, run), uv_found());
-        assert_eq!(coordinator.detect(false, run), uv_found());
+        assert_eq!(coordinator.detect(add_instance("a", false), run), uv_found());
+        assert_eq!(coordinator.detect(add_instance("a", false), run), uv_found());
         assert_eq!(runs.get(), 1);
-        coordinator.detect(true, run);
+        coordinator.detect(add_instance("a", true), run);
         assert_eq!(runs.get(), 2);
         coordinator.invalidate();
-        coordinator.detect(false, run);
+        coordinator.detect(add_instance("a", false), run);
         assert_eq!(runs.get(), 3);
     }
 
     #[test]
     fn a_cancelled_detection_is_not_cached() {
         let coordinator = DetectionCoordinator::new();
-        coordinator.detect(false, |_| MlxDetection::Cancelled);
-        assert_eq!(coordinator.cached(), None);
+        coordinator.detect(add_instance("a", false), |_| MlxDetection::Cancelled);
+        assert_eq!(cached(&coordinator), None);
     }
 
     #[test]
-    fn a_superseded_detection_never_overwrites_the_newer_result() {
+    fn a_superseded_detection_never_overwrites_the_newer_result_and_its_waiters_get_the_newer_one() {
         let coordinator = DetectionCoordinator::new();
-        let old = coordinator.begin();
-        let newer = coordinator.begin();
-        coordinator.finish(&old, &MlxDetection::NotFound);
-        assert_eq!(coordinator.cached(), None);
-        coordinator.finish(&newer, &uv_found());
-        assert_eq!(coordinator.cached(), Some(uv_found()));
+        let (old, result) = started(coordinator.join_or_start(add_instance("a", false)));
+        let (newer, _) = started(coordinator.join_or_start(add_instance("b", true)));
+        coordinator.finish(&old, MlxDetection::Cancelled);
+        assert_eq!(cached(&coordinator), None);
+        coordinator.finish(&newer, uv_found());
+        assert_eq!(cached(&coordinator), Some(uv_found()));
+        assert_eq!(coordinator.wait_for("a", &result), uv_found());
     }
 }

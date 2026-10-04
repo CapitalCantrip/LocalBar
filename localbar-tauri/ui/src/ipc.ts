@@ -118,11 +118,11 @@ export const ipc = {
   openSettingsForInstance: (id: string, install: boolean): Promise<void> =>
     invoke('open_settings_for_instance', { id, install }),
 
-  detectMlxLauncher: (force: boolean): Promise<MlxDetectionDto> =>
-    invoke('detect_mlx_launcher', { force }),
+  detectMlxLauncher: (requestId: string, force: boolean): Promise<MlxDetectionDto> =>
+    invoke('detect_mlx_launcher', { requestId, force }),
 
-  cancelMlxDetection: (): Promise<void> =>
-    invoke('cancel_mlx_detection'),
+  cancelMlxDetection: (requestId: string): Promise<void> =>
+    invoke('cancel_mlx_detection', { requestId }),
 
   getInstallPlan: (id: string): Promise<InstallPlanDto> =>
     invoke('get_install_plan', { id }),

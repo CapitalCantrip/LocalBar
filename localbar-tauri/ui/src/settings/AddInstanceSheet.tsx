@@ -31,40 +31,44 @@ export function AddInstanceSheet({ onAdd, onCancel }: {
   const [busy, setBusy] = useState(false)
   const [detecting, setDetecting] = useState(false)
   const [detection, setDetection] = useState<MlxDetectionDto | null>(null)
-  const detectionRun = useRef(0)
+  const detectionRequest = useRef<string | null>(null)
   const execPathEdited = useRef(false)
   const progress = useDetectionProgress(detecting)
 
+  const stopDetection = useCallback(() => {
+    const requestId = detectionRequest.current
+    detectionRequest.current = null
+    setDetecting(false)
+    if (requestId !== null) void ipc.cancelMlxDetection(requestId)
+  }, [])
+
   const startDetection = useCallback((force: boolean) => {
-    const run = ++detectionRun.current
+    stopDetection()
+    const requestId = crypto.randomUUID()
+    detectionRequest.current = requestId
     setDetecting(true)
     setDetection(null)
-    ipc.detectMlxLauncher(force)
+    ipc.detectMlxLauncher(requestId, force)
       .then(result => {
-        if (run !== detectionRun.current) return
+        if (requestId !== detectionRequest.current) return
         setDetection(result)
         const found = result.executable
         if (found !== null && !execPathEdited.current) setExecPath(found)
       })
       .catch(() => {})
-      .finally(() => { if (run === detectionRun.current) setDetecting(false) })
-  }, [])
-
-  const stopDetection = useCallback(() => {
-    detectionRun.current++
-    setDetecting(false)
-    void ipc.cancelMlxDetection()
-  }, [])
+      .finally(() => {
+        if (requestId !== detectionRequest.current) return
+        detectionRequest.current = null
+        setDetecting(false)
+      })
+  }, [stopDetection])
 
   useEffect(() => {
     if (serverType !== 'mlx-lm') return
     execPathEdited.current = false
     startDetection(false)
-    return () => {
-      detectionRun.current++
-      void ipc.cancelMlxDetection()
-    }
-  }, [serverType, startDetection])
+    return stopDetection
+  }, [serverType, startDetection, stopDetection])
 
   const editExecPath = (value: string) => {
     execPathEdited.current = true
