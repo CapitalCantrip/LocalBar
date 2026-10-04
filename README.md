@@ -73,24 +73,60 @@ For Ollama: Ollama installed (`brew install ollama` or from [ollama.com](https:/
 
 ## Installation
 
-### Pre-built DMG
+There are two ways to get LocalBar on macOS. Pick one:
 
-Download the latest DMG from [Releases](https://github.com/CapitalCantrip/LocalBar/releases).
+| | Download the DMG | Build it yourself |
+|---|---|---|
+| Effort | A few clicks, plus a one-time approval step | About 10–15 minutes the first time |
+| What you need | Nothing extra | Xcode Command Line Tools, Rust, Node.js |
+| macOS warning | Yes, once per version (see below) | None |
 
-macOS will show an "unidentified developer" warning — LocalBar is not yet signed with an Apple Developer certificate. To open it:
+### Option 1: Download the DMG
 
-1. Right-click `LocalBar.app` → **Open**
-2. Click **Open** in the dialog
+Download the latest `LocalBar_<version>_universal.dmg` from [Releases](https://github.com/CapitalCantrip/LocalBar/releases) and drag `LocalBar.app` to Applications.
 
-You only need to do this once. If you'd rather not take that on trust, build it yourself below — macOS will run self-built apps without any warning.
+**Expect macOS to block it the first time.** LocalBar is free and open source, and isn't signed with a paid Apple Developer certificate (#93). macOS blocks every unsigned app downloaded from the internet, whatever it contains. Since macOS 15 the warning offers only **Move to Bin** or **Done**, and right-click → Open no longer works. This doesn't mean the app is damaged or harmful. If you'd rather not trust a download, use Option 2.
 
-### Build from source
+To allow it, do this once per downloaded version:
+
+1. Open `LocalBar.app` from Applications. When macOS blocks it, click **Done** (not Move to Bin).
+2. Open **System Settings → Privacy & Security** and scroll down to **Security**. Next to "LocalBar was blocked…", click **Open Anyway**.
+3. Confirm with your password or Touch ID, then click **Open**.
+
+LocalBar opens normally from then on.
+
+**Or, if you're comfortable with Terminal,** this one command does the same thing. It removes the "downloaded from the internet" flag from the app:
 
 ```bash
-cd localbar-tauri
-npm install            # install frontend dependencies
-cargo tauri build      # produces LocalBar.app in target/release/bundle/macos/
+xattr -dr com.apple.quarantine /Applications/LocalBar.app
 ```
+
+### Option 2: Build it yourself
+
+macOS runs apps you build on your own Mac without any warning.
+
+One-time setup:
+
+```bash
+xcode-select --install                                              # Apple's command line tools
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh      # Rust (or see rustup.rs)
+brew install node                                                   # Node.js 20+ (or nodejs.org)
+cargo install tauri-cli --version "^2" --locked                     # Tauri's build tool
+```
+
+Build:
+
+```bash
+git clone https://github.com/CapitalCantrip/LocalBar.git
+cd LocalBar/localbar-tauri/ui
+npm ci && npm run build          # build the interface
+cd ..
+cargo tauri build                # build the app (takes a few minutes the first time)
+```
+
+The finished app is at `target/release/bundle/macos/LocalBar.app` in the repository root. A `.dmg` is in `target/release/bundle/dmg/`. Drag the app to Applications.
+
+To update later, run `git pull` and repeat the build step.
 
 For development:
 
@@ -98,6 +134,8 @@ For development:
 cd localbar-tauri
 cargo tauri dev        # hot-reloads the frontend; Rust changes trigger a recompile
 ```
+
+Note that `cargo tauri dev` inherits your terminal's environment, so it can hide problems that only show up when the app is opened from Finder. Test release behaviour with the built app.
 
 ---
 
