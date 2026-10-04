@@ -4,6 +4,8 @@
 **Date:** 2026-07-12  
 **Deciders:** Jay
 
+> How a configured executable is found at spawn time (including the GUI-app `PATH` problem) is decided in [D16](D16-executable-resolution.md); this ADR remains about choosing which launcher to configure.
+
 ---
 
 ## Context

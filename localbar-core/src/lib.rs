@@ -3,6 +3,7 @@
 
 pub mod driver;
 pub mod drivers;
+pub mod executable;
 pub mod lifecycle;
 pub mod model_probe;
 pub mod net;

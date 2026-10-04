@@ -4,6 +4,8 @@
 **Date:** 2026-07-12  
 **Deciders:** Jay
 
+> Executables are resolved to absolute paths at spawn time (login-shell `PATH`, process `PATH`, fallback folders); see [D16](D16-executable-resolution.md). A bare `uvx` keeps the uvx argument form.
+
 ---
 
 ## Context

@@ -10,6 +10,7 @@ import {
   pidLabel,
 } from '../types'
 import { startWithWarnings } from '../startWithWarnings'
+import { MissingExecutableActions, isExecutableNotFound } from '../MissingExecutableActions'
 import { modelLabelForKey } from '../modelLabel'
 import { s } from './styles'
 import { InlineEdit } from './InlineEdit'
@@ -104,6 +105,9 @@ export function DetailPanel({ instance, phase, pid, onRefresh }: {
               onClick={handleAdopt}
               title="Track the server already running on this port as a new external instance"
             >Adopt</button>
+          )}
+          {isExecutableNotFound(phase) && (
+            <MissingExecutableActions instanceId={instance.id} buttonStyle={s.btn()} onChanged={onRefresh} />
           )}
         </div>
         <div style={s.field}>

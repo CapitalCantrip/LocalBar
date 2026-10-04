@@ -274,6 +274,7 @@ pub enum InstanceErrorKind {
     HealthCheckFailed,
     StopFailed,
     ModelSwitchFailed,
+    ExecutableNotFound,
     Unexpected,
 }
 
