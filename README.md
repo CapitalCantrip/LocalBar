@@ -191,23 +191,32 @@ localbar/
 
 ## Status
 
-**MVP functional.** Active development.
+**Released and in active development.** The latest version is on the [Releases](https://github.com/CapitalCantrip/LocalBar/releases) page. The app shows its own version and can tell you when a newer one is out.
+
+| Platform | State |
+|---|---|
+| macOS 14+ (Apple Silicon and Intel) | ✅ Main platform. Universal DMG, unsigned (see [Installation](#installation), #93) |
+| Linux (x86-64 and ARM64) | 🧪 `.deb`, `.rpm` and `.AppImage` are built with every release but haven't been tested by hand yet (#27) |
+| Windows | 🔜 Command-line version first, app later ([D-I](docs/adr/D-I-windows-cli-first.md)) |
 
 **Working:**
-- mlx-lm and Ollama server lifecycle (start, stop, restart, model switch)
-- External server adoption with port conflict detection and explicit Adopt/Retry flow
-- Auto-reconnect: servers left running after quit are re-adopted on next launch
-- Per-engine parameter schema — each driver exposes only the parameters it supports
-- Parameter persistence: auto-memory per model, save-on-change
-- Multiple concurrent instances
-- Tray popover (operational) + Settings window (configuration)
-- macOS-native tray icon with four states; dynamic Dock presence when Settings is open
+- Start, stop, restart and switch models on mlx-lm and Ollama servers
+- Finds `uv`, `uvx`, `mlx_lm.server` or Python on its own, even when opened from Finder. If none is found, offers **Choose…** and **Install…**
+- Shows progress while it searches for mlx-lm, with **Skip**
+- Adopts servers that are already running, detects port conflicts, and offers Adopt/Retry
+- Optionally keeps servers running when LocalBar quits, and restores them on the next launch
+- Lists Ollama models even when the Ollama app isn't running. Model folders can be set globally or per server
+- Each server type shows only the parameters it supports. Parameters are remembered per model
+- Several servers at once, with a memory warning before starting another
+- Tray popover for day-to-day control, plus a Settings window. The tray icon has four states
+- Shows the app version and checks GitHub once a day for new releases (can be turned off)
 
-**Post-MVP:**
-- Named profiles (save and switch named parameter presets)
+**Planned:**
+- Asking which servers to restore when several would start at once (#15)
+- Named profiles (save and switch parameter presets)
 - Context window usage display
 - llama.cpp driver
-- Linux support
+- Signed and notarised macOS build (#93)
 
 ---
 
