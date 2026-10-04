@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 use super::process_match;
 use crate::driver::{HealthStatus, LaunchPlan, ModelMetadata, ServerDriver, ShutdownPlan};
+use crate::executable::{CommandResolver, PATH_ENV_VAR};
 use crate::types::{
     CanonicalParam, ModelRef, ParamDescriptor, ParamValue, ParamValues, ServerInstanceConfig,
     ServerType,
@@ -20,14 +21,30 @@ const DEFAULT_NAMESPACE: &str = "library";
 
 pub const OLLAMA_UNREACHABLE: &str = "OLLAMA_UNREACHABLE";
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Clone, Default)]
 pub struct OllamaDriver {
     models_dir: Option<ResolvedModelsDir>,
+    resolver: Option<CommandResolver>,
 }
 
 impl OllamaDriver {
     pub fn new(models_dir: Option<ResolvedModelsDir>) -> Self {
-        Self { models_dir }
+        Self { models_dir, resolver: None }
+    }
+
+    pub fn with_resolver(mut self, resolver: CommandResolver) -> Self {
+        self.resolver = Some(resolver);
+        self
+    }
+
+    fn cli_command(&self, config: &ServerInstanceConfig) -> Result<std::process::Command, String> {
+        let Some(resolver) = &self.resolver else {
+            return Ok(std::process::Command::new(&config.executable_path));
+        };
+        let resolved = resolver(&config.executable_path).map_err(|e| e.message())?;
+        let mut cmd = std::process::Command::new(resolved.program);
+        cmd.env(PATH_ENV_VAR, resolved.path_env);
+        Ok(cmd)
     }
 
     fn list_models_via_http(&self, config: &ServerInstanceConfig) -> Result<Vec<ModelRef>, String> {
@@ -163,11 +180,12 @@ impl ServerDriver for OllamaDriver {
         tag: &str,
         content: &str,
     ) -> Result<(), String> {
+        let mut cmd = self.cli_command(config)?;
         let path = std::env::temp_dir()
             .join(format!("localbar-{}.modelfile", Uuid::new_v4()));
         std::fs::write(&path, content)
             .map_err(|e| format!("write temp Modelfile: {e}"))?;
-        let status = std::process::Command::new(&config.executable_path)
+        let status = cmd
             .args(["create", tag, "-f"])
             .arg(&path)
             .status()
@@ -181,7 +199,7 @@ impl ServerDriver for OllamaDriver {
         config: &ServerInstanceConfig,
         tag: &str,
     ) -> Result<(), String> {
-        std::process::Command::new(&config.executable_path)
+        self.cli_command(config)?
             .args(["rm", tag])
             .status()
             .map_err(|e| format!("ollama rm spawn: {e}"))?;
@@ -804,6 +822,19 @@ mod tests {
         ] {
             assert!(!OllamaDriver::default().recognises_process(command_line), "{command_line}");
         }
+    }
+
+    #[test]
+    fn managed_config_commands_report_a_missing_executable_without_spawning() {
+        let resolver: CommandResolver = std::sync::Arc::new(|cmd: &str| Err(crate::executable::ExecutableNotFound {
+            command: cmd.to_string(),
+            searched: vec!["/a".into()],
+        }));
+        let driver = OllamaDriver::default().with_resolver(resolver);
+        let config = ServerInstanceConfig::new("o", ServerType::Ollama, 11434, "ollama");
+        let expected = "Couldn't find `ollama`. Looked in: /a";
+        assert_eq!(driver.apply_managed_config(&config, "localbar/x", "FROM x").unwrap_err(), expected);
+        assert_eq!(driver.delete_managed_config(&config, "localbar/x").unwrap_err(), expected);
     }
 
     fn test_schema() -> Vec<ParamDescriptor> {

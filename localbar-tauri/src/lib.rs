@@ -10,6 +10,8 @@ use tauri::{AppHandle, Emitter, Listener, Manager, State, WindowEvent};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use uuid::Uuid;
 
+mod exec_path;
+
 use localbar_core::driver::{HealthStatus, ModelMetadata, ServerDriver};
 use localbar_core::drivers::external::ExternalDriver;
 use localbar_core::drivers::mlx_lm::MLXLMDriver;
@@ -35,6 +37,7 @@ pub enum ErrorKindDto {
     HealthCheckFailed,
     StopFailed,
     ModelSwitchFailed,
+    ExecutableNotFound,
     Unexpected,
 }
 
@@ -118,7 +121,10 @@ impl AppState {
 
 fn driver_for(config: &ServerInstanceConfig, discovery: &DiscoveryConfig) -> Box<dyn ServerDriver> {
     match config.server_type {
-        ServerType::Ollama => Box::new(OllamaDriver::new(ollama::explicit_models_dir(&explicit_ollama_candidates(config, discovery)))),
+        ServerType::Ollama => Box::new(
+            OllamaDriver::new(ollama::explicit_models_dir(&explicit_ollama_candidates(config, discovery)))
+                .with_resolver(exec_path::resolver()),
+        ),
         ServerType::MlxLm => {
             let paths = discovery.resolved_mlx_paths(config.model_search_path_override.as_deref());
             Box::new(MLXLMDriver::new(paths))
@@ -163,7 +169,7 @@ fn detect_ollama_models_dir_blocking() -> Option<ollama::ResolvedModelsDir> {
 
 fn listing_driver_for(config: &ServerInstanceConfig, discovery: &DiscoveryConfig) -> Box<dyn ServerDriver> {
     match config.server_type {
-        ServerType::Ollama => Box::new(OllamaDriver::new(resolve_ollama_models_dir(config, discovery))),
+        ServerType::Ollama => Box::new(OllamaDriver::new(resolve_ollama_models_dir(config, discovery)).with_resolver(exec_path::resolver())),
         _ => driver_for(config, discovery),
     }
 }
@@ -188,6 +194,7 @@ fn error_kind_to_dto(kind: &InstanceErrorKind) -> ErrorKindDto {
         InstanceErrorKind::HealthCheckFailed => ErrorKindDto::HealthCheckFailed,
         InstanceErrorKind::StopFailed => ErrorKindDto::StopFailed,
         InstanceErrorKind::ModelSwitchFailed => ErrorKindDto::ModelSwitchFailed,
+        InstanceErrorKind::ExecutableNotFound => ErrorKindDto::ExecutableNotFound,
         InstanceErrorKind::Unexpected => ErrorKindDto::Unexpected,
     }
 }
@@ -210,9 +217,32 @@ fn instance_pid_to_dto(pid: lifecycle::InstancePid) -> InstancePidDto {
     InstancePidDto { pid: pid.pid, adopted: pid.adopted }
 }
 
-fn spawn_from_plan(plan: &localbar_core::driver::LaunchPlan) -> Result<Child, String> {
-    let mut cmd = std::process::Command::new(&plan.executable);
+enum SpawnError {
+    NotFound(localbar_core::executable::ExecutableNotFound),
+    Failed(String),
+}
+
+impl SpawnError {
+    fn kind(&self) -> InstanceErrorKind {
+        match self {
+            SpawnError::NotFound(_) => InstanceErrorKind::ExecutableNotFound,
+            SpawnError::Failed(_) => InstanceErrorKind::LaunchFailed,
+        }
+    }
+
+    fn message(&self) -> String {
+        match self {
+            SpawnError::NotFound(e) => e.message(),
+            SpawnError::Failed(m) => m.clone(),
+        }
+    }
+}
+
+fn spawn_from_plan(plan: &localbar_core::driver::LaunchPlan) -> Result<Child, SpawnError> {
+    let resolved = exec_path::resolve_command(&plan.executable).map_err(SpawnError::NotFound)?;
+    let mut cmd = std::process::Command::new(&resolved.program);
     cmd.args(&plan.arguments);
+    cmd.env(localbar_core::executable::PATH_ENV_VAR, &resolved.path_env);
     for (k, v) in &plan.environment {
         cmd.env(k, v);
     }
@@ -222,7 +252,7 @@ fn spawn_from_plan(plan: &localbar_core::driver::LaunchPlan) -> Result<Child, St
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::null());
-    cmd.spawn().map_err(|e| format!("spawn failed: {e}"))
+    cmd.spawn().map_err(|e| SpawnError::Failed(format!("spawn failed: {e}")))
 }
 
 #[cfg(unix)]
@@ -433,7 +463,7 @@ async fn switch_model_restart(
             tauri::async_runtime::spawn(run_restart_switch_poll(app.clone(), id, old_key));
             Ok(())
         }
-        Err(e) => fail_switch(app, id, old_key, e),
+        Err(e) => fail_switch(app, id, old_key, e.message()),
     }
 }
 
@@ -490,7 +520,7 @@ async fn run_adopted_health_poll(app: AppHandle, id: Uuid) {
 fn launch_from_plan(app: &AppHandle, id: Uuid, plan: &localbar_core::driver::LaunchPlan) {
     let child = match spawn_from_plan(plan) {
         Ok(c) => c,
-        Err(e) => { set_error_emit(app, id, InstanceErrorKind::LaunchFailed, &e); return; }
+        Err(e) => { set_error_emit(app, id, e.kind(), &e.message()); return; }
     };
     let state = app.state::<AppState>();
     let still_starting = matches!(state.registry.lock().unwrap().get_phase(id), Some(InstancePhase::Starting));
@@ -780,6 +810,16 @@ fn rename_instance(state: State<'_, AppState>, id: String, name: String) -> Resu
     let uuid = parse_uuid(&id)?;
     let mut reg = state.registry.lock().unwrap();
     reg.update_config(uuid, |c| c.name = name)?;
+    reg.save()
+}
+
+#[tauri::command]
+fn set_instance_executable_path(state: State<'_, AppState>, id: String, path: String) -> Result<(), String> {
+    let path = path.trim().to_owned();
+    if path.is_empty() { return Err("executable path cannot be empty".into()); }
+    let uuid = parse_uuid(&id)?;
+    let mut reg = state.registry.lock().unwrap();
+    reg.update_config(uuid, |c| c.executable_path = path)?;
     reg.save()
 }
 
@@ -1515,6 +1555,7 @@ fn load_persisted_state(state: &mut AppState) {
 
 fn setup_handler(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    exec_path::start_shell_path_read();
     let mut state = AppState::new(data_dir);
     load_persisted_state(&mut state);
     app.manage(state);
@@ -1545,7 +1586,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_instances, list_instance_phases, add_instance, remove_instance,
             get_start_warning, list_reconnect_notices, get_instance_pid, check_memory_warning, start_instance, stop_instance,
-            set_start_on_launch, rename_instance, set_instance_port, set_selected_model,
+            set_start_on_launch, rename_instance, set_instance_port, set_instance_executable_path, set_selected_model,
             switch_model_cmd, update_instance_params, set_active_profile_cmd,
             list_models_cmd, list_models_for_type, fetch_model_metadata_cmd, get_resolved_params, get_param_schema,
             list_all_discovered_models,

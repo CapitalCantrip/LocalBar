@@ -10,6 +10,7 @@ import {
   pidLabel,
 } from '../types'
 import { useInstances } from '../useInstances'
+import { MissingExecutableActions, isExecutableNotFound } from '../MissingExecutableActions'
 import { startWithWarnings } from '../startWithWarnings'
 import { useReconnectNotices } from '../useReconnectNotices'
 
@@ -105,7 +106,7 @@ function ConfirmDialog({ message, onConfirm, onCancel }: {
   )
 }
 
-function InstanceRow({ instance, phase, pid, reconnectNotice, onStart, onStop, onAdopt }: {
+function InstanceRow({ instance, phase, pid, reconnectNotice, onStart, onStop, onAdopt, onChanged }: {
   instance: ServerInstanceConfig
   phase: InstancePhase | undefined
   pid: InstancePidDto | null | undefined
@@ -113,6 +114,7 @@ function InstanceRow({ instance, phase, pid, reconnectNotice, onStart, onStop, o
   onStart: () => void
   onStop: () => void
   onAdopt: () => void
+  onChanged: () => void
 }) {
   const active = isActive(phase)
   const transitioning = phase?.type === 'starting' || phase?.type === 'stopping'
@@ -133,6 +135,9 @@ function InstanceRow({ instance, phase, pid, reconnectNotice, onStart, onStop, o
       )}
       {isPortConflict && (
         <button style={s.btn()} onClick={onAdopt} title="Track the already-running server as a new external instance">Adopt</button>
+      )}
+      {isExecutableNotFound(phase) && (
+        <MissingExecutableActions instanceId={instance.id} buttonStyle={s.btn()} onChanged={onChanged} />
       )}
     </div>
     {reconnectNotice && phase?.type === 'running' && (
@@ -196,6 +201,7 @@ export default function PopoverApp() {
               onStart={() => handleStart(inst.id)}
               onStop={() => handleStop(inst.id)}
               onAdopt={() => handleAdopt(inst.id)}
+              onChanged={refresh}
             />
           ))
         )}

@@ -695,6 +695,15 @@ mod tests {
         assert_eq!(models[0].publisher.as_deref(), Some("mlx-community"));
     }
 
+    #[test]
+    fn bare_and_absolute_uvx_both_launch_with_the_uvx_argument_form() {
+        for exe in ["uvx", "/Users/me/.local/bin/uvx"] {
+            let config = ServerInstanceConfig::new("t", ServerType::MlxLm, 8080, exe);
+            let args = build_launch_args(&config, "m", &ParamValues::default(), &[]);
+            assert_eq!(&args[..3], [UVX_FROM_FLAG, MLX_LM_DISTRIBUTION, MLX_LM_SERVER_MODULE], "{exe}");
+        }
+    }
+
     fn driver_for(search_path: String) -> MLXLMDriver {
         MLXLMDriver::new(vec![search_path])
     }

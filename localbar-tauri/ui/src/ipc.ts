@@ -61,6 +61,9 @@ export const ipc = {
   renameInstance: (id: string, name: string): Promise<void> =>
     invoke('rename_instance', { id, name }),
 
+  setInstanceExecutablePath: (id: string, path: string): Promise<void> =>
+    invoke('set_instance_executable_path', { id, path }),
+
   setInstancePort: (id: string, port: number): Promise<void> =>
     invoke('set_instance_port', { id, port }),
 
