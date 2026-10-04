@@ -75,7 +75,7 @@ pub fn search_path() -> Vec<String> {
     executable::merge_search_path(shell, &process, &fallbacks)
 }
 
-fn is_executable_file(path: &Path) -> bool {
+pub fn is_executable_file(path: &Path) -> bool {
     let Ok(meta) = std::fs::metadata(path) else { return false };
     if !meta.is_file() {
         return false;

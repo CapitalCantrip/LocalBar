@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { ipc } from '../ipc'
 import {
   type InstancePhase,
@@ -14,16 +14,19 @@ import { MissingExecutableActions, isExecutableNotFound } from '../MissingExecut
 import { modelLabelForKey } from '../modelLabel'
 import { s } from './styles'
 import { InlineEdit } from './InlineEdit'
+import { InstallDialog } from './InstallDialog'
 import { ModelPathOverrideField } from './ModelPathOverrideField'
 import { ModelList } from './ModelList'
 import { ParamEditor } from './ParamEditor'
 import { useModelList } from './useModelList'
 
-export function DetailPanel({ instance, phase, pid, onRefresh }: {
+export function DetailPanel({ instance, phase, pid, onRefresh, installRequested, onInstallRequestHandled }: {
   instance: ServerInstanceConfig
   phase: InstancePhase | undefined
   pid: InstancePidDto | null | undefined
   onRefresh: () => void
+  installRequested: boolean
+  onInstallRequestHandled: () => void
 }) {
   const active = isActive(phase)
   const transitioning = phase?.type === 'starting' || phase?.type === 'stopping'
@@ -31,6 +34,12 @@ export function DetailPanel({ instance, phase, pid, onRefresh }: {
   const isPortConflict = phase?.type === 'error' && phase.kind.kind === 'portConflict'
   const [confirmingRemove, setConfirmingRemove] = useState(false)
   const [modelsOpen, setModelsOpen] = useState(false)
+  const [installOpen, setInstallOpen] = useState(false)
+  useEffect(() => {
+    if (!installRequested) return
+    setInstallOpen(true)
+    onInstallRequestHandled()
+  }, [installRequested, onInstallRequestHandled])
   const { models, loading: modelsLoading, error: modelsError, refresh: refreshModels } = useModelList(instance.id)
 
   const handleStart = async () => {
@@ -64,6 +73,14 @@ export function DetailPanel({ instance, phase, pid, onRefresh }: {
 
   return (
     <div style={s.detailPane}>
+      {installOpen && (
+        <InstallDialog
+          instanceId={instance.id}
+          onClose={() => setInstallOpen(false)}
+          onInstalled={onRefresh}
+          onStart={() => void handleStart()}
+        />
+      )}
       <div style={s.detailHeader}>
         <InlineEdit
           value={instance.name}
@@ -107,7 +124,13 @@ export function DetailPanel({ instance, phase, pid, onRefresh }: {
             >Adopt</button>
           )}
           {isExecutableNotFound(phase) && (
-            <MissingExecutableActions instanceId={instance.id} buttonStyle={s.btn()} onChanged={onRefresh} />
+            <MissingExecutableActions
+              instanceId={instance.id}
+              serverType={instance.server_type}
+              buttonStyle={s.btn()}
+              onChanged={onRefresh}
+              onInstall={() => setInstallOpen(true)}
+            />
           )}
         </div>
         <div style={s.field}>

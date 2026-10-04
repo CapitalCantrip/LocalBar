@@ -14,6 +14,7 @@ export type { ErrorKindDto } from './generated/ErrorKindDto'
 export type { InstancePidDto } from './generated/InstancePidDto'
 export type { AdoptResultDto } from './generated/AdoptResultDto'
 export type { ReconnectNoticeDto } from './generated/ReconnectNoticeDto'
+export type { InstallPlanDto } from './generated/InstallPlanDto'
 
 import type { InstancePhaseDto as InstancePhase } from './generated/InstancePhaseDto'
 export type { InstancePhase }

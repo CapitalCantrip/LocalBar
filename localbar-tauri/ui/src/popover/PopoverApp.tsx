@@ -137,7 +137,7 @@ function InstanceRow({ instance, phase, pid, reconnectNotice, onStart, onStop, o
         <button style={s.btn()} onClick={onAdopt} title="Track the already-running server as a new external instance">Adopt</button>
       )}
       {isExecutableNotFound(phase) && (
-        <MissingExecutableActions instanceId={instance.id} buttonStyle={s.btn()} onChanged={onChanged} />
+        <MissingExecutableActions instanceId={instance.id} serverType={instance.server_type} buttonStyle={s.btn()} onChanged={onChanged} />
       )}
     </div>
     {reconnectNotice && phase?.type === 'running' && (

@@ -1,9 +1,11 @@
 # ADR D7b — Future: comprehensive launcher detection
 
-**Status:** Deferred (intended improvement to D7)  
+**Status:** Implemented in reduced form by [D17](D17-mlx-launcher-detection-and-install.md)  
 **Date:** 2026-07-12  
 **Deciders:** Jay
 
+> Implemented by [D17](D17-mlx-launcher-detection-and-install.md): detection of an installed `mlx_lm.server`, `uv`/`uvx` and validated Pythons, plus a confirmed Install. The multi-choice picker, version display and other-server templates below remain unimplemented.
+>
 > How a configured executable is found at spawn time (including the GUI-app `PATH` problem) is decided in [D16](D16-executable-resolution.md); this ADR remains about choosing which launcher to configure.
 
 ---
