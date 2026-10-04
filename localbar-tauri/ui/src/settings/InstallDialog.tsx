@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { ipc } from '../ipc'
 import type { InstallPlanDto } from '../types'
 import { s } from './styles'
+import { useDetectionProgress } from './useDetectionProgress'
 
 type InstallState =
   | { step: 'loading' }
@@ -43,6 +44,8 @@ export function InstallDialog({ instanceId, onClose, onInstalled, onStart }: {
   }
 
   const running = state.step === 'running'
+  const detectionProgress = useDetectionProgress(running)
+  const showDetection = detectionProgress !== null
 
   return (
     <div style={s.sheet}>
@@ -61,7 +64,8 @@ export function InstallDialog({ instanceId, onClose, onInstalled, onStart }: {
             <pre style={codeBlock}>{state.plan.commands.join('\n')}</pre>
           </>
         )}
-        {running && <span style={{ fontSize: 12, color: '#666' }}>Installing… this can take a few minutes while packages download.</span>}
+        {running && !showDetection && <span style={{ fontSize: 12, color: '#666' }}>Installing… this can take a few minutes while packages download.</span>}
+        {running && showDetection && <span style={{ fontSize: 12, color: '#666', wordBreak: 'break-all' }}>Installed. {detectionProgress}</span>}
         {state.step === 'failed' && (
           <>
             <span style={{ fontSize: 12, color: '#dc2626' }}>The install failed:</span>

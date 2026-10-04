@@ -825,10 +825,21 @@ fn set_instance_executable_path(state: State<'_, AppState>, id: String, path: St
 }
 
 #[tauri::command]
-async fn detect_mlx_launcher() -> Result<Option<String>, String> {
-    tauri::async_runtime::spawn_blocking(tool_install::detect_mlx_launcher)
+async fn detect_mlx_launcher(app: AppHandle, request_id: String, force: bool) -> Result<tool_install::MlxDetectionDto, String> {
+    tauri::async_runtime::spawn_blocking(move || tool_install::detect_mlx_launcher(&request_id, force, progress_emitter(app)))
         .await
         .map_err(|e| e.to_string())
+}
+
+fn progress_emitter(app: AppHandle) -> impl FnMut(String) {
+    move |message| {
+        app.emit(tool_install::DETECTION_PROGRESS_EVENT, tool_install::MlxDetectionProgressDto { message }).ok();
+    }
+}
+
+#[tauri::command]
+fn cancel_mlx_detection(request_id: String) {
+    tool_install::cancel_mlx_detection(&request_id);
 }
 
 #[tauri::command]
@@ -847,7 +858,8 @@ async fn install_tool_for_instance(state: State<'_, AppState>, app: AppHandle, i
     if server_type != ServerType::MlxLm {
         return Err("LocalBar can only install mlx-lm.".into());
     }
-    let launcher = tauri::async_runtime::spawn_blocking(tool_install::install_mlx_lm)
+    let progress = progress_emitter(app.clone());
+    let launcher = tauri::async_runtime::spawn_blocking(move || tool_install::install_mlx_lm(progress))
         .await
         .map_err(|e| e.to_string())??;
     {
@@ -1645,7 +1657,7 @@ pub fn run() {
             get_discovery_config, set_discovery_config, get_app_settings, set_app_settings, set_model_search_path_override, detect_ollama_models_dir,
             adopt_as_external_instance,
             open_settings, open_settings_for_instance, quit_app, open_url,
-            detect_mlx_launcher, get_install_plan, install_tool_for_instance,
+            detect_mlx_launcher, cancel_mlx_detection, get_install_plan, install_tool_for_instance,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

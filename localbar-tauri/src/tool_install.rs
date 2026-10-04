@@ -2,11 +2,12 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use localbar_core::executable::{self, TargetOs, PATH_ENV_VAR};
 use localbar_core::launcher::{
-    self, DetectionHost, InstallProgram, InstallStep, PythonCandidate, BREW_COMMAND,
+    self, DetectionHost, DetectionStep, DetectionStop, InstallProgram, InstallStep, MlxDetection, PythonCandidate, BREW_COMMAND,
     MLX_LM_IMPORT_CHECK_ARGS, OLLAMA_DOWNLOAD_URL, UV_COMMAND,
 };
 use localbar_core::types::ServerType;
@@ -22,7 +23,174 @@ const XCODE_SELECT: &str = "/usr/bin/xcode-select";
 const XCODE_SELECT_PRINT_PATH_ARG: &str = "-p";
 const DEVELOPER_TOOLS_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 
+pub const DETECTION_PROGRESS_EVENT: &str = "mlx-detection-progress";
+
 static INSTALL_RUNNING: AtomicBool = AtomicBool::new(false);
+static DETECTIONS: DetectionCoordinator = DetectionCoordinator::new();
+
+#[derive(serde::Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[serde(rename_all = "camelCase")]
+pub enum MlxDetectionKindDto {
+    Found,
+    NotFound,
+    DeadlinePassed,
+    Cancelled,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[serde(rename_all = "camelCase")]
+pub struct MlxDetectionDto {
+    pub kind: MlxDetectionKindDto,
+    pub executable: Option<String>,
+    pub message: String,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[serde(rename_all = "camelCase")]
+pub struct MlxDetectionProgressDto {
+    pub message: String,
+}
+
+fn home_dir() -> Option<String> {
+    std::env::var(HOME_ENV_VAR).ok()
+}
+
+fn detection_dto(outcome: &MlxDetection) -> MlxDetectionDto {
+    let kind = match outcome {
+        MlxDetection::Found { .. } => MlxDetectionKindDto::Found,
+        MlxDetection::NotFound => MlxDetectionKindDto::NotFound,
+        MlxDetection::DeadlinePassed => MlxDetectionKindDto::DeadlinePassed,
+        MlxDetection::Cancelled => MlxDetectionKindDto::Cancelled,
+    };
+    MlxDetectionDto {
+        kind,
+        executable: outcome.executable().map(str::to_string),
+        message: launcher::detection_outcome_line(outcome, home_dir().as_deref()),
+    }
+}
+
+type CancelToken = Arc<AtomicBool>;
+type ResultSlot = Arc<Mutex<Option<MlxDetection>>>;
+
+const INSTALL_DETECTION_REQUEST: &str = "install";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DetectionRequest<'a> {
+    pub id: &'a str,
+    pub force: bool,
+    pub owned_by_install: bool,
+}
+
+struct RunningDetection {
+    token: CancelToken,
+    requesters: Vec<String>,
+    owned_by_install: bool,
+    result: ResultSlot,
+}
+
+struct CoordinatorState {
+    current: Option<RunningDetection>,
+    cache: Option<MlxDetection>,
+}
+
+pub struct DetectionCoordinator {
+    state: Mutex<CoordinatorState>,
+    changed: Condvar,
+}
+
+enum Joined {
+    Cached(MlxDetection),
+    Waiting(ResultSlot),
+    Started(CancelToken, ResultSlot),
+}
+
+impl DetectionCoordinator {
+    const fn new() -> Self {
+        DetectionCoordinator { state: Mutex::new(CoordinatorState { current: None, cache: None }), changed: Condvar::new() }
+    }
+
+    fn join_or_start(&self, request: DetectionRequest) -> Joined {
+        let mut state = self.state.lock().unwrap();
+        if !request.force {
+            if let Some(cached) = state.cache.clone() {
+                return Joined::Cached(cached);
+            }
+        }
+        let token = CancelToken::default();
+        let (requesters, result) = match state.current.take() {
+            Some(mut running) if !request.force || running.owned_by_install => {
+                running.requesters.push(request.id.to_string());
+                let result = running.result.clone();
+                state.current = Some(running);
+                return Joined::Waiting(result);
+            }
+            Some(superseded) => {
+                superseded.token.store(true, Ordering::SeqCst);
+                let mut requesters = superseded.requesters;
+                requesters.push(request.id.to_string());
+                (requesters, superseded.result)
+            }
+            None => (vec![request.id.to_string()], ResultSlot::default()),
+        };
+        state.current = Some(RunningDetection { token: token.clone(), requesters, owned_by_install: request.owned_by_install, result: result.clone() });
+        Joined::Started(token, result)
+    }
+
+    fn finish(&self, token: &CancelToken, outcome: MlxDetection) {
+        let mut state = self.state.lock().unwrap();
+        if !state.current.as_ref().is_some_and(|r| Arc::ptr_eq(&r.token, token)) {
+            return;
+        }
+        let running = state.current.take().expect("checked above");
+        if outcome.is_worth_caching() {
+            state.cache = Some(outcome.clone());
+        }
+        *running.result.lock().unwrap() = Some(outcome);
+        self.changed.notify_all();
+    }
+
+    fn wait_for(&self, request_id: &str, result: &ResultSlot) -> MlxDetection {
+        let still_waiting = |state: &mut CoordinatorState| {
+            result.lock().unwrap().is_none()
+                && state.current.as_ref().is_some_and(|r| Arc::ptr_eq(&r.result, result) && r.requesters.iter().any(|id| id == request_id))
+        };
+        let _state = self.changed.wait_while(self.state.lock().unwrap(), still_waiting).unwrap();
+        result.lock().unwrap().clone().unwrap_or(MlxDetection::Cancelled)
+    }
+
+    fn cancel(&self, request_id: &str) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(running) = state.current.as_mut() {
+            running.requesters.retain(|id| id != request_id);
+            if running.requesters.is_empty() {
+                running.token.store(true, Ordering::SeqCst);
+            }
+        }
+        self.changed.notify_all();
+    }
+
+    fn invalidate(&self) {
+        self.state.lock().unwrap().cache = None;
+    }
+
+    fn detect(&self, request: DetectionRequest, run: impl FnOnce(&AtomicBool) -> MlxDetection) -> MlxDetection {
+        match self.join_or_start(request) {
+            Joined::Cached(cached) => cached,
+            Joined::Waiting(result) => self.wait_for(request.id, &result),
+            Joined::Started(token, result) => {
+                let outcome = run(&token);
+                self.finish(&token, outcome);
+                self.wait_for(request.id, &result)
+            }
+        }
+    }
+}
 
 #[derive(serde::Serialize, Clone)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -53,12 +221,12 @@ fn spawn_reader(mut stream: impl Read + Send + 'static, tx: std::sync::mpsc::Sen
     });
 }
 
-fn wait_or_kill(child: &mut std::process::Child, timeout: Duration) -> Option<std::process::ExitStatus> {
+fn wait_or_kill(child: &mut std::process::Child, timeout: Duration, stop: &dyn Fn() -> bool) -> Option<std::process::ExitStatus> {
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Some(status),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(CHILD_POLL_INTERVAL),
+            Ok(None) if Instant::now() < deadline && !stop() => std::thread::sleep(CHILD_POLL_INTERVAL),
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -68,7 +236,11 @@ fn wait_or_kill(child: &mut std::process::Child, timeout: Duration) -> Option<st
     }
 }
 
-fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<String, String> {
+fn run_with_timeout(cmd: Command, timeout: Duration) -> Result<String, String> {
+    run_until(cmd, timeout, &|| false)
+}
+
+fn run_until(mut cmd: Command, timeout: Duration, stop: &dyn Fn() -> bool) -> Result<String, String> {
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -79,7 +251,7 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<String, Strin
     let streams = usize::from(child.stdout.is_some()) + usize::from(child.stderr.is_some());
     if let Some(out) = child.stdout.take() { spawn_reader(out, tx.clone()); }
     if let Some(err) = child.stderr.take() { spawn_reader(err, tx); }
-    let status = wait_or_kill(&mut child, timeout);
+    let status = wait_or_kill(&mut child, timeout, stop);
     let drain_deadline = Instant::now() + OUTPUT_DRAIN_GRACE;
     let output = (0..streams)
         .map_while(|_| rx.recv_timeout(drain_deadline.saturating_duration_since(Instant::now())).ok())
@@ -93,10 +265,10 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<String, Strin
     }
 }
 
-fn python_imports_mlx_lm(python: &str, path_env: &str) -> bool {
+fn python_imports_mlx_lm(python: &str, path_env: &str, stop: &dyn Fn() -> bool) -> bool {
     let mut cmd = Command::new(python);
     cmd.args(MLX_LM_IMPORT_CHECK_ARGS).env(PATH_ENV_VAR, path_env);
-    run_with_timeout(cmd, IMPORT_CHECK_TIMEOUT).is_ok()
+    run_until(cmd, IMPORT_CHECK_TIMEOUT, stop).is_ok()
 }
 
 fn subdir_names(parent: &str) -> Vec<String> {
@@ -109,8 +281,7 @@ fn subdir_names(parent: &str) -> Vec<String> {
 }
 
 fn expanded_python_candidates() -> Vec<String> {
-    let home = std::env::var(HOME_ENV_VAR).ok();
-    launcher::python_candidates(home.as_deref(), TargetOs::current())
+    launcher::python_candidates(home_dir().as_deref(), TargetOs::current())
         .into_iter()
         .flat_map(|candidate| match candidate {
             PythonCandidate::Fixed(path) => vec![path],
@@ -131,20 +302,40 @@ fn developer_tools_installed(os: TargetOs) -> bool {
     os != TargetOs::MacOs || run_with_timeout(xcode_select_print_path(), DEVELOPER_TOOLS_CHECK_TIMEOUT).is_ok()
 }
 
-pub fn detect_mlx_launcher() -> Option<String> {
+fn run_detection(cancel: &AtomicBool, mut on_progress: impl FnMut(String)) -> MlxDetection {
     let deadline = Instant::now() + launcher::MAX_DETECTION_TIME;
+    let stop_reason = || {
+        if cancel.load(Ordering::SeqCst) {
+            Some(DetectionStop::Cancelled)
+        } else if Instant::now() >= deadline {
+            Some(DetectionStop::DeadlinePassed)
+        } else {
+            None
+        }
+    };
     let search = exec_path::search_path();
     let path_env = executable::join_path(&search);
     let os = TargetOs::current();
     let host = DetectionHost { os, developer_tools_installed: developer_tools_installed(os) };
+    let home = home_dir();
     launcher::detect_best_mlx_launcher(
         &search,
         &expanded_python_candidates(),
         host,
         exec_path::is_executable_file,
-        || Instant::now() < deadline,
-        |python| python_imports_mlx_lm(python, &path_env),
+        stop_reason,
+        |python| python_imports_mlx_lm(python, &path_env, &|| stop_reason().is_some()),
+        |step: &DetectionStep| on_progress(launcher::detection_progress_line(step, home.as_deref())),
     )
+}
+
+pub fn detect_mlx_launcher(request_id: &str, force: bool, on_progress: impl FnMut(String)) -> MlxDetectionDto {
+    let request = DetectionRequest { id: request_id, force, owned_by_install: false };
+    detection_dto(&DETECTIONS.detect(request, |cancel| run_detection(cancel, on_progress)))
+}
+
+pub fn cancel_mlx_detection(request_id: &str) {
+    DETECTIONS.cancel(request_id);
 }
 
 fn resolve_absolute(command: &str) -> Option<String> {
@@ -201,7 +392,7 @@ impl Drop for InstallGuard {
     }
 }
 
-pub fn install_mlx_lm() -> Result<String, String> {
+pub fn install_mlx_lm(on_progress: impl FnMut(String)) -> Result<String, String> {
     let _guard = InstallGuard::acquire().ok_or("An install is already running.")?;
     let steps = mlx_install_steps();
     run_install_steps(
@@ -211,7 +402,10 @@ pub fn install_mlx_lm() -> Result<String, String> {
         INSTALL_STEP_TIMEOUT,
     )
     .map_err(|f| f.message())?;
-    detect_mlx_launcher().ok_or_else(|| "mlx-lm was installed, but no launcher could be found afterwards.".to_string())
+    DETECTIONS.invalidate();
+    let request = DetectionRequest { id: INSTALL_DETECTION_REQUEST, force: true, owned_by_install: true };
+    let found = detection_dto(&DETECTIONS.detect(request, |cancel| run_detection(cancel, on_progress)));
+    found.executable.ok_or_else(|| format!("mlx-lm was installed, but no launcher could be found afterwards. {}", found.message))
 }
 
 #[cfg(all(test, unix))]
@@ -290,8 +484,8 @@ mod tests {
     fn a_python_without_mlx_lm_fails_the_import_check() {
         let python = write_script("exit 1");
         let ok = write_script("exit 0");
-        let rejected = python_imports_mlx_lm(python.to_str().unwrap(), &path_env());
-        let accepted = python_imports_mlx_lm(ok.to_str().unwrap(), &path_env());
+        let rejected = python_imports_mlx_lm(python.to_str().unwrap(), &path_env(), &|| false);
+        let accepted = python_imports_mlx_lm(ok.to_str().unwrap(), &path_env(), &|| false);
         for p in [&python, &ok] { std::fs::remove_file(p).ok(); }
         assert!(!rejected);
         assert!(accepted);
@@ -304,5 +498,134 @@ mod tests {
         assert!(InstallGuard::acquire().is_none());
         drop(first);
         assert!(InstallGuard::acquire().is_some());
+    }
+
+    #[test]
+    fn a_running_import_check_is_killed_as_soon_as_detection_stops() {
+        let hang = write_script("exec sleep 30");
+        let started = Instant::now();
+        let accepted = python_imports_mlx_lm(hang.to_str().unwrap(), &path_env(), &|| started.elapsed() > Duration::from_millis(200));
+        std::fs::remove_file(&hang).ok();
+        assert!(!accepted);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    fn uv_found() -> MlxDetection {
+        MlxDetection::Found { executable: "uv".into(), path: "/a/uv".into() }
+    }
+
+    fn cached(coordinator: &DetectionCoordinator) -> Option<MlxDetection> {
+        coordinator.state.lock().unwrap().cache.clone()
+    }
+
+    fn add_instance(id: &str, force: bool) -> DetectionRequest<'_> {
+        DetectionRequest { id, force, owned_by_install: false }
+    }
+
+    const INSTALL: DetectionRequest<'static> = DetectionRequest { id: INSTALL_DETECTION_REQUEST, force: true, owned_by_install: true };
+
+    fn started(joined: Joined) -> (CancelToken, ResultSlot) {
+        match joined {
+            Joined::Started(token, result) => (token, result),
+            _ => panic!("expected a new detection to start"),
+        }
+    }
+
+    #[test]
+    fn a_forced_request_supersedes_an_add_instance_detection() {
+        let coordinator = DetectionCoordinator::new();
+        let (first, _) = started(coordinator.join_or_start(add_instance("a", false)));
+        let (second, _) = started(coordinator.join_or_start(add_instance("b", true)));
+        assert!(first.load(Ordering::SeqCst));
+        assert!(!second.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn cancelling_only_stops_the_detection_the_caller_requested() {
+        let coordinator = DetectionCoordinator::new();
+        let (token, _) = started(coordinator.join_or_start(add_instance("a", false)));
+        coordinator.cancel("someone-else");
+        assert!(!token.load(Ordering::SeqCst));
+        coordinator.cancel("a");
+        assert!(token.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_non_forced_request_during_a_running_detection_receives_its_result_without_starting_another() {
+        let coordinator = Arc::new(DetectionCoordinator::new());
+        let (token, _) = started(coordinator.join_or_start(add_instance("a", false)));
+        let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let joiner = {
+            let (coordinator, runs) = (coordinator.clone(), runs.clone());
+            std::thread::spawn(move || coordinator.detect(add_instance("b", false), |_| { runs.fetch_add(1, Ordering::SeqCst); MlxDetection::NotFound }))
+        };
+        while coordinator.state.lock().unwrap().current.as_ref().is_some_and(|r| r.requesters.len() < 2) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        coordinator.finish(&token, uv_found());
+        assert_eq!(joiner.join().unwrap(), uv_found());
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn closing_add_instance_during_an_install_re_detection_leaves_it_running_and_caches_its_result() {
+        let coordinator = DetectionCoordinator::new();
+        let (token, _) = started(coordinator.join_or_start(INSTALL));
+        assert!(matches!(coordinator.join_or_start(add_instance("sheet", false)), Joined::Waiting(_)));
+        coordinator.cancel("sheet");
+        assert!(matches!(coordinator.join_or_start(add_instance("again", true)), Joined::Waiting(_)));
+        coordinator.cancel("again");
+        assert!(!token.load(Ordering::SeqCst));
+        coordinator.finish(&token, uv_found());
+        assert_eq!(cached(&coordinator), Some(uv_found()));
+    }
+
+    const CANCELLED_WAITER_RELEASE_LIMIT: Duration = Duration::from_secs(2);
+
+    #[test]
+    fn a_cancelled_requester_stops_waiting_while_the_detection_continues_for_others() {
+        let coordinator = Arc::new(DetectionCoordinator::new());
+        let (token, result) = started(coordinator.join_or_start(INSTALL));
+        coordinator.join_or_start(add_instance("sheet", false));
+        coordinator.cancel("sheet");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter = Arc::clone(&coordinator);
+        std::thread::spawn(move || { let _ = tx.send(waiter.wait_for("sheet", &result)); });
+        assert_eq!(rx.recv_timeout(CANCELLED_WAITER_RELEASE_LIMIT), Ok(MlxDetection::Cancelled));
+        assert!(!token.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_finished_detection_is_reused_until_forced_or_invalidated() {
+        let coordinator = DetectionCoordinator::new();
+        let runs = std::cell::Cell::new(0);
+        let run = |_: &AtomicBool| { runs.set(runs.get() + 1); uv_found() };
+        assert_eq!(coordinator.detect(add_instance("a", false), run), uv_found());
+        assert_eq!(coordinator.detect(add_instance("a", false), run), uv_found());
+        assert_eq!(runs.get(), 1);
+        coordinator.detect(add_instance("a", true), run);
+        assert_eq!(runs.get(), 2);
+        coordinator.invalidate();
+        coordinator.detect(add_instance("a", false), run);
+        assert_eq!(runs.get(), 3);
+    }
+
+    #[test]
+    fn a_cancelled_detection_is_not_cached() {
+        let coordinator = DetectionCoordinator::new();
+        coordinator.detect(add_instance("a", false), |_| MlxDetection::Cancelled);
+        assert_eq!(cached(&coordinator), None);
+    }
+
+    #[test]
+    fn a_superseded_detection_never_overwrites_the_newer_result_and_its_waiters_get_the_newer_one() {
+        let coordinator = DetectionCoordinator::new();
+        let (old, result) = started(coordinator.join_or_start(add_instance("a", false)));
+        let (newer, _) = started(coordinator.join_or_start(add_instance("b", true)));
+        coordinator.finish(&old, MlxDetection::Cancelled);
+        assert_eq!(cached(&coordinator), None);
+        coordinator.finish(&newer, uv_found());
+        assert_eq!(cached(&coordinator), Some(uv_found()));
+        assert_eq!(coordinator.wait_for("a", &result), uv_found());
     }
 }
