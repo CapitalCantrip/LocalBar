@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use localbar_core::executable::{self, TargetOs, PATH_ENV_VAR};
 use localbar_core::launcher::{
-    self, InstallProgram, InstallStep, PythonCandidate, BREW_COMMAND,
+    self, DetectionHost, InstallProgram, InstallStep, PythonCandidate, BREW_COMMAND,
     MLX_LM_IMPORT_CHECK_ARGS, OLLAMA_DOWNLOAD_URL, UV_COMMAND,
 };
 use localbar_core::types::ServerType;
@@ -18,6 +18,9 @@ const INSTALL_STEP_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(2);
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const HOME_ENV_VAR: &str = "HOME";
+const XCODE_SELECT: &str = "/usr/bin/xcode-select";
+const XCODE_SELECT_PRINT_PATH_ARG: &str = "-p";
+const DEVELOPER_TOOLS_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 
 static INSTALL_RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -118,13 +121,28 @@ fn expanded_python_candidates() -> Vec<String> {
         .collect()
 }
 
+fn xcode_select_print_path() -> Command {
+    let mut cmd = Command::new(XCODE_SELECT);
+    cmd.arg(XCODE_SELECT_PRINT_PATH_ARG);
+    cmd
+}
+
+fn developer_tools_installed(os: TargetOs) -> bool {
+    os != TargetOs::MacOs || run_with_timeout(xcode_select_print_path(), DEVELOPER_TOOLS_CHECK_TIMEOUT).is_ok()
+}
+
 pub fn detect_mlx_launcher() -> Option<String> {
+    let deadline = Instant::now() + launcher::MAX_DETECTION_TIME;
     let search = exec_path::search_path();
     let path_env = executable::join_path(&search);
+    let os = TargetOs::current();
+    let host = DetectionHost { os, developer_tools_installed: developer_tools_installed(os) };
     launcher::detect_best_mlx_launcher(
         &search,
         &expanded_python_candidates(),
+        host,
         exec_path::is_executable_file,
+        || Instant::now() < deadline,
         |python| python_imports_mlx_lm(python, &path_env),
     )
 }

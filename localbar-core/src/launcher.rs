@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Duration;
 
 use crate::executable::TargetOs;
 
@@ -20,6 +21,7 @@ const UVX_FROM_FLAG: &str = "--from";
 const UV_TOOL_RUN_ARGS: [&str; 2] = ["tool", "run"];
 const PYTHON3_COMMAND: &str = "python3";
 const SYSTEM_PYTHON: &str = "/usr/bin/python3";
+pub const MAX_DETECTION_TIME: Duration = Duration::from_secs(30);
 const HOMEBREW_PYTHON_FORMULAE_DIR: &str = "/opt/homebrew/opt";
 const PYTHON_FORMULA_PREFIX: &str = "python";
 const BIN_PYTHON3: &str = "bin/python3";
@@ -106,10 +108,24 @@ pub fn expand_subdir_candidate(parent: &str, name_prefix: Option<&str>, child: &
     subdirs.into_iter().map(|name| format!("{}/{name}/{child}", parent.trim_end_matches('/'))).collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DetectionHost {
+    pub os: TargetOs,
+    pub developer_tools_installed: bool,
+}
+
+impl DetectionHost {
+    fn may_run(self, python: &str) -> bool {
+        self.os != TargetOs::MacOs || self.developer_tools_installed || python != SYSTEM_PYTHON
+    }
+}
+
 pub fn detect_best_mlx_launcher(
     search: &[String],
     expanded_pythons: &[String],
+    host: DetectionHost,
     is_executable: impl Fn(&Path) -> bool,
+    within_deadline: impl Fn() -> bool,
     imports_mlx_lm: impl Fn(&str) -> bool,
 ) -> Option<String> {
     let on_search_path = |name: &str| search.iter().any(|dir| is_executable(&Path::new(dir).join(name)));
@@ -125,7 +141,13 @@ pub fn detect_best_mlx_launcher(
             continue;
         }
         tried.push(candidate.clone());
-        if is_executable(Path::new(&candidate)) && imports_mlx_lm(&candidate) {
+        if !host.may_run(&candidate) || !is_executable(Path::new(&candidate)) {
+            continue;
+        }
+        if !within_deadline() {
+            return None;
+        }
+        if imports_mlx_lm(&candidate) {
             return Some(candidate);
         }
     }
@@ -205,6 +227,42 @@ mod tests {
         assert_eq!(mlx_launch_prefix("/usr/bin/python3"), strings(&["-m", "mlx_lm.server"]));
     }
 
+    const MAC_WITH_TOOLS: DetectionHost = DetectionHost { os: TargetOs::MacOs, developer_tools_installed: true };
+    const MAC_WITHOUT_TOOLS: DetectionHost = DetectionHost { os: TargetOs::MacOs, developer_tools_installed: false };
+    const LINUX_HOST: DetectionHost = DetectionHost { os: TargetOs::Linux, developer_tools_installed: false };
+
+    #[test]
+    fn the_macos_python_stub_is_never_run_without_developer_tools() {
+        let search = strings(&["/usr/bin/", "/opt/bin"]);
+        let pythons = strings(&["/usr/bin/python3"]);
+        let found = detect_best_mlx_launcher(&search, &pythons, MAC_WITHOUT_TOOLS, exists_in(&["/usr/bin/python3", "/opt/bin/python3"]), || true, |p| {
+            assert_ne!(p, "/usr/bin/python3", "ran the developer tools stub");
+            p == "/opt/bin/python3"
+        });
+        assert_eq!(found.as_deref(), Some("/opt/bin/python3"));
+    }
+
+    #[test]
+    fn the_system_python_is_tried_when_developer_tools_are_installed_or_off_macos() {
+        let pythons = strings(&["/usr/bin/python3"]);
+        for host in [MAC_WITH_TOOLS, LINUX_HOST] {
+            let found = detect_best_mlx_launcher(&[], &pythons, host, exists_in(&["/usr/bin/python3"]), || true, |p| p == "/usr/bin/python3");
+            assert_eq!(found.as_deref(), Some("/usr/bin/python3"));
+        }
+    }
+
+    #[test]
+    fn detection_gives_up_once_the_deadline_passes() {
+        let pythons = strings(&["/a/python3", "/b/python3", "/c/python3"]);
+        let checks = std::cell::Cell::new(0);
+        let found = detect_best_mlx_launcher(&[], &pythons, MAC_WITH_TOOLS, exists_in(&["/a/python3", "/b/python3", "/c/python3"]), || checks.get() < 2, |p| {
+            checks.set(checks.get() + 1);
+            p == "/c/python3"
+        });
+        assert_eq!(found, None);
+        assert_eq!(checks.get(), 2);
+    }
+
     fn exists_in(present: &'static [&'static str]) -> impl Fn(&Path) -> bool {
         move |p: &Path| present.iter().any(|q| Path::new(q) == p)
     }
@@ -212,15 +270,15 @@ mod tests {
     #[test]
     fn an_installed_server_script_beats_uv_and_python() {
         let search = strings(&["/a", "/b"]);
-        let found = detect_best_mlx_launcher(&search, &[], exists_in(&["/a/uv", "/b/mlx_lm.server", "/a/python3"]), |_| true);
+        let found = detect_best_mlx_launcher(&search, &[], MAC_WITH_TOOLS, exists_in(&["/a/uv", "/b/mlx_lm.server", "/a/python3"]), || true, |_| true);
         assert_eq!(found.as_deref(), Some("mlx_lm.server"));
     }
 
     #[test]
     fn uv_is_preferred_over_uvx_and_both_are_stored_as_bare_names() {
         let search = strings(&["/a"]);
-        assert_eq!(detect_best_mlx_launcher(&search, &[], exists_in(&["/a/uv", "/a/uvx"]), |_| true).as_deref(), Some("uv"));
-        assert_eq!(detect_best_mlx_launcher(&search, &[], exists_in(&["/a/uvx"]), |_| true).as_deref(), Some("uvx"));
+        assert_eq!(detect_best_mlx_launcher(&search, &[], MAC_WITH_TOOLS, exists_in(&["/a/uv", "/a/uvx"]), || true, |_| true).as_deref(), Some("uv"));
+        assert_eq!(detect_best_mlx_launcher(&search, &[], MAC_WITH_TOOLS, exists_in(&["/a/uvx"]), || true, |_| true).as_deref(), Some("uvx"));
     }
 
     #[test]
@@ -228,7 +286,7 @@ mod tests {
         let search = strings(&["/a"]);
         let pythons = strings(&["/env1/bin/python3", "/env2/bin/python3"]);
         let present = exists_in(&["/a/python3", "/env1/bin/python3", "/env2/bin/python3"]);
-        let found = detect_best_mlx_launcher(&search, &pythons, present, |p| p == "/env2/bin/python3");
+        let found = detect_best_mlx_launcher(&search, &pythons, MAC_WITH_TOOLS, present, || true, |p| p == "/env2/bin/python3");
         assert_eq!(found.as_deref(), Some("/env2/bin/python3"));
     }
 
@@ -238,14 +296,14 @@ mod tests {
         let pythons = strings(&["/a/python3", "/env/bin/python3"]);
         let calls = std::cell::RefCell::new(Vec::new());
         let present = exists_in(&["/a/python3", "/env/bin/python3"]);
-        let found = detect_best_mlx_launcher(&search, &pythons, present, |p| { calls.borrow_mut().push(p.to_string()); p == "/env/bin/python3" });
+        let found = detect_best_mlx_launcher(&search, &pythons, MAC_WITH_TOOLS, present, || true, |p| { calls.borrow_mut().push(p.to_string()); p == "/env/bin/python3" });
         assert_eq!(found.as_deref(), Some("/env/bin/python3"));
         assert_eq!(*calls.borrow(), strings(&["/a/python3", "/env/bin/python3"]));
     }
 
     #[test]
     fn missing_pythons_are_never_run() {
-        let found = detect_best_mlx_launcher(&[], &strings(&["/nope/python3"]), |_| false, |_| panic!("ran a missing python"));
+        let found = detect_best_mlx_launcher(&[], &strings(&["/nope/python3"]), MAC_WITH_TOOLS, |_| false, || true, |_| panic!("ran a missing python"));
         assert_eq!(found, None);
     }
 

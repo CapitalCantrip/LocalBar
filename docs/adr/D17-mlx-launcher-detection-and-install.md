@@ -36,7 +36,9 @@ Every form is recognised by `MLXLMDriver::recognises_process` (D12 adoption): `u
 
 Results 1 and 2 are stored as **bare names** so D16 resolves them on every spawn and instances stay portable; a Python is stored as its absolute path. If nothing is found, Add Instance keeps `uvx` and says mlx-lm wasn't found.
 
-Bounds: no home-wide scan; each "each subfolder" location lists one directory and keeps at most 16 entries (`MAX_ENTRIES_PER_GLOB`, sorted, hidden names skipped); only existing executables are run; each import check has a 15 s timeout and is killed after it; the scan stops at the first Python that imports mlx-lm. Detection runs in `spawn_blocking`, never on the main thread or under the registry lock.
+Bounds: no home-wide scan; each "each subfolder" location lists one directory and keeps at most 16 entries (`MAX_ENTRIES_PER_GLOB`, sorted, hidden names skipped); only existing executables are run; each import check has a 15 s timeout and is killed after it; the scan stops at the first Python that imports mlx-lm. The whole scan has a 30 s deadline (`MAX_DETECTION_TIME`); once it passes, no further import check starts and detection returns nothing.
+
+On macOS without the Command Line Tools, `/usr/bin/python3` is a stub: running it at all, even for an import check, pops the system "install developer tools" dialog. Detection therefore runs `/usr/bin/xcode-select -p` once (3 s timeout; it never shows the dialog) and, if it fails, never runs `/usr/bin/python3` — neither the fixed candidate nor `python3` found in a search-path `/usr/bin`. The filter is the pure `DetectionHost` input in core. Detection runs in `spawn_blocking`, never on the main thread or under the registry lock.
 
 D7b's multi-choice picker, version display and Ollama/LM Studio templates are not implemented: the single best launcher is pre-filled and can be edited in the sheet.
 
