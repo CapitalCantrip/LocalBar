@@ -580,13 +580,18 @@ mod tests {
         assert_eq!(cached(&coordinator), Some(uv_found()));
     }
 
+    const CANCELLED_WAITER_RELEASE_LIMIT: Duration = Duration::from_secs(2);
+
     #[test]
     fn a_cancelled_requester_stops_waiting_while_the_detection_continues_for_others() {
-        let coordinator = DetectionCoordinator::new();
+        let coordinator = Arc::new(DetectionCoordinator::new());
         let (token, result) = started(coordinator.join_or_start(INSTALL));
         coordinator.join_or_start(add_instance("sheet", false));
         coordinator.cancel("sheet");
-        assert_eq!(coordinator.wait_for("sheet", &result), MlxDetection::Cancelled);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter = Arc::clone(&coordinator);
+        std::thread::spawn(move || { let _ = tx.send(waiter.wait_for("sheet", &result)); });
+        assert_eq!(rx.recv_timeout(CANCELLED_WAITER_RELEASE_LIMIT), Ok(MlxDetection::Cancelled));
         assert!(!token.load(Ordering::SeqCst));
     }
 
