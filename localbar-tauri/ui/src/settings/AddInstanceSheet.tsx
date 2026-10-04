@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { pickPath } from '../ipc'
+import { useEffect, useState } from 'react'
+import { ipc, pickPath } from '../ipc'
 import { s } from './styles'
 import { AddModelPicker, PICKER_TYPES } from './AddModelPicker'
 
@@ -23,6 +23,24 @@ export function AddInstanceSheet({ onAdd, onCancel }: {
   const [modelFolder, setModelFolder] = useState('')
   const [pickerFolder, setPickerFolder] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [detecting, setDetecting] = useState(false)
+  const [nothingDetected, setNothingDetected] = useState(false)
+
+  useEffect(() => {
+    if (serverType !== 'mlx-lm') return
+    let cancelled = false
+    setDetecting(true)
+    setNothingDetected(false)
+    ipc.detectMlxLauncher()
+      .then(found => {
+        if (cancelled) return
+        setNothingDetected(found === null)
+        if (found !== null) setExecPath(current => current === DEFAULTS['mlx-lm'].execPath ? found : current)
+      })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setDetecting(false) })
+    return () => { cancelled = true }
+  }, [serverType])
 
   const selectType = (t: ServerTypeOption) => {
     setServerType(t)
@@ -82,6 +100,12 @@ export function AddInstanceSheet({ onAdd, onCancel }: {
           <div style={s.field}>
             <label style={s.fieldLabel}>Executable path</label>
             <input style={s.input} value={execPath} onChange={e => setExecPath(e.target.value)} />
+            {serverType === 'mlx-lm' && detecting && (
+              <span style={{ fontSize: 11, color: '#666' }}>Looking for mlx-lm…</span>
+            )}
+            {serverType === 'mlx-lm' && !detecting && nothingDetected && (
+              <span style={{ fontSize: 11, color: '#666' }}>mlx-lm wasn't found. Add the instance, then use Install… if Start can't find it.</span>
+            )}
           </div>
         )}
         {PICKER_TYPES.includes(serverType) && (

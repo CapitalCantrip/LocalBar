@@ -11,6 +11,7 @@ use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use uuid::Uuid;
 
 mod exec_path;
+mod tool_install;
 
 use localbar_core::driver::{HealthStatus, ModelMetadata, ServerDriver};
 use localbar_core::drivers::external::ExternalDriver;
@@ -824,6 +825,57 @@ fn set_instance_executable_path(state: State<'_, AppState>, id: String, path: St
 }
 
 #[tauri::command]
+async fn detect_mlx_launcher() -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(tool_install::detect_mlx_launcher)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_install_plan(state: State<'_, AppState>, id: String) -> Result<tool_install::InstallPlanDto, String> {
+    let uuid = parse_uuid(&id)?;
+    let server_type = state.registry.lock().unwrap().get_config(uuid).ok_or("instance not found")?.server_type;
+    tauri::async_runtime::spawn_blocking(move || tool_install::install_plan(server_type))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn install_tool_for_instance(state: State<'_, AppState>, app: AppHandle, id: String) -> Result<String, String> {
+    let uuid = parse_uuid(&id)?;
+    let server_type = state.registry.lock().unwrap().get_config(uuid).ok_or("instance not found")?.server_type;
+    if server_type != ServerType::MlxLm {
+        return Err("LocalBar can only install mlx-lm.".into());
+    }
+    let launcher = tauri::async_runtime::spawn_blocking(tool_install::install_mlx_lm)
+        .await
+        .map_err(|e| e.to_string())??;
+    {
+        let mut reg = state.registry.lock().unwrap();
+        reg.update_config(uuid, |c| c.executable_path = launcher.clone())?;
+        if matches!(reg.get_phase(uuid), Some(InstancePhase::Error(e)) if e.kind == InstanceErrorKind::ExecutableNotFound) {
+            reg.set_phase(uuid, InstancePhase::Stopped)?;
+        }
+        reg.save()?;
+    }
+    app.emit("phase-changed", &id).ok();
+    Ok(launcher)
+}
+
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct FocusInstanceRequest {
+    id: String,
+    install: bool,
+}
+
+#[tauri::command]
+fn open_settings_for_instance(app: AppHandle, id: String, install: bool) {
+    open_settings(app.clone());
+    let _ = app.emit_to("settings", "settings-focus-instance", FocusInstanceRequest { id, install });
+}
+
+#[tauri::command]
 fn set_instance_port(state: State<'_, AppState>, id: String, port: u16) -> Result<(), String> {
     let uuid = parse_uuid(&id)?;
     let mut reg = state.registry.lock().unwrap();
@@ -1592,7 +1644,8 @@ pub fn run() {
             list_all_discovered_models,
             get_discovery_config, set_discovery_config, get_app_settings, set_app_settings, set_model_search_path_override, detect_ollama_models_dir,
             adopt_as_external_instance,
-            open_settings, quit_app, open_url,
+            open_settings, open_settings_for_instance, quit_app, open_url,
+            detect_mlx_launcher, get_install_plan, install_tool_for_instance,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

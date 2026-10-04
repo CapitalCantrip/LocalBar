@@ -1,4 +1,5 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
+import { listen } from '@tauri-apps/api/event'
 import { ipc } from '../ipc'
 import { phaseColor } from '../types'
 import { useInstances } from '../useInstances'
@@ -18,6 +19,18 @@ export default function SettingsApp() {
   const clearSelected = useCallback(() => setSelectedId(null), [])
   const { instances, phases, pids, refresh } = useInstances(clearSelected)
   const [showAddSheet, setShowAddSheet] = useState(false)
+  const [installRequestId, setInstallRequestId] = useState<string | null>(null)
+  const clearInstallRequest = useCallback(() => setInstallRequestId(null), [])
+
+  useEffect(() => {
+    const unlisten = listen<{ id: string; install: boolean }>('settings-focus-instance', event => {
+      setActiveTab('servers')
+      setSelectedId(event.payload.id)
+      if (event.payload.install) setInstallRequestId(event.payload.id)
+      void refresh()
+    })
+    return () => { void unlisten.then(f => f()) }
+  }, [refresh])
 
   const handleAdd = async (name: string, serverType: string, port: number, execPath: string, selectedModelKey: string | null, modelFolder: string | null) => {
     const id = await ipc.addInstance(name, serverType, port, execPath, modelFolder)
@@ -72,7 +85,14 @@ export default function SettingsApp() {
           </div>
           <div style={s.detailPane}>
             {selected ? (
-              <DetailPanel instance={selected} phase={phases[selected.id]} pid={pids[selected.id]} onRefresh={refresh} />
+              <DetailPanel
+                instance={selected}
+                phase={phases[selected.id]}
+                pid={pids[selected.id]}
+                onRefresh={refresh}
+                installRequested={installRequestId === selected.id}
+                onInstallRequestHandled={clearInstallRequest}
+              />
             ) : (
               <p style={s.placeholder}>Select a server to configure it</p>
             )}

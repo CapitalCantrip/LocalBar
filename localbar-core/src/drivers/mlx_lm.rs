@@ -157,12 +157,7 @@ fn build_launch_args(
     params: &ParamValues,
     schema: &[ParamDescriptor],
 ) -> Vec<String> {
-    let is_uvx = config.executable_path.ends_with("/uvx") || config.executable_path == "uvx";
-    let mut args: Vec<String> = if is_uvx {
-        vec![UVX_FROM_FLAG.into(), MLX_LM_DISTRIBUTION.into(), MLX_LM_SERVER_MODULE.into()]
-    } else {
-        vec![PYTHON_MODULE_FLAG.into(), MLX_LM_SERVER_MODULE.into()]
-    };
+    let mut args = crate::launcher::mlx_launch_prefix(&config.executable_path);
     args.extend(["--model".into(), model_key.to_string(), "--host".into(), config.host.clone(), "--port".into(), config.port.to_string()]);
     for desc in schema {
         let Some(value) = params.values.get(&desc.param) else { continue };
@@ -440,6 +435,9 @@ mod tests {
             "/Users/me/.cache/uv/archive-v0/abc/bin/python /Users/me/.cache/uv/archive-v0/abc/bin/mlx_lm.server --model m",
             "/Users/me/.local/bin/mlx_lm.server --model m --port 8080",
             "mlx_lm server --model m --port 8080",
+            "uv tool run --from mlx-lm mlx_lm.server --model m --host 127.0.0.1 --port 8080",
+            "/opt/homebrew/bin/uv tool run --from mlx-lm mlx_lm.server --model m --port 8080",
+            "mlx_lm.server --model m --host 127.0.0.1 --port 8080",
         ] {
             assert!(MLXLMDriver::default().recognises_process(command_line), "{command_line}");
         }
@@ -701,6 +699,31 @@ mod tests {
             let config = ServerInstanceConfig::new("t", ServerType::MlxLm, 8080, exe);
             let args = build_launch_args(&config, "m", &ParamValues::default(), &[]);
             assert_eq!(&args[..3], [UVX_FROM_FLAG, MLX_LM_DISTRIBUTION, MLX_LM_SERVER_MODULE], "{exe}");
+        }
+    }
+
+    #[test]
+    fn each_launcher_launches_mlx_lm_server_with_its_own_argument_form() {
+        for (exe, prefix) in [
+            ("mlx_lm.server", vec![]),
+            ("/Users/me/.local/bin/mlx_lm.server", vec![]),
+            ("uv", vec!["tool", "run", UVX_FROM_FLAG, MLX_LM_DISTRIBUTION, MLX_LM_SERVER_MODULE]),
+            ("/opt/homebrew/bin/python3", vec![PYTHON_MODULE_FLAG, MLX_LM_SERVER_MODULE]),
+        ] {
+            let config = ServerInstanceConfig::new("t", ServerType::MlxLm, 8080, exe);
+            let args = build_launch_args(&config, "m", &ParamValues::default(), &[]);
+            assert_eq!(&args[..prefix.len()], prefix.as_slice(), "{exe}");
+            assert_eq!(&args[prefix.len()..prefix.len() + 2], ["--model", "m"], "{exe}");
+        }
+    }
+
+    #[test]
+    fn every_launch_form_is_recognised_as_an_mlx_lm_server_process() {
+        for exe in ["mlx_lm.server", "/Users/me/.local/bin/mlx_lm.server", "uv", "uvx", "/opt/homebrew/bin/python3"] {
+            let config = ServerInstanceConfig::new("t", ServerType::MlxLm, 8080, exe);
+            let args = build_launch_args(&config, "m", &ParamValues::default(), &[]);
+            let command_line = format!("{exe} {}", args.join(" "));
+            assert!(MLXLMDriver::default().recognises_process(&command_line), "{command_line}");
         }
     }
 

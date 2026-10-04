@@ -1,0 +1,290 @@
+use std::io::Read;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use localbar_core::executable::{self, TargetOs, PATH_ENV_VAR};
+use localbar_core::launcher::{
+    self, InstallProgram, InstallStep, PythonCandidate, BREW_COMMAND,
+    MLX_LM_IMPORT_CHECK_ARGS, OLLAMA_DOWNLOAD_URL, UV_COMMAND,
+};
+use localbar_core::types::ServerType;
+
+use crate::exec_path;
+
+const IMPORT_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
+const INSTALL_STEP_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(2);
+const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const HOME_ENV_VAR: &str = "HOME";
+
+static INSTALL_RUNNING: AtomicBool = AtomicBool::new(false);
+
+#[derive(serde::Serialize, Clone)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[serde(rename_all = "camelCase")]
+pub struct InstallPlanDto {
+    pub commands: Vec<String>,
+    pub manual_url: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct StepFailure {
+    pub command: String,
+    pub output: String,
+}
+
+impl StepFailure {
+    pub fn message(&self) -> String {
+        format!("`{}` failed:\n{}", self.command, self.output.trim())
+    }
+}
+
+fn spawn_reader(mut stream: impl Read + Send + 'static, tx: std::sync::mpsc::Sender<Vec<u8>>) {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stream.read_to_end(&mut buf);
+        let _ = tx.send(buf);
+    });
+}
+
+fn wait_or_kill(child: &mut std::process::Child, timeout: Duration) -> Option<std::process::ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(CHILD_POLL_INTERVAL),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<String, String> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("could not start: {e}"))?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let streams = usize::from(child.stdout.is_some()) + usize::from(child.stderr.is_some());
+    if let Some(out) = child.stdout.take() { spawn_reader(out, tx.clone()); }
+    if let Some(err) = child.stderr.take() { spawn_reader(err, tx); }
+    let status = wait_or_kill(&mut child, timeout);
+    let drain_deadline = Instant::now() + OUTPUT_DRAIN_GRACE;
+    let output = (0..streams)
+        .map_while(|_| rx.recv_timeout(drain_deadline.saturating_duration_since(Instant::now())).ok())
+        .map(|buf| String::from_utf8_lossy(&buf).into_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    match status {
+        Some(s) if s.success() => Ok(output),
+        Some(s) => Err(format!("exited with {s}\n{output}")),
+        None => Err(format!("timed out after {} s and was stopped\n{output}", timeout.as_secs())),
+    }
+}
+
+fn python_imports_mlx_lm(python: &str, path_env: &str) -> bool {
+    let mut cmd = Command::new(python);
+    cmd.args(MLX_LM_IMPORT_CHECK_ARGS).env(PATH_ENV_VAR, path_env);
+    run_with_timeout(cmd, IMPORT_CHECK_TIMEOUT).is_ok()
+}
+
+fn subdir_names(parent: &str) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(parent) else { return Vec::new() };
+    entries
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .collect()
+}
+
+fn expanded_python_candidates() -> Vec<String> {
+    let home = std::env::var(HOME_ENV_VAR).ok();
+    launcher::python_candidates(home.as_deref(), TargetOs::current())
+        .into_iter()
+        .flat_map(|candidate| match candidate {
+            PythonCandidate::Fixed(path) => vec![path],
+            PythonCandidate::EachSubdir { parent, name_prefix, child } => {
+                launcher::expand_subdir_candidate(&parent, name_prefix.as_deref(), &child, subdir_names(&parent))
+            }
+        })
+        .collect()
+}
+
+pub fn detect_mlx_launcher() -> Option<String> {
+    let search = exec_path::search_path();
+    let path_env = executable::join_path(&search);
+    launcher::detect_best_mlx_launcher(
+        &search,
+        &expanded_python_candidates(),
+        exec_path::is_executable_file,
+        |python| python_imports_mlx_lm(python, &path_env),
+    )
+}
+
+fn resolve_absolute(command: &str) -> Option<String> {
+    exec_path::resolve_command(command).ok().map(|r| r.program.to_string_lossy().into_owned())
+}
+
+fn mlx_install_steps() -> Vec<InstallStep> {
+    launcher::mlx_install_plan(resolve_absolute(UV_COMMAND).as_deref(), resolve_absolute(BREW_COMMAND).as_deref())
+}
+
+pub fn install_plan(server_type: ServerType) -> InstallPlanDto {
+    match server_type {
+        ServerType::MlxLm => InstallPlanDto { commands: mlx_install_steps().iter().map(InstallStep::display).collect(), manual_url: None },
+        ServerType::Ollama => InstallPlanDto { commands: Vec::new(), manual_url: Some(OLLAMA_DOWNLOAD_URL.to_string()) },
+        ServerType::External => InstallPlanDto { commands: Vec::new(), manual_url: None },
+    }
+}
+
+fn run_install_steps(
+    steps: &[InstallStep],
+    path_env: impl Fn() -> String,
+    resolve_uv: impl Fn() -> Option<PathBuf>,
+    timeout: Duration,
+) -> Result<String, StepFailure> {
+    let mut log = String::new();
+    for step in steps {
+        let command = step.display();
+        let program = match &step.program {
+            InstallProgram::Path(p) => PathBuf::from(p),
+            InstallProgram::UvAfterInstall => resolve_uv().ok_or_else(|| StepFailure {
+                command: command.clone(),
+                output: format!("uv was installed but could not be found afterwards.\n{log}"),
+            })?,
+        };
+        let mut cmd = Command::new(&program);
+        cmd.args(&step.args).env(PATH_ENV_VAR, path_env());
+        let output = run_with_timeout(cmd, timeout).map_err(|output| StepFailure { command: command.clone(), output })?;
+        log.push_str(&output);
+    }
+    Ok(log)
+}
+
+struct InstallGuard;
+
+impl InstallGuard {
+    fn acquire() -> Option<Self> {
+        INSTALL_RUNNING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).ok().map(|_| InstallGuard)
+    }
+}
+
+impl Drop for InstallGuard {
+    fn drop(&mut self) {
+        INSTALL_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
+pub fn install_mlx_lm() -> Result<String, String> {
+    let _guard = InstallGuard::acquire().ok_or("An install is already running.")?;
+    let steps = mlx_install_steps();
+    run_install_steps(
+        &steps,
+        || executable::join_path(&exec_path::search_path()),
+        || resolve_absolute(UV_COMMAND).map(PathBuf::from),
+        INSTALL_STEP_TIMEOUT,
+    )
+    .map_err(|f| f.message())?;
+    detect_mlx_launcher().ok_or_else(|| "mlx-lm was installed, but no launcher could be found afterwards.".to_string())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn write_script(body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("localbar-fake-tool-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    fn step(program: InstallProgram, args: &[&str]) -> InstallStep {
+        InstallStep { program, args: args.iter().map(|a| a.to_string()).collect() }
+    }
+
+    fn path_env() -> String {
+        "/usr/bin:/bin".to_string()
+    }
+
+    #[test]
+    fn steps_run_in_order_and_uv_is_resolved_only_after_the_uv_install_step() {
+        let marker = std::env::temp_dir().join(format!("localbar-fake-uv-installed-{}", uuid::Uuid::new_v4()));
+        let installer = write_script(&format!("touch '{}'; echo installed-uv", marker.display()));
+        let uv = write_script("echo \"uv $*\"");
+        let steps = [
+            step(InstallProgram::Path(installer.to_string_lossy().into_owned()), &[]),
+            step(InstallProgram::UvAfterInstall, &["tool", "install", "mlx-lm"]),
+        ];
+        let result = run_install_steps(&steps, path_env, || marker.exists().then(|| uv.clone()), Duration::from_secs(10));
+        for p in [&installer, &uv, &marker] { std::fs::remove_file(p).ok(); }
+        let log = result.unwrap();
+        assert!(log.contains("installed-uv"), "{log}");
+        assert!(log.contains("uv tool install mlx-lm"), "{log}");
+    }
+
+    #[test]
+    fn a_failing_step_stops_the_plan_and_reports_its_output() {
+        let failing = write_script("echo boom >&2; exit 3");
+        let never = write_script("echo should-not-run");
+        let steps = [
+            step(InstallProgram::Path(failing.to_string_lossy().into_owned()), &[]),
+            step(InstallProgram::Path(never.to_string_lossy().into_owned()), &[]),
+        ];
+        let result = run_install_steps(&steps, path_env, || None, Duration::from_secs(10));
+        for p in [&failing, &never] { std::fs::remove_file(p).ok(); }
+        let failure = result.unwrap_err();
+        assert_eq!(failure.command, failing.to_string_lossy());
+        assert!(failure.output.contains("boom"), "{}", failure.output);
+        assert!(!failure.output.contains("should-not-run"));
+        assert!(failure.message().contains("boom"));
+    }
+
+    #[test]
+    fn uv_that_cannot_be_found_after_installing_fails_the_tool_install_step() {
+        let steps = [step(InstallProgram::UvAfterInstall, &["tool", "install", "mlx-lm"])];
+        let failure = run_install_steps(&steps, path_env, || None, Duration::from_secs(10)).unwrap_err();
+        assert_eq!(failure.command, "uv tool install mlx-lm");
+        assert!(failure.output.contains("could not be found afterwards"), "{}", failure.output);
+    }
+
+    #[test]
+    fn a_step_that_hangs_is_stopped_at_the_timeout() {
+        let hang = write_script("exec sleep 30");
+        let steps = [step(InstallProgram::Path(hang.to_string_lossy().into_owned()), &[])];
+        let started = Instant::now();
+        let result = run_install_steps(&steps, path_env, || None, Duration::from_millis(300));
+        std::fs::remove_file(&hang).ok();
+        assert!(result.unwrap_err().output.contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_python_without_mlx_lm_fails_the_import_check() {
+        let python = write_script("exit 1");
+        let ok = write_script("exit 0");
+        let rejected = python_imports_mlx_lm(python.to_str().unwrap(), &path_env());
+        let accepted = python_imports_mlx_lm(ok.to_str().unwrap(), &path_env());
+        for p in [&python, &ok] { std::fs::remove_file(p).ok(); }
+        assert!(!rejected);
+        assert!(accepted);
+    }
+
+    #[test]
+    fn only_one_install_can_run_at_a_time() {
+        let first = InstallGuard::acquire();
+        assert!(first.is_some());
+        assert!(InstallGuard::acquire().is_none());
+        drop(first);
+        assert!(InstallGuard::acquire().is_some());
+    }
+}

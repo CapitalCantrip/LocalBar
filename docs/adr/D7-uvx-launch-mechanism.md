@@ -1,9 +1,11 @@
 # ADR D7 — uvx as primary mlx-lm launch mechanism
 
-**Status:** Accepted  
+**Status:** Superseded in part by [D17](D17-mlx-launcher-detection-and-install.md) (detection order and launch forms)  
 **Date:** 2026-07-12  
 **Deciders:** Jay
 
+> The detection order below is superseded by [D17](D17-mlx-launcher-detection-and-install.md): an installed `mlx_lm.server` first, then `uv`/`uvx`, then a Python that imports mlx_lm. The uvx argument form is unchanged.
+>
 > Executables are resolved to absolute paths at spawn time (login-shell `PATH`, process `PATH`, fallback folders); see [D16](D16-executable-resolution.md). A bare `uvx` keeps the uvx argument form.
 
 ---

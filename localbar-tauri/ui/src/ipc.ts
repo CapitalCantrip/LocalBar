@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
-import type { AdoptResultDto, ReconnectNoticeDto, AppSettings, CanonicalParam, DiscoveredModel, DiscoveryConfig, InstancePhase, InstancePidDto, ModelMetadata, ModelRef, ParamValues, ResolvedModelsDir, ServerInstanceConfig } from './types'
+import type { AdoptResultDto, InstallPlanDto, ReconnectNoticeDto, AppSettings, CanonicalParam, DiscoveredModel, DiscoveryConfig, InstancePhase, InstancePidDto, ModelMetadata, ModelRef, ParamValues, ResolvedModelsDir, ServerInstanceConfig } from './types'
 
 export async function pickPath(options: { directory: boolean }): Promise<string | null> {
   const result = await open({ directory: options.directory, multiple: false })
@@ -114,6 +114,18 @@ export const ipc = {
 
   openSettings: (): Promise<void> =>
     invoke('open_settings'),
+
+  openSettingsForInstance: (id: string, install: boolean): Promise<void> =>
+    invoke('open_settings_for_instance', { id, install }),
+
+  detectMlxLauncher: (): Promise<string | null> =>
+    invoke('detect_mlx_launcher'),
+
+  getInstallPlan: (id: string): Promise<InstallPlanDto> =>
+    invoke('get_install_plan', { id }),
+
+  installToolForInstance: (id: string): Promise<string> =>
+    invoke('install_tool_for_instance', { id }),
 
   quitApp: (): Promise<void> =>
     invoke('quit_app'),
