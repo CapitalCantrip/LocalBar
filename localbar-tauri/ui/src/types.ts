@@ -15,6 +15,8 @@ export type { InstancePidDto } from './generated/InstancePidDto'
 export type { AdoptResultDto } from './generated/AdoptResultDto'
 export type { ReconnectNoticeDto } from './generated/ReconnectNoticeDto'
 export type { InstallPlanDto } from './generated/InstallPlanDto'
+export type { MlxDetectionDto } from './generated/MlxDetectionDto'
+export type { MlxDetectionProgressDto } from './generated/MlxDetectionProgressDto'
 
 import type { InstancePhaseDto as InstancePhase } from './generated/InstancePhaseDto'
 export type { InstancePhase }

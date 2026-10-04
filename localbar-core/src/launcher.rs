@@ -120,38 +120,133 @@ impl DetectionHost {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DetectionStep {
+    CheckingCommands,
+    CheckingPython { python: String, index: usize, total: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetectionStop {
+    DeadlinePassed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MlxDetection {
+    Found { executable: String, path: String },
+    NotFound,
+    DeadlinePassed,
+    Cancelled,
+}
+
+impl MlxDetection {
+    pub fn executable(&self) -> Option<&str> {
+        match self {
+            MlxDetection::Found { executable, .. } => Some(executable),
+            _ => None,
+        }
+    }
+
+    pub fn is_worth_caching(&self) -> bool {
+        !matches!(self, MlxDetection::Cancelled)
+    }
+}
+
+impl From<DetectionStop> for MlxDetection {
+    fn from(stop: DetectionStop) -> Self {
+        match stop {
+            DetectionStop::DeadlinePassed => MlxDetection::DeadlinePassed,
+            DetectionStop::Cancelled => MlxDetection::Cancelled,
+        }
+    }
+}
+
+const SEARCHED_COMMANDS: [&str; 3] = [MLX_LM_SERVER_SCRIPT, UV_COMMAND, UVX_COMMAND];
+const PROGRESS_PREFIX: &str = "Looking for mlx-lm: checking";
+pub const NOT_FOUND_GUIDANCE: &str = "mlx-lm wasn't found. You can still add the instance; Start will offer Install… or Choose….";
+pub const CANCELLED_LINE: &str = "Stopped looking. Keeping the current executable.";
+
+fn find_searched_command(search: &[String], is_executable: &impl Fn(&Path) -> bool) -> Option<MlxDetection> {
+    SEARCHED_COMMANDS.iter().find_map(|command| {
+        let path = search.iter().map(|dir| Path::new(dir).join(command)).find(|p| is_executable(p))?;
+        Some(MlxDetection::Found { executable: command.to_string(), path: path.to_string_lossy().into_owned() })
+    })
+}
+
+fn runnable_pythons(search: &[String], expanded_pythons: &[String], host: DetectionHost, is_executable: &impl Fn(&Path) -> bool) -> Vec<String> {
+    let path_pythons = search.iter().map(|dir| format!("{}/{PYTHON3_COMMAND}", dir.trim_end_matches('/')));
+    let mut runnable: Vec<String> = Vec::new();
+    for candidate in path_pythons.chain(expanded_pythons.iter().cloned()) {
+        if !runnable.contains(&candidate) && host.may_run(&candidate) && is_executable(Path::new(&candidate)) {
+            runnable.push(candidate);
+        }
+    }
+    runnable
+}
+
 pub fn detect_best_mlx_launcher(
     search: &[String],
     expanded_pythons: &[String],
     host: DetectionHost,
     is_executable: impl Fn(&Path) -> bool,
-    within_deadline: impl Fn() -> bool,
+    stop_reason: impl Fn() -> Option<DetectionStop>,
     imports_mlx_lm: impl Fn(&str) -> bool,
-) -> Option<String> {
-    let on_search_path = |name: &str| search.iter().any(|dir| is_executable(&Path::new(dir).join(name)));
-    for command in [MLX_LM_SERVER_SCRIPT, UV_COMMAND, UVX_COMMAND] {
-        if on_search_path(command) {
-            return Some(command.to_string());
+    mut on_step: impl FnMut(&DetectionStep),
+) -> MlxDetection {
+    if let Some(stop) = stop_reason() {
+        return stop.into();
+    }
+    on_step(&DetectionStep::CheckingCommands);
+    if let Some(found) = find_searched_command(search, &is_executable) {
+        return found;
+    }
+    let runnable = runnable_pythons(search, expanded_pythons, host, &is_executable);
+    let total = runnable.len();
+    for (i, python) in runnable.into_iter().enumerate() {
+        if let Some(stop) = stop_reason() {
+            return stop.into();
+        }
+        on_step(&DetectionStep::CheckingPython { python: python.clone(), index: i + 1, total });
+        if imports_mlx_lm(&python) {
+            return MlxDetection::Found { executable: python.clone(), path: python };
         }
     }
-    let path_pythons = search.iter().map(|dir| format!("{}/{PYTHON3_COMMAND}", dir.trim_end_matches('/')));
-    let mut tried: Vec<String> = Vec::new();
-    for candidate in path_pythons.chain(expanded_pythons.iter().cloned()) {
-        if tried.contains(&candidate) {
-            continue;
-        }
-        tried.push(candidate.clone());
-        if !host.may_run(&candidate) || !is_executable(Path::new(&candidate)) {
-            continue;
-        }
-        if !within_deadline() {
-            return None;
-        }
-        if imports_mlx_lm(&candidate) {
-            return Some(candidate);
+    MlxDetection::NotFound
+}
+
+pub fn shorten_home(path: &str, home: Option<&str>) -> String {
+    let Some(home) = home.map(|h| h.trim_end_matches('/')).filter(|h| !h.is_empty()) else { return path.to_string() };
+    match path.strip_prefix(home) {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("~{rest}"),
+        _ => path.to_string(),
+    }
+}
+
+pub fn detection_progress_line(step: &DetectionStep, home: Option<&str>) -> String {
+    match step {
+        DetectionStep::CheckingCommands => format!("{PROGRESS_PREFIX} for {}…", SEARCHED_COMMANDS.join(", ")),
+        DetectionStep::CheckingPython { python, index, total } => {
+            format!("{PROGRESS_PREFIX} {} ({index} of {total})…", shorten_home(python, home))
         }
     }
-    None
+}
+
+pub fn detection_outcome_line(outcome: &MlxDetection, home: Option<&str>) -> String {
+    match outcome {
+        MlxDetection::Found { executable, path } => {
+            let shown = shorten_home(path, home);
+            match mlx_launcher_kind(executable) {
+                MlxLauncherKind::Python => format!("Found a Python with mlx-lm ({shown}). Using it."),
+                _ => format!("Found {executable} ({shown}). Using it."),
+            }
+        }
+        MlxDetection::NotFound => NOT_FOUND_GUIDANCE.to_string(),
+        MlxDetection::DeadlinePassed => {
+            format!("Stopped looking after {} s. {NOT_FOUND_GUIDANCE}", MAX_DETECTION_TIME.as_secs())
+        }
+        MlxDetection::Cancelled => CANCELLED_LINE.to_string(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,23 +326,31 @@ mod tests {
     const MAC_WITHOUT_TOOLS: DetectionHost = DetectionHost { os: TargetOs::MacOs, developer_tools_installed: false };
     const LINUX_HOST: DetectionHost = DetectionHost { os: TargetOs::Linux, developer_tools_installed: false };
 
+    fn no_stop() -> Option<DetectionStop> {
+        None
+    }
+
+    fn found(outcome: &MlxDetection) -> Option<&str> {
+        outcome.executable()
+    }
+
     #[test]
     fn the_macos_python_stub_is_never_run_without_developer_tools() {
         let search = strings(&["/usr/bin/", "/opt/bin"]);
         let pythons = strings(&["/usr/bin/python3"]);
-        let found = detect_best_mlx_launcher(&search, &pythons, MAC_WITHOUT_TOOLS, exists_in(&["/usr/bin/python3", "/opt/bin/python3"]), || true, |p| {
+        let outcome = detect_best_mlx_launcher(&search, &pythons, MAC_WITHOUT_TOOLS, exists_in(&["/usr/bin/python3", "/opt/bin/python3"]), no_stop, |p| {
             assert_ne!(p, "/usr/bin/python3", "ran the developer tools stub");
             p == "/opt/bin/python3"
-        });
-        assert_eq!(found.as_deref(), Some("/opt/bin/python3"));
+        }, |_| {});
+        assert_eq!(found(&outcome), Some("/opt/bin/python3"));
     }
 
     #[test]
     fn the_system_python_is_tried_when_developer_tools_are_installed_or_off_macos() {
         let pythons = strings(&["/usr/bin/python3"]);
         for host in [MAC_WITH_TOOLS, LINUX_HOST] {
-            let found = detect_best_mlx_launcher(&[], &pythons, host, exists_in(&["/usr/bin/python3"]), || true, |p| p == "/usr/bin/python3");
-            assert_eq!(found.as_deref(), Some("/usr/bin/python3"));
+            let outcome = detect_best_mlx_launcher(&[], &pythons, host, exists_in(&["/usr/bin/python3"]), no_stop, |p| p == "/usr/bin/python3", |_| {});
+            assert_eq!(found(&outcome), Some("/usr/bin/python3"));
         }
     }
 
@@ -255,12 +358,51 @@ mod tests {
     fn detection_gives_up_once_the_deadline_passes() {
         let pythons = strings(&["/a/python3", "/b/python3", "/c/python3"]);
         let checks = std::cell::Cell::new(0);
-        let found = detect_best_mlx_launcher(&[], &pythons, MAC_WITH_TOOLS, exists_in(&["/a/python3", "/b/python3", "/c/python3"]), || checks.get() < 2, |p| {
+        let stop = || (checks.get() >= 2).then_some(DetectionStop::DeadlinePassed);
+        let outcome = detect_best_mlx_launcher(&[], &pythons, MAC_WITH_TOOLS, exists_in(&["/a/python3", "/b/python3", "/c/python3"]), stop, |p| {
             checks.set(checks.get() + 1);
             p == "/c/python3"
-        });
-        assert_eq!(found, None);
+        }, |_| {});
+        assert_eq!(outcome, MlxDetection::DeadlinePassed);
         assert_eq!(checks.get(), 2);
+    }
+
+    #[test]
+    fn cancelling_stops_detection_before_the_next_import_check() {
+        let pythons = strings(&["/a/python3", "/b/python3"]);
+        let cancelled = std::cell::Cell::new(false);
+        let checks = std::cell::Cell::new(0);
+        let outcome = detect_best_mlx_launcher(&[], &pythons, MAC_WITH_TOOLS, exists_in(&["/a/python3", "/b/python3"]), || cancelled.get().then_some(DetectionStop::Cancelled), |_| {
+            checks.set(checks.get() + 1);
+            cancelled.set(true);
+            false
+        }, |_| {});
+        assert_eq!(outcome, MlxDetection::Cancelled);
+        assert_eq!(checks.get(), 1);
+        assert!(!outcome.is_worth_caching());
+    }
+
+    #[test]
+    fn a_detection_cancelled_before_it_starts_reports_no_steps() {
+        let mut steps = Vec::new();
+        let outcome = detect_best_mlx_launcher(&strings(&["/a"]), &[], MAC_WITH_TOOLS, exists_in(&["/a/uv"]), || Some(DetectionStop::Cancelled), |_| true, |s| steps.push(s.clone()));
+        assert_eq!(outcome, MlxDetection::Cancelled);
+        assert!(steps.is_empty());
+    }
+
+    #[test]
+    fn progress_reports_the_command_check_then_each_runnable_python_with_its_position() {
+        let search = strings(&["/a"]);
+        let pythons = strings(&["/a/python3", "/missing/python3", "/env/bin/python3", "/usr/bin/python3"]);
+        let mut steps = Vec::new();
+        let present = exists_in(&["/a/python3", "/env/bin/python3", "/usr/bin/python3"]);
+        let outcome = detect_best_mlx_launcher(&search, &pythons, MAC_WITHOUT_TOOLS, present, no_stop, |_| false, |s| steps.push(s.clone()));
+        assert_eq!(outcome, MlxDetection::NotFound);
+        assert_eq!(steps, vec![
+            DetectionStep::CheckingCommands,
+            DetectionStep::CheckingPython { python: "/a/python3".into(), index: 1, total: 2 },
+            DetectionStep::CheckingPython { python: "/env/bin/python3".into(), index: 2, total: 2 },
+        ]);
     }
 
     fn exists_in(present: &'static [&'static str]) -> impl Fn(&Path) -> bool {
@@ -270,15 +412,15 @@ mod tests {
     #[test]
     fn an_installed_server_script_beats_uv_and_python() {
         let search = strings(&["/a", "/b"]);
-        let found = detect_best_mlx_launcher(&search, &[], MAC_WITH_TOOLS, exists_in(&["/a/uv", "/b/mlx_lm.server", "/a/python3"]), || true, |_| true);
-        assert_eq!(found.as_deref(), Some("mlx_lm.server"));
+        let outcome = detect_best_mlx_launcher(&search, &[], MAC_WITH_TOOLS, exists_in(&["/a/uv", "/b/mlx_lm.server", "/a/python3"]), no_stop, |_| true, |_| {});
+        assert_eq!(outcome, MlxDetection::Found { executable: "mlx_lm.server".into(), path: "/b/mlx_lm.server".into() });
     }
 
     #[test]
     fn uv_is_preferred_over_uvx_and_both_are_stored_as_bare_names() {
         let search = strings(&["/a"]);
-        assert_eq!(detect_best_mlx_launcher(&search, &[], MAC_WITH_TOOLS, exists_in(&["/a/uv", "/a/uvx"]), || true, |_| true).as_deref(), Some("uv"));
-        assert_eq!(detect_best_mlx_launcher(&search, &[], MAC_WITH_TOOLS, exists_in(&["/a/uvx"]), || true, |_| true).as_deref(), Some("uvx"));
+        assert_eq!(found(&detect_best_mlx_launcher(&search, &[], MAC_WITH_TOOLS, exists_in(&["/a/uv", "/a/uvx"]), no_stop, |_| true, |_| {})), Some("uv"));
+        assert_eq!(found(&detect_best_mlx_launcher(&search, &[], MAC_WITH_TOOLS, exists_in(&["/a/uvx"]), no_stop, |_| true, |_| {})), Some("uvx"));
     }
 
     #[test]
@@ -286,8 +428,8 @@ mod tests {
         let search = strings(&["/a"]);
         let pythons = strings(&["/env1/bin/python3", "/env2/bin/python3"]);
         let present = exists_in(&["/a/python3", "/env1/bin/python3", "/env2/bin/python3"]);
-        let found = detect_best_mlx_launcher(&search, &pythons, MAC_WITH_TOOLS, present, || true, |p| p == "/env2/bin/python3");
-        assert_eq!(found.as_deref(), Some("/env2/bin/python3"));
+        let outcome = detect_best_mlx_launcher(&search, &pythons, MAC_WITH_TOOLS, present, no_stop, |p| p == "/env2/bin/python3", |_| {});
+        assert_eq!(found(&outcome), Some("/env2/bin/python3"));
     }
 
     #[test]
@@ -296,15 +438,54 @@ mod tests {
         let pythons = strings(&["/a/python3", "/env/bin/python3"]);
         let calls = std::cell::RefCell::new(Vec::new());
         let present = exists_in(&["/a/python3", "/env/bin/python3"]);
-        let found = detect_best_mlx_launcher(&search, &pythons, MAC_WITH_TOOLS, present, || true, |p| { calls.borrow_mut().push(p.to_string()); p == "/env/bin/python3" });
-        assert_eq!(found.as_deref(), Some("/env/bin/python3"));
+        let outcome = detect_best_mlx_launcher(&search, &pythons, MAC_WITH_TOOLS, present, no_stop, |p| { calls.borrow_mut().push(p.to_string()); p == "/env/bin/python3" }, |_| {});
+        assert_eq!(found(&outcome), Some("/env/bin/python3"));
         assert_eq!(*calls.borrow(), strings(&["/a/python3", "/env/bin/python3"]));
     }
 
     #[test]
     fn missing_pythons_are_never_run() {
-        let found = detect_best_mlx_launcher(&[], &strings(&["/nope/python3"]), MAC_WITH_TOOLS, |_| false, || true, |_| panic!("ran a missing python"));
-        assert_eq!(found, None);
+        let outcome = detect_best_mlx_launcher(&[], &strings(&["/nope/python3"]), MAC_WITH_TOOLS, |_| false, no_stop, |_| panic!("ran a missing python"), |_| {});
+        assert_eq!(outcome, MlxDetection::NotFound);
+    }
+
+    #[test]
+    fn paths_inside_the_home_folder_are_shown_with_a_tilde() {
+        assert_eq!(shorten_home("/Users/me/.local/bin/uv", Some("/Users/me")), "~/.local/bin/uv");
+        assert_eq!(shorten_home("/Users/me/.local/bin/uv", Some("/Users/me/")), "~/.local/bin/uv");
+        assert_eq!(shorten_home("/Users/me", Some("/Users/me")), "~");
+        assert_eq!(shorten_home("/Users/meg/bin/uv", Some("/Users/me")), "/Users/meg/bin/uv");
+        assert_eq!(shorten_home("/opt/homebrew/bin/uv", Some("/Users/me")), "/opt/homebrew/bin/uv");
+        assert_eq!(shorten_home("/Users/me/bin/uv", None), "/Users/me/bin/uv");
+        assert_eq!(shorten_home("/Users/me/bin/uv", Some("")), "/Users/me/bin/uv");
+    }
+
+    #[test]
+    fn progress_lines_name_the_commands_or_the_python_and_its_position() {
+        let home = Some("/Users/me");
+        assert_eq!(detection_progress_line(&DetectionStep::CheckingCommands, home), "Looking for mlx-lm: checking for mlx_lm.server, uv, uvx…");
+        let step = DetectionStep::CheckingPython { python: "/Users/me/.pyenv/versions/3.12.4/bin/python3".into(), index: 4, total: 9 };
+        assert_eq!(detection_progress_line(&step, home), "Looking for mlx-lm: checking ~/.pyenv/versions/3.12.4/bin/python3 (4 of 9)…");
+    }
+
+    #[test]
+    fn each_outcome_kind_gets_its_own_line() {
+        let home = Some("/Users/me");
+        let uv = MlxDetection::Found { executable: "uv".into(), path: "/Users/me/.local/bin/uv".into() };
+        assert_eq!(detection_outcome_line(&uv, home), "Found uv (~/.local/bin/uv). Using it.");
+        let python = MlxDetection::Found { executable: "/Users/me/.venv/bin/python".into(), path: "/Users/me/.venv/bin/python".into() };
+        assert_eq!(detection_outcome_line(&python, home), "Found a Python with mlx-lm (~/.venv/bin/python). Using it.");
+        assert_eq!(detection_outcome_line(&MlxDetection::NotFound, home), NOT_FOUND_GUIDANCE);
+        assert_eq!(detection_outcome_line(&MlxDetection::DeadlinePassed, home), format!("Stopped looking after 30 s. {NOT_FOUND_GUIDANCE}"));
+        assert_eq!(detection_outcome_line(&MlxDetection::Cancelled, home), CANCELLED_LINE);
+    }
+
+    #[test]
+    fn every_outcome_except_cancellation_is_cached() {
+        assert!(MlxDetection::NotFound.is_worth_caching());
+        assert!(MlxDetection::DeadlinePassed.is_worth_caching());
+        assert!(MlxDetection::Found { executable: "uv".into(), path: "/a/uv".into() }.is_worth_caching());
+        assert!(!MlxDetection::Cancelled.is_worth_caching());
     }
 
     #[test]

@@ -40,6 +40,17 @@ Bounds: no home-wide scan; each "each subfolder" location lists one directory an
 
 On macOS without the Command Line Tools, `/usr/bin/python3` is a stub: running it at all, even for an import check, pops the system "install developer tools" dialog. Detection therefore runs `/usr/bin/xcode-select -p` once (3 s timeout; it never shows the dialog) and, if it fails, never runs `/usr/bin/python3` — neither the fixed candidate nor `python3` found in a search-path `/usr/bin`. The filter is the pure `DetectionHost` input in core. Detection runs in `spawn_blocking`, never on the main thread or under the registry lock.
 
+### Progress, cancellation and caching (#92)
+
+Detection can take up to 30 s, so it never runs blind:
+
+- **Progress.** `detect_best_mlx_launcher` takes an `on_step` callback and reports `CheckingCommands` once, then `CheckingPython { python, index, total }` before each import check. `total` counts only the Pythons that will actually run (deduplicated, existing, and allowed by the `/usr/bin/python3` stub rule). The pure `detection_progress_line` turns a step into "Looking for mlx-lm: checking ~/.pyenv/versions/3.12.4/bin/python3 (4 of 9)…", with paths inside the home folder shortened to `~` by `shorten_home`. The backend emits each line as the `mlx-detection-progress` event (`MlxDetectionProgressDto`); the UI appends elapsed seconds, ticking once a second from the first progress line.
+- **Stopping.** The deadline predicate became `stop_reason() -> Option<DetectionStop>` (`DeadlinePassed` or `Cancelled`), checked before the command check and before every import check. The import check in flight is also killed as soon as the predicate fires, so Skip and the deadline take effect within one poll interval rather than up to 15 s later.
+- **Outcome.** Detection returns `MlxDetection::{Found { executable, path }, NotFound, DeadlinePassed, Cancelled}`; `path` is where the launcher was seen, so a bare `uv` can be shown as "Found uv (~/.local/bin/uv). Using it.". The pure `detection_outcome_line` gives the one-line result, including "Stopped looking after 30 s." followed by the not-found guidance.
+- **One at a time.** A `DetectionCoordinator` in `tool_install.rs` holds a cancel token for the running detection. Starting another detection cancels the previous one; `cancel_mlx_detection` cancels the current one. A superseded or cancelled run never writes the cache.
+- **Cache.** Every outcome except `Cancelled` is cached for the app session. `detect_mlx_launcher(force: false)` returns the cached result instantly; **Detect again** passes `force: true`; a successful Install clears the cache and detects again with the same progress events, which the Install dialog shows.
+- **Add Instance never blocks.** The form stays usable during detection. **Skip** or typing in the executable field cancels detection and keeps the current value; a result arriving later never overwrites a value the user typed.
+
 D7b's multi-choice picker, version display and Ollama/LM Studio templates are not implemented: the single best launcher is pre-filled and can be edited in the sheet.
 
 ### Install offer

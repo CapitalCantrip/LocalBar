@@ -1,5 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { ipc, pickPath } from '../ipc'
+import type { MlxDetectionDto } from '../types'
+import { useDetectionProgress } from './useDetectionProgress'
 import { s } from './styles'
 import { AddModelPicker, PICKER_TYPES } from './AddModelPicker'
 
@@ -9,6 +11,10 @@ export const DEFAULTS: Record<ServerTypeOption, { port: string; execPath: string
   ollama: { port: '11434', execPath: '/usr/local/bin/ollama', namePlaceholder: 'My Ollama' },
   'mlx-lm': { port: '8080', execPath: 'uvx', namePlaceholder: 'My mlx-lm' },
   external: { port: '11434', execPath: '', namePlaceholder: 'My External Server' },
+}
+
+const linkBtn: React.CSSProperties = {
+  background: 'none', border: 'none', padding: 0, color: '#2563eb', cursor: 'pointer', fontSize: 11,
 }
 
 export function AddInstanceSheet({ onAdd, onCancel }: {
@@ -24,23 +30,47 @@ export function AddInstanceSheet({ onAdd, onCancel }: {
   const [pickerFolder, setPickerFolder] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [detecting, setDetecting] = useState(false)
-  const [nothingDetected, setNothingDetected] = useState(false)
+  const [detection, setDetection] = useState<MlxDetectionDto | null>(null)
+  const detectionRun = useRef(0)
+  const execPathEdited = useRef(false)
+  const progress = useDetectionProgress(detecting)
+
+  const startDetection = useCallback((force: boolean) => {
+    const run = ++detectionRun.current
+    setDetecting(true)
+    setDetection(null)
+    ipc.detectMlxLauncher(force)
+      .then(result => {
+        if (run !== detectionRun.current) return
+        setDetection(result)
+        const found = result.executable
+        if (found !== null && !execPathEdited.current) setExecPath(found)
+      })
+      .catch(() => {})
+      .finally(() => { if (run === detectionRun.current) setDetecting(false) })
+  }, [])
+
+  const stopDetection = useCallback(() => {
+    detectionRun.current++
+    setDetecting(false)
+    void ipc.cancelMlxDetection()
+  }, [])
 
   useEffect(() => {
     if (serverType !== 'mlx-lm') return
-    let cancelled = false
-    setDetecting(true)
-    setNothingDetected(false)
-    ipc.detectMlxLauncher()
-      .then(found => {
-        if (cancelled) return
-        setNothingDetected(found === null)
-        if (found !== null) setExecPath(current => current === DEFAULTS['mlx-lm'].execPath ? found : current)
-      })
-      .catch(() => {})
-      .finally(() => { if (!cancelled) setDetecting(false) })
-    return () => { cancelled = true }
-  }, [serverType])
+    execPathEdited.current = false
+    startDetection(false)
+    return () => {
+      detectionRun.current++
+      void ipc.cancelMlxDetection()
+    }
+  }, [serverType, startDetection])
+
+  const editExecPath = (value: string) => {
+    execPathEdited.current = true
+    if (detecting) stopDetection()
+    setExecPath(value)
+  }
 
   const selectType = (t: ServerTypeOption) => {
     setServerType(t)
@@ -99,12 +129,18 @@ export function AddInstanceSheet({ onAdd, onCancel }: {
         {serverType !== 'external' && (
           <div style={s.field}>
             <label style={s.fieldLabel}>Executable path</label>
-            <input style={s.input} value={execPath} onChange={e => setExecPath(e.target.value)} />
+            <input style={s.input} value={execPath} onChange={e => editExecPath(e.target.value)} />
             {serverType === 'mlx-lm' && detecting && (
-              <span style={{ fontSize: 11, color: '#666' }}>Looking for mlx-lm…</span>
+              <span style={{ fontSize: 11, color: '#666', display: 'flex', gap: 8, alignItems: 'baseline' }}>
+                <span style={{ flex: 1, wordBreak: 'break-all' }}>{progress ?? 'Looking for mlx-lm…'}</span>
+                <button type="button" style={linkBtn} onClick={stopDetection}>Skip</button>
+              </span>
             )}
-            {serverType === 'mlx-lm' && !detecting && nothingDetected && (
-              <span style={{ fontSize: 11, color: '#666' }}>mlx-lm wasn't found. Add the instance, then use Install… if Start can't find it.</span>
+            {serverType === 'mlx-lm' && !detecting && (
+              <span style={{ fontSize: 11, color: '#666' }}>
+                {detection && detection.kind !== 'cancelled' && <>{detection.message} </>}
+                <button type="button" style={linkBtn} onClick={() => startDetection(true)}>Detect again</button>
+              </span>
             )}
           </div>
         )}
