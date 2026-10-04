@@ -30,6 +30,16 @@ jobs:
         with:
           draft: true
           generate_release_notes: true
+          body: |
+            ### Opening LocalBar on macOS
+
+            LocalBar isn't signed with a paid Apple Developer certificate, so macOS blocks it the first time you open each new version. On macOS 15 and later the warning offers only **Move to Bin** or **Done**. This doesn't mean the app is damaged.
+
+            1. Open `LocalBar.app` and click **Done** when it's blocked.
+            2. Go to **System Settings → Privacy & Security → Security** and click **Open Anyway**.
+            3. Confirm with your password or Touch ID, then click **Open**.
+
+            Or run `xattr -dr com.apple.quarantine /Applications/LocalBar.app` in Terminal. To avoid the warning entirely, [build it yourself](https://github.com/CapitalCantrip/LocalBar#option-2-build-it-yourself).
 
   build-macos:
     needs: create-release
