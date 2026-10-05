@@ -14,10 +14,10 @@ engineering knowledge. Run on a set-up project, every step finds its work
 already in place and changes nothing, so this is also the upgrade after a pin
 bump.
 
-The pin this skill belongs to: `v0.4.0`. Install line, used in step 2:
+The pin this skill belongs to: `v0.4.1`. Install line, used in step 2:
 
 ```bash
-uv tool install "quality-gates @ git+https://github.com/CapitalCantrip/quality-gates@v0.4.0"
+uv tool install "quality-gates @ git+https://github.com/CapitalCantrip/quality-gates@v0.4.1"
 ```
 
 Ask the builder only where a choice is theirs, in the form the `standards`
@@ -50,12 +50,17 @@ or **not done** with the reason. Step 7 reads from it.
 7. Read `CLAUDE.md` for lines that restate what `docs/agents/` now holds: a
    label list, issue tracker commands, where the glossary lives, a path into
    `.claude/agents/` or a mention of `CONTEXT.md`. Replace each with a
-   one-line pointer to the file that holds it, and put the before and after in
-   the report.
+   one-line context pointer to the file that holds it. A context pointer says
+   what is at the other end, so an agent knows when to open it: "GitHub Issues
+   on this repo, through the `gh` CLI. See `docs/agents/issue-tracker.md`.",
+   not "See `docs/agents/issue-tracker.md`." Check the pointers already in
+   `CLAUDE.md` the same way, and rewrite any that only name a file. Put each
+   before and after in the report.
 
 Done when `qg-agent-docs` reports every file, the five labels exist, a
-glossary and `docs/adr/` exist, and no line in `CLAUDE.md` contradicts
-`docs/agents/`.
+glossary and `docs/adr/` exist, no line in `CLAUDE.md` contradicts
+`docs/agents/`, and every line in `CLAUDE.md` that names a file in
+`docs/agents/` also says what that file holds.
 
 ## 2. Gates for each language
 

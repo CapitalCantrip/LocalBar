@@ -60,5 +60,5 @@ Prefer somewhere that fails when the knowledge stops being true.
 ## Installing the commands
 
 ```bash
-uv tool install "quality-gates @ git+https://github.com/CapitalCantrip/quality-gates@v0.4.0"
+uv tool install "quality-gates @ git+https://github.com/CapitalCantrip/quality-gates@v0.4.1"
 ```

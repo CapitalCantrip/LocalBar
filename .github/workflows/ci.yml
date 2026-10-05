@@ -66,7 +66,7 @@ jobs:
 
       - name: Install quality-gates
         if: runner.os == 'Linux'
-        run: uv tool install "quality-gates @ git+https://github.com/CapitalCantrip/quality-gates@v0.4.0"
+        run: uv tool install "quality-gates @ git+https://github.com/CapitalCantrip/quality-gates@v0.4.1"
 
       - name: Skills, stage guard and asking rule match the pinned quality-gates
         if: runner.os == 'Linux'

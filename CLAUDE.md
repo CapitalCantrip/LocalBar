@@ -4,16 +4,16 @@
 
 ### Issue tracker
 
-See `docs/agents/issue-tracker.md`.
+GitHub Issues on CapitalCantrip/LocalBar, through the `gh` CLI. See `docs/agents/issue-tracker.md` for the create, read, list, label and close commands.
 
 ### Triage labels
 
-See `docs/agents/triage-labels.md`.
+Five triage labels (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`) and what each means. See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
-See `docs/agents/domain.md`.
+Read `GLOSSARY.md` and the relevant ADRs in `docs/adr/` before exploring. See `docs/agents/domain.md` for how domain docs are laid out and when to add to them.
 
 ### Code comments
 
-No code comments. The only exception is `// SAFETY:` on `unsafe` blocks. Record rationale in `docs/adr/`, known risks in GitHub issues, invariants as named tests, magic numbers as named constants. See D13.
+No code comments. The only exception is `// SAFETY:` on `unsafe` blocks. Record rationale in `docs/adr/`, known risks in GitHub issues, invariants as named tests, magic numbers as named constants. See `docs/adr/D13-no-code-comments.md`.
