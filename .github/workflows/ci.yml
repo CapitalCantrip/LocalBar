@@ -60,6 +60,18 @@ jobs:
           scripts/check-no-comments --self-test
           scripts/check-no-comments
 
+      - name: Install uv
+        if: runner.os == 'Linux'
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install quality-gates
+        if: runner.os == 'Linux'
+        run: uv tool install "quality-gates @ git+https://github.com/CapitalCantrip/quality-gates@v0.4.0"
+
+      - name: Skills, stage guard and asking rule match the pinned quality-gates
+        if: runner.os == 'Linux'
+        run: qg-skills --check
+
       - name: cargo clippy (workspace)
         run: cargo clippy --all-targets --workspace -- -D warnings
 

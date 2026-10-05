@@ -1,16 +1,18 @@
+**Asking the builder:** ask when uncertain about anything irreversible, outward-facing or large in scope, and proceed on reversible work with a stated default. Every question gives what is at stake in plain words, two or three options with only the pros and cons the builder would notice, and a recommendation with its reason (`standards` skill, *ask the builder*).
+
 ## Agent skills
 
 ### Issue tracker
 
-Issues live in GitHub Issues on CapitalCantrip/LocalBar. See `.claude/agents/issue-tracker.md`.
+See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
-Uses the five default triage labels. See `.claude/agents/triage-labels.md`.
+See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
-Single-context repo with one `CONTEXT.md` at root and `docs/adr/`. See `.claude/agents/domain.md`.
+See `docs/agents/domain.md`.
 
 ### Code comments
 
