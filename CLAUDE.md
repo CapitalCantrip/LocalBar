@@ -17,3 +17,7 @@ Read `GLOSSARY.md` and the relevant ADRs in `docs/adr/` before exploring. See `d
 ### Code comments
 
 No code comments. The only exception is `// SAFETY:` on `unsafe` blocks. Record rationale in `docs/adr/`, known risks in GitHub issues, invariants as named tests, magic numbers as named constants. See `docs/adr/D13-no-code-comments.md`.
+
+### Code layout
+
+The Rust core is `localbar-core/`, the Tauri shell is `localbar-tauri/` (Rust in `localbar-tauri/src/`, React UI in `localbar-tauri/ui/src/`); this repo has no `src-tauri/`. Full map: README § Project structure.
