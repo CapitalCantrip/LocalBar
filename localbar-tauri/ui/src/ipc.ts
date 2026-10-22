@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
-import type { AdoptResultDto, InstallPlanDto, MlxDetectionDto, ReconnectNoticeDto, AppSettings, CanonicalParam, DiscoveredModel, DiscoveryConfig, InstancePhase, InstancePidDto, ModelMetadata, ModelRef, ParamValues, ResolvedModelsDir, ServerInstanceConfig, UpdateCheckOutcome } from './types'
+import type { AdoptResultDto, InstallPlanDto, MlxDetectionDto, ReconnectNoticeDto, AppSettings, CanonicalParam, DiscoveredModel, DiscoveryConfig, InstancePhase, InstancePidDto, ModelMetadata, ModelRef, ParamValues, ParamsSaved, ResolvedModelsDir, ServerInstanceConfig, UpdateCheckOutcome } from './types'
 
 export async function pickPath(options: { directory: boolean }): Promise<string | null> {
   const result = await open({ directory: options.directory, multiple: false })
@@ -85,11 +85,11 @@ export const ipc = {
   fetchModelMetadata: (id: string, modelKey: string): Promise<ModelMetadata | null> =>
     invoke('fetch_model_metadata_cmd', { id, modelKey }),
 
-  updateInstanceParams: (id: string, params: ParamValues): Promise<void> =>
+  updateInstanceParams: (id: string, params: ParamValues): Promise<ParamsSaved> =>
     invoke('update_instance_params', { id, params }),
 
-  getResolvedParams: (id: string): Promise<ParamValues> =>
-    invoke('get_resolved_params', { id }),
+  getEffectiveParams: (id: string): Promise<ParamValues> =>
+    invoke('get_effective_params', { id }),
 
   getParamSchema: (serverType: string): Promise<ParamSchemaEntry[]> =>
     invoke('get_param_schema', { serverType }),

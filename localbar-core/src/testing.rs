@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 use crate::driver::{HealthStatus, LaunchPlan, ServerDriver, ShutdownPlan};
+use crate::drivers::ollama::generate_modelfile;
 use crate::types::{
     CanonicalParam, ModelRef, ParamDescriptor, ParamValue, ParamValues, ServerInstanceConfig,
     ServerType,
@@ -17,6 +18,7 @@ pub struct MockDriver {
     pub recognises_process: bool,
     pub managed_config_calls: Arc<Mutex<Vec<(String, String)>>>,
     pub delete_config_calls: Arc<Mutex<Vec<String>>>,
+    pub launch_params: Arc<Mutex<Vec<ParamValues>>>,
 }
 
 impl MockDriver {
@@ -30,6 +32,7 @@ impl MockDriver {
             recognises_process: true,
             managed_config_calls: Arc::new(Mutex::new(Vec::new())),
             delete_config_calls: Arc::new(Mutex::new(Vec::new())),
+            launch_params: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -96,8 +99,9 @@ impl ServerDriver for MockDriver {
         &self,
         config: &ServerInstanceConfig,
         _model: Option<&ModelRef>,
-        _params: &ParamValues,
+        params: &ParamValues,
     ) -> Result<LaunchPlan, String> {
+        self.launch_params.lock().unwrap().push(params.clone());
         Ok(LaunchPlan {
             executable: config.executable_path.clone(),
             arguments: vec!["--port".to_string(), config.port.to_string()],
@@ -142,11 +146,11 @@ impl ServerDriver for MockDriver {
     fn generate_managed_config(
         &self,
         base_key: &str,
-        _params: &ParamValues,
+        params: &ParamValues,
         _config: &ServerInstanceConfig,
     ) -> Option<String> {
         if self.server_type == ServerType::Ollama {
-            Some(format!("FROM {base_key}"))
+            Some(generate_modelfile(&Self::default_schema(), base_key, params))
         } else {
             None
         }

@@ -16,14 +16,15 @@ mod update;
 
 use localbar_core::driver::{HealthStatus, ModelMetadata, ServerDriver};
 use localbar_core::drivers::{self, external::ExternalDriver, ollama::{self, OllamaDriver}};
+use localbar_core::effective_params::effective_params;
 use localbar_core::lifecycle::{self, displayed_pid, LifecycleEvent, StopKill, PollContext, PollOutcome, SwitchPlan};
 use localbar_core::net::port_is_open;
 use localbar_core::persistence::FilePersistence;
 use localbar_core::quit::{ids_to_forget_reconnect_on_launch, ids_to_start_on_launch, ids_to_stop_on_quit, quit_sequence_for, quit_shutdown_budget_secs, ExitSignal, QuitCandidate, QuitSequence};
 use localbar_core::registry::InstanceRegistry;
 use localbar_core::types::{
-    AppSettings, DiscoveryConfig, InstanceError, InstanceErrorKind, InstancePhase, ModelMemoryKey, ModelRef,
-    ParamValues, ServerInstanceConfig, ServerType,
+    AppSettings, DiscoveryConfig, InstanceError, InstanceErrorKind, InstancePhase, ModelRef,
+    ParamValues, ParamsSaved, ServerInstanceConfig, ServerType,
 };
 use localbar_core::{adopt_external_as_new_instance, set_active_profile, set_instance_params};
 
@@ -1011,10 +1012,12 @@ async fn switch_model_warm_load(
     model: ModelRef,
     old_key: Option<String>,
 ) -> Result<(), String> {
-    let Some(config) = clone_config(app, id) else { return Ok(()) };
-    let discovery = discovery_config(app);
-    let driver = driver_for(&config, &discovery);
-    let params = config.instance_params.clone();
+    let Some((config, driver)) = instance_driver(app, id) else { return Ok(()) };
+    let params = {
+        let state = app.state::<AppState>();
+        let reg = state.registry.lock().unwrap();
+        effective_params(&reg, id, &*driver)?
+    };
     let switch_result = tauri::async_runtime::spawn_blocking(move || {
         driver.switch_model(&model, &params, &config)
     }).await.map_err(|e| e.to_string())?;
@@ -1062,7 +1065,7 @@ fn update_instance_params(
     state: State<'_, AppState>,
     id: String,
     params: ParamValues,
-) -> Result<(), String> {
+) -> Result<ParamsSaved, String> {
     let uuid = parse_uuid(&id)?;
     let mut reg = state.registry.lock().unwrap();
     let config = reg.get_config(uuid).cloned().ok_or("instance not found")?;
@@ -1241,18 +1244,11 @@ async fn fetch_model_metadata_cmd(
 }
 
 #[tauri::command]
-fn get_resolved_params(state: State<'_, AppState>, id: String) -> Result<ParamValues, String> {
+fn get_effective_params(state: State<'_, AppState>, id: String) -> Result<ParamValues, String> {
     let uuid = parse_uuid(&id)?;
     let reg = state.registry.lock().unwrap();
     let config = reg.get_config(uuid).ok_or_else(|| format!("instance {id} not found"))?;
-    let profile = reg.get_active_profile_params(uuid);
-    let mem_key = ModelMemoryKey {
-        server_type: config.server_type,
-        model_key: config.selected_model_key.clone().unwrap_or_default(),
-    };
-    let memory = reg.get_model_memory(&mem_key);
-    let schema = registry_driver(&reg, config).param_schema();
-    Ok(ParamValues::resolve(profile, memory, &schema).0)
+    effective_params(&reg, uuid, &*registry_driver(&reg, config))
 }
 
 #[derive(serde::Serialize)]
@@ -1644,7 +1640,7 @@ pub fn run() {
             get_start_warning, list_reconnect_notices, get_instance_pid, check_memory_warning, start_instance, stop_instance,
             set_start_on_launch, rename_instance, set_instance_port, set_instance_executable_path, set_selected_model,
             switch_model_cmd, update_instance_params, set_active_profile_cmd,
-            list_models_cmd, list_models_for_type, fetch_model_metadata_cmd, get_resolved_params, get_param_schema,
+            list_models_cmd, list_models_for_type, fetch_model_metadata_cmd, get_effective_params, get_param_schema,
             list_all_discovered_models,
             get_discovery_config, set_discovery_config, get_app_settings, set_app_settings, set_model_search_path_override, detect_ollama_models_dir,
             adopt_as_external_instance,

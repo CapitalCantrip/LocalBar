@@ -11,9 +11,11 @@ export function ParamEditor({ instance, onRefresh }: {
   const [schema, setSchema] = useState<ParamSchemaEntry[]>([])
   const [systemPrompt, setSystemPrompt] = useState('')
   const [busy, setBusy] = useState(false)
+  const [takesEffectOnNextStart, setTakesEffectOnNextStart] = useState(false)
 
   useEffect(() => {
-    ipc.getResolvedParams(instance.id).then(p => {
+    setTakesEffectOnNextStart(false)
+    ipc.getEffectiveParams(instance.id).then(p => {
       setParams(p)
       setSystemPrompt(p.system_prompt ?? '')
     }).catch(() => {})
@@ -35,7 +37,8 @@ export function ParamEditor({ instance, onRefresh }: {
     if (!params) return
     setBusy(true)
     try {
-      await ipc.updateInstanceParams(instance.id, { ...params, system_prompt: systemPrompt || null })
+      const saved = await ipc.updateInstanceParams(instance.id, { ...params, system_prompt: systemPrompt || null })
+      setTakesEffectOnNextStart(saved.takes_effect_on_next_start)
       onRefresh()
     } finally { setBusy(false) }
   }
@@ -69,6 +72,7 @@ export function ParamEditor({ instance, onRefresh }: {
       <button style={s.btn()} onClick={apply} disabled={busy}>
         {busy ? 'Saving…' : 'Save params'}
       </button>
+      {takesEffectOnNextStart && <span style={s.refreshNote}>Saved. Takes effect on next start.</span>}
     </div>
   )
 }

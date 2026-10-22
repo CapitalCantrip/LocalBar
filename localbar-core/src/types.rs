@@ -47,56 +47,11 @@ pub struct ParamValues {
     pub system_prompt: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct ResolvedParams(pub ParamValues);
-
-impl ParamValues {
-    pub fn resolve(
-        profile: Option<&ParamValues>,
-        memory: Option<&ModelMemory>,
-        driver_defaults: &[ParamDescriptor],
-    ) -> ResolvedParams {
-        let mut resolved = ParamValues::default();
-        for desc in driver_defaults {
-            if desc.param == CanonicalParam::SystemPrompt {
-                continue;
-            }
-            if let Some(default) = &desc.default_value {
-                resolved.values.insert(desc.param, default.clone());
-            }
-        }
-        if let Some(mem) = memory {
-            resolved.merge_from(&mem.last_used_params, MergeMode::AutoMemory);
-        }
-        if let Some(profile_params) = profile {
-            resolved.merge_from(profile_params, MergeMode::Profile);
-        }
-        ResolvedParams(resolved)
-    }
-
-    fn merge_from(&mut self, source: &ParamValues, mode: MergeMode) {
-        for (param, value) in &source.values {
-            if *param == CanonicalParam::SystemPrompt {
-                continue;
-            }
-            self.values.insert(*param, value.clone());
-        }
-        match mode {
-            MergeMode::Profile => {
-                self.system_prompt = source.system_prompt.clone();
-            }
-            MergeMode::AutoMemory => {
-                if self.system_prompt.is_none() {
-                    self.system_prompt = source.system_prompt.clone();
-                }
-            }
-        }
-    }
-}
-
-enum MergeMode {
-    AutoMemory,
-    Profile,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct ParamsSaved {
+    pub takes_effect_on_next_start: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
