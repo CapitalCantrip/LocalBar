@@ -12,6 +12,7 @@ import {
 import { useInstances } from '../useInstances'
 import { MissingExecutableActions, isExecutableNotFound } from '../MissingExecutableActions'
 import { startWithWarnings } from '../startWithWarnings'
+import { StartupRestoreChooser } from '../StartupRestoreChooser'
 import { useReconnectNotices } from '../useReconnectNotices'
 import { UpdateAvailableLink, useVersionInfo } from '../useVersionInfo'
 
@@ -190,6 +191,7 @@ export default function PopoverApp() {
         />
       )}
       {notice && <NoticeDialog message={notice} onDismiss={() => setNotice(null)} />}
+      <StartupRestoreChooser instances={instances} onWarning={promptWarning} onDone={refresh} />
       <div style={s.body}>
         {instances.length === 0 ? (
           <div style={s.empty}>

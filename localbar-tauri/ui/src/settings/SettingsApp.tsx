@@ -8,10 +8,15 @@ import { AddInstanceSheet } from './AddInstanceSheet'
 import { DetailPanel } from './DetailPanel'
 import { DiscoveryTab } from './DiscoveryTab'
 import { GeneralTab } from './GeneralTab'
+import { StartupRestoreChooser } from '../StartupRestoreChooser'
 
 type SettingsTab = 'servers' | 'discovery' | 'general'
 
 function ignoreModelSelectionFailure() {}
+
+async function confirmStartupWarning(_id: string, message: string): Promise<boolean> {
+  return window.confirm(message + '\n\nStart anyway?')
+}
 
 export default function SettingsApp() {
   const [activeTab, setActiveTab] = useState<SettingsTab>('servers')
@@ -49,6 +54,7 @@ export default function SettingsApp() {
       {showAddSheet && (
         <AddInstanceSheet onAdd={handleAdd} onCancel={() => setShowAddSheet(false)} />
       )}
+      <StartupRestoreChooser instances={instances} onWarning={confirmStartupWarning} onDone={refresh} />
       <div style={s.toolbar}>
         <button style={s.tabBtn(activeTab === 'servers')} onClick={() => setActiveTab('servers')}>Servers</button>
         <button style={s.tabBtn(activeTab === 'discovery')} onClick={() => setActiveTab('discovery')}>Discovery</button>
