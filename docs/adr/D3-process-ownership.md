@@ -57,3 +57,11 @@ Rationale:
 - `mark_running_instances_for_reconnect` always records `was_running_when_quit`, independent of any setting — the flag is a fact about what was running, not a decision about what to do with it.
 - `AppSettings.restore_running_servers_on_launch` (default true) is the decision: whether `was_running_when_quit` instances relaunch on the next startup. `start_on_launch` instances launch regardless of this setting.
 - The decision is the pure fn `localbar_core::quit::ids_to_start_on_launch`, called from `on_startup` in the Tauri shell.
+
+## Addendum (2026-10-22, #15): startup restore chooser
+
+- Launching every start candidate at once bypassed the per-instance start and memory warnings, so two large models could start together and exhaust memory. `localbar_core::quit::startup_restore_for` now splits the candidates from `ids_to_start_on_launch`: up to `MAX_STARTUP_LAUNCHES_WITHOUT_ASKING` (one) launch as before; more than that are all held and none launch.
+- `on_startup` stores the held ids in `AppState.pending_startup`, emits `startup-restore` (the remaining ids, a hint only, since the webviews may not be loaded yet) and opens the Settings window when the popover is hidden. Both windows read the list on mount and on focus with `pending_startup_instances`.
+- The chooser lists each held instance (name, server type, selected model), all ticked. **Start Selected** starts each ticked instance in order through `startWithWarnings`, so the start and memory warnings run per instance. **Skip**, an unticked instance, or a warning the user cancels calls `skip_startup_instances`.
+- Declining runs `decline_startup_restore`: the instance is marked Stopped and its `was_running_when_quit` is cleared, as an explicit Stop would, so the next launch does not offer it again. `start_on_launch` is a user setting and is kept, so such an instance is offered again on the next launch. An instance the user has already started is left alone.
+- Starting an instance by any path removes it from the pending list. Candidates left pending at quit keep `was_running_when_quit` and are offered again on the next launch.

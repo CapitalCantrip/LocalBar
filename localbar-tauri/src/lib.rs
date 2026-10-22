@@ -19,7 +19,7 @@ use localbar_core::drivers::{self, external::ExternalDriver, ollama::{self, Olla
 use localbar_core::lifecycle::{self, displayed_pid, LifecycleEvent, StopKill, PollContext, PollOutcome, SwitchPlan};
 use localbar_core::net::port_is_open;
 use localbar_core::persistence::FilePersistence;
-use localbar_core::quit::{ids_to_forget_reconnect_on_launch, ids_to_start_on_launch, ids_to_stop_on_quit, quit_sequence_for, quit_shutdown_budget_secs, ExitSignal, QuitCandidate, QuitSequence};
+use localbar_core::quit::{decline_startup_restore, ids_to_forget_reconnect_on_launch, ids_to_stop_on_quit, startup_restore_for, quit_sequence_for, quit_shutdown_budget_secs, ExitSignal, QuitCandidate, QuitSequence};
 use localbar_core::registry::InstanceRegistry;
 use localbar_core::types::{
     AppSettings, DiscoveryConfig, InstanceError, InstanceErrorKind, InstancePhase, ModelMemoryKey, ModelRef,
@@ -103,6 +103,7 @@ pub struct AppState {
     pub load_error: Option<String>,
     pub quitting: AtomicBool,
     pub reconnect_notices: Mutex<ReconnectNotices>,
+    pub pending_startup: Mutex<Vec<Uuid>>,
 }
 
 impl AppState {
@@ -115,6 +116,7 @@ impl AppState {
             load_error: None,
             quitting: AtomicBool::new(false),
             reconnect_notices: Mutex::new(ReconnectNotices::default()),
+            pending_startup: Mutex::new(Vec::new()),
         }
     }
 }
@@ -916,7 +918,42 @@ async fn start_instance(state: State<'_, AppState>, app: AppHandle, id: String) 
         let reg = state.registry.lock().unwrap();
         reg.get_config(uuid).ok_or("instance not found")?;
     }
+    release_pending_startup(&app, &[uuid]);
     tauri::async_runtime::spawn_blocking(move || launch_instance(app, uuid));
+    Ok(())
+}
+
+fn pending_startup_ids(state: &AppState) -> Vec<String> {
+    state.pending_startup.lock().unwrap().iter().map(Uuid::to_string).collect()
+}
+
+fn release_pending_startup(app: &AppHandle, ids: &[Uuid]) -> Vec<Uuid> {
+    let state = app.state::<AppState>();
+    let released: Vec<Uuid> = {
+        let mut pending = state.pending_startup.lock().unwrap();
+        let released = pending.iter().copied().filter(|id| ids.contains(id)).collect();
+        pending.retain(|id| !ids.contains(id));
+        released
+    };
+    if !released.is_empty() {
+        app.emit("startup-restore", pending_startup_ids(&state)).ok();
+    }
+    released
+}
+
+#[tauri::command]
+fn pending_startup_instances(state: State<'_, AppState>) -> Vec<String> {
+    pending_startup_ids(&state)
+}
+
+#[tauri::command]
+fn skip_startup_instances(app: AppHandle, ids: Vec<String>) -> Result<(), String> {
+    let uuids = ids.iter().map(|id| parse_uuid(id)).collect::<Result<Vec<_>, _>>()?;
+    let declined = release_pending_startup(&app, &uuids);
+    decline_startup_restore(&mut app.state::<AppState>().registry.lock().unwrap(), &declined);
+    for id in declined {
+        app.emit("phase-changed", id.to_string()).ok();
+    }
     Ok(())
 }
 
@@ -1415,6 +1452,30 @@ fn handle_exit_requested(app: &AppHandle, api: &tauri::ExitRequestApi) {
     });
 }
 
+fn launch_in_background(app: &AppHandle, ids: Vec<Uuid>) {
+    for id in ids {
+        let handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tauri::async_runtime::spawn_blocking(move || launch_instance(handle, id)).await.ok();
+        });
+    }
+}
+
+fn hold_startup_candidates(app: &AppHandle, ids: Vec<Uuid>) {
+    if ids.is_empty() {
+        return;
+    }
+    let state = app.state::<AppState>();
+    *state.pending_startup.lock().unwrap() = ids;
+    app.emit("startup-restore", pending_startup_ids(&state)).ok();
+    let popover_visible = app.get_webview_window("popover")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false);
+    if !popover_visible {
+        open_settings(app.clone());
+    }
+}
+
 fn on_startup(app: &tauri::App) {
     let state = app.state::<AppState>();
 
@@ -1436,12 +1497,9 @@ fn on_startup(app: &tauri::App) {
         }
         (configs, settings)
     };
-    for id in ids_to_start_on_launch(&configs, &settings) {
-        let handle = app.handle().clone();
-        tauri::async_runtime::spawn(async move {
-            tauri::async_runtime::spawn_blocking(move || launch_instance(handle, id)).await.ok();
-        });
-    }
+    let restore = startup_restore_for(&configs, &settings);
+    launch_in_background(app.handle(), restore.launch_now);
+    hold_startup_candidates(app.handle(), restore.ask_user);
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1640,7 +1698,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(setup_handler)
         .invoke_handler(tauri::generate_handler![
-            list_instances, list_instance_phases, add_instance, remove_instance,
+            list_instances, list_instance_phases, add_instance, remove_instance, pending_startup_instances, skip_startup_instances,
             get_start_warning, list_reconnect_notices, get_instance_pid, check_memory_warning, start_instance, stop_instance,
             set_start_on_launch, rename_instance, set_instance_port, set_instance_executable_path, set_selected_model,
             switch_model_cmd, update_instance_params, set_active_profile_cmd,
