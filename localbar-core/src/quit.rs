@@ -1,9 +1,11 @@
 use uuid::Uuid;
 
-use crate::types::{AppSettings, ServerInstanceConfig, ServerType};
+use crate::registry::InstanceRegistry;
+use crate::types::{AppSettings, InstancePhase, ServerInstanceConfig, ServerType};
 
 pub const MAX_QUIT_GRACE_SECS: f64 = 60.0;
 pub const QUIT_KILL_SLACK_SECS: f64 = 2.0;
+pub const MAX_STARTUP_LAUNCHES_WITHOUT_ASKING: usize = 1;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuitCandidate {
@@ -40,6 +42,32 @@ pub fn ids_to_start_on_launch(
         .filter(|c| should_start_on_launch(c, settings))
         .map(|c| c.id)
         .collect()
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StartupRestore {
+    pub launch_now: Vec<Uuid>,
+    pub ask_user: Vec<Uuid>,
+}
+
+pub fn startup_restore_for(configs: &[ServerInstanceConfig], settings: &AppSettings) -> StartupRestore {
+    let ids = ids_to_start_on_launch(configs, settings);
+    if ids.len() > MAX_STARTUP_LAUNCHES_WITHOUT_ASKING {
+        StartupRestore { launch_now: Vec::new(), ask_user: ids }
+    } else {
+        StartupRestore { launch_now: ids, ask_user: Vec::new() }
+    }
+}
+
+pub fn decline_startup_restore(reg: &mut InstanceRegistry, ids: &[Uuid]) {
+    for &id in ids {
+        if reg.get_phase(id).is_some_and(InstancePhase::is_active) {
+            continue;
+        }
+        reg.set_phase(id, InstancePhase::Stopped).ok();
+        reg.update_config(id, |c| c.was_running_when_quit = false).ok();
+    }
+    reg.save().ok();
 }
 
 pub fn ids_to_forget_reconnect_on_launch(
@@ -85,6 +113,8 @@ pub fn quit_shutdown_budget_secs(grace_periods: &[f64]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence::InMemoryPersistence;
+    use crate::types::{InstanceError, InstanceErrorKind};
 
     fn candidate(has_child: bool, server_type: ServerType) -> QuitCandidate {
         QuitCandidate { id: Uuid::new_v4(), has_child, server_type }
@@ -193,6 +223,87 @@ mod tests {
     fn neither_flag_does_not_start() {
         let c = launch_config(false, false);
         assert!(!should_start_on_launch(&c, &AppSettings::default()));
+    }
+
+    fn registry_with(configs: &[ServerInstanceConfig]) -> InstanceRegistry {
+        let mut reg = InstanceRegistry::new(Box::new(InMemoryPersistence::default()));
+        for c in configs {
+            reg.add_instance(c.clone());
+        }
+        reg
+    }
+
+    #[test]
+    fn single_startup_candidate_launches_without_asking() {
+        let c = launch_config(false, true);
+        let restore = startup_restore_for(std::slice::from_ref(&c), &AppSettings::default());
+        assert_eq!(restore, StartupRestore { launch_now: vec![c.id], ask_user: vec![] });
+    }
+
+    #[test]
+    fn several_startup_candidates_are_all_held_for_the_user_to_choose() {
+        let a = launch_config(true, false);
+        let b = launch_config(false, true);
+        let restore = startup_restore_for(&[a.clone(), b.clone()], &AppSettings::default());
+        assert_eq!(restore, StartupRestore { launch_now: vec![], ask_user: vec![a.id, b.id] });
+    }
+
+    #[test]
+    fn instances_not_restored_by_setting_do_not_count_towards_asking() {
+        let a = launch_config(true, false);
+        let b = launch_config(false, true);
+        let settings = AppSettings { restore_running_servers_on_launch: false, ..AppSettings::default() };
+        let restore = startup_restore_for(&[a.clone(), b], &settings);
+        assert_eq!(restore, StartupRestore { launch_now: vec![a.id], ask_user: vec![] });
+    }
+
+    #[test]
+    fn declined_candidate_forgets_reconnect_flag_so_next_launch_does_not_offer_it_again() {
+        let c = launch_config(false, true);
+        let mut reg = registry_with(std::slice::from_ref(&c));
+        decline_startup_restore(&mut reg, &[c.id]);
+        let configs: Vec<_> = reg.all_configs().cloned().collect();
+        assert!(!configs[0].was_running_when_quit);
+        assert!(ids_to_start_on_launch(&configs, &AppSettings::default()).is_empty());
+    }
+
+    #[test]
+    fn declined_candidate_is_marked_stopped() {
+        let c = launch_config(false, true);
+        let mut reg = registry_with(std::slice::from_ref(&c));
+        reg.set_phase(c.id, InstancePhase::Error(InstanceError {
+            kind: InstanceErrorKind::Unexpected,
+            message: "x".into(),
+        })).unwrap();
+        decline_startup_restore(&mut reg, &[c.id]);
+        assert_eq!(reg.get_phase(c.id), Some(&InstancePhase::Stopped));
+    }
+
+    #[test]
+    fn declined_candidate_keeps_its_start_on_launch_setting() {
+        let c = launch_config(true, true);
+        let mut reg = registry_with(std::slice::from_ref(&c));
+        decline_startup_restore(&mut reg, &[c.id]);
+        assert!(reg.get_config(c.id).unwrap().start_on_launch);
+    }
+
+    #[test]
+    fn declining_a_candidate_the_user_already_started_leaves_it_running() {
+        let c = launch_config(false, true);
+        let mut reg = registry_with(std::slice::from_ref(&c));
+        reg.set_phase(c.id, InstancePhase::Running).unwrap();
+        decline_startup_restore(&mut reg, &[c.id]);
+        assert_eq!(reg.get_phase(c.id), Some(&InstancePhase::Running));
+        assert!(reg.get_config(c.id).unwrap().was_running_when_quit);
+    }
+
+    #[test]
+    fn declining_leaves_other_instances_untouched() {
+        let declined = launch_config(false, true);
+        let other = launch_config(false, true);
+        let mut reg = registry_with(&[declined.clone(), other.clone()]);
+        decline_startup_restore(&mut reg, &[declined.id]);
+        assert!(reg.get_config(other.id).unwrap().was_running_when_quit);
     }
 
     #[test]
