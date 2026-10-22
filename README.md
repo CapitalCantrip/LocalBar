@@ -145,7 +145,7 @@ Note that `cargo tauri dev` inherits your terminal's environment, so it can hide
 localbar/
 ├── localbar-core/          # Pure Rust: server drivers, lifecycle, persistence, types
 │   └── src/
-│       ├── drivers/        # mlx-lm, Ollama, external drivers
+│       ├── drivers/        # mlx-lm, Ollama, external drivers; for_instance builds one from the registry
 │       └── types.rs        # Canonical types shared across crates
 ├── localbar-tauri/         # Tauri app shell
 │   ├── src/lib.rs          # IPC commands, tray, window management
