@@ -43,6 +43,8 @@ The `instanceId` suffix disambiguates when the same base model appears on multip
 | User switches to a different model | `ollama rm` old tag; create new tag for the new model |
 | User deletes the instance | `ollama rm` the managed tag |
 
+Every `ollama create` and `ollama rm` runs with `OLLAMA_HOST=<host>:<port>` of the instance, so the tag lands on that instance's server, not the default `127.0.0.1:11434` (#112).
+
 ### Modelfile content
 
 ```
