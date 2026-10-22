@@ -3,9 +3,10 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::driver::{HealthStatus, LaunchPlan, ServerDriver};
+use crate::effective_params::effective_params;
 use crate::net::port_is_open;
 use crate::registry::InstanceRegistry;
-use crate::types::{InstanceError, InstanceErrorKind, InstancePhase, ModelMemoryKey, ModelRef, ParamValues, ServerType};
+use crate::types::{InstanceError, InstanceErrorKind, InstancePhase, ModelRef, ServerType};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Listener {
@@ -108,7 +109,8 @@ fn start_from_stopped_config(
         ));
     }
 
-    match driver.launch(config, None, &config.instance_params) {
+    let launch = effective_params(reg, id, driver).and_then(|params| driver.launch(config, None, &params));
+    match launch {
         Ok(plan) => (Some(plan), vec![]),
         Err(e) => (None, error_events(reg, id, InstanceErrorKind::LaunchFailed, &e)),
     }
@@ -205,7 +207,8 @@ fn switch_model_restart_plan(
     old_key: Option<String>,
     mut events: Vec<LifecycleEvent>,
 ) -> (SwitchPlan, Vec<LifecycleEvent>) {
-    match driver.launch(config, None, &config.instance_params) {
+    let launch = effective_params(reg, id, driver).and_then(|params| driver.launch(config, None, &params));
+    match launch {
         Ok(plan) => (SwitchPlan::Restart { plan, old_key }, events),
         Err(e) => {
             reg.consume_start_time(id);
@@ -387,16 +390,8 @@ fn done_with_error(
 }
 
 fn persist_startup_metrics(reg: &mut InstanceRegistry, id: Uuid, driver: &dyn ServerDriver, elapsed: Duration) {
-    let Some(config) = reg.get_config(id).cloned() else { return };
-    let schema = driver.param_schema();
-    let profile = reg.get_active_profile_params(id).cloned();
-    let mem_key = ModelMemoryKey {
-        server_type: config.server_type,
-        model_key: config.selected_model_key.clone().unwrap_or_default(),
-    };
-    let memory = reg.get_model_memory(&mem_key).cloned();
-    let resolved = ParamValues::resolve(profile.as_ref(), memory.as_ref(), &schema);
-    crate::update_model_memory(reg, id, resolved.0).ok();
+    let Ok(ran) = effective_params(reg, id, driver) else { return };
+    crate::update_model_memory(reg, id, ran).ok();
     crate::push_restart_duration_sample(reg, id, elapsed.as_secs_f64()).ok();
 }
 
@@ -407,11 +402,13 @@ mod tests {
     use crate::persistence::InMemoryPersistence;
     use crate::registry::InstanceRegistry;
     use crate::testing::MockDriver;
-    use crate::types::{InstancePhase, ServerInstanceConfig, ServerType};
+    use crate::types::{
+        CanonicalParam, InstancePhase, ModelMemory, ModelMemoryKey, ParamValue, ParamValues, ServerInstanceConfig, ServerType,
+    };
     use uuid::Uuid;
 
     use super::{
-        adopt, adopt_health_warning, adopted_poll_continues, displayed_pid, finish_warm_load, poll_adopted,
+        adopt, adopt_health_warning, effective_params, adopted_poll_continues, displayed_pid, finish_warm_load, poll_adopted,
         poll_once, reconnect_notice, start, stop, stop_outcome, switch_model, InstancePid, LifecycleEvent, Listener, PollContext,
         PollOutcome, StopKill, SwitchPlan,
     };
@@ -1044,6 +1041,97 @@ mod tests {
         assert!(plan.is_some(), "nothing is listening, so a launch plan is still expected");
         assert_eq!(phase_of(&events), Some(InstancePhase::Starting));
         assert_eq!(reg.get_adopted_pid(id), None, "must not record a pid when nothing was actually adopted");
+    }
+
+    fn mlx_config(model_key: &str) -> ServerInstanceConfig {
+        let mut cfg = ServerInstanceConfig::new("mlx", ServerType::MlxLm, free_port(), "/usr/bin/mlx");
+        cfg.selected_model_key = Some(model_key.into());
+        cfg
+    }
+
+    fn params(entries: &[(CanonicalParam, ParamValue)]) -> ParamValues {
+        ParamValues { values: entries.iter().cloned().collect(), system_prompt: None }
+    }
+
+    fn remember(reg: &mut InstanceRegistry, server_type: ServerType, model_key: &str, last_used: ParamValues) {
+        let mut memory = ModelMemory::new(server_type, model_key);
+        memory.last_used_params = last_used;
+        reg.upsert_model_memory(memory).unwrap();
+    }
+
+    fn last_launch_params(driver: &MockDriver) -> ParamValues {
+        driver.launch_params.lock().unwrap().last().cloned().expect("driver.launch must have been called")
+    }
+
+    #[test]
+    fn mlx_lm_start_launches_with_effective_params_not_raw_instance_params() {
+        let mut reg = make_registry();
+        let mut cfg = mlx_config("model-a");
+        cfg.instance_params = params(&[(CanonicalParam::MaxTokens, ParamValue::Int(512))]);
+        let id = reg.add_instance(cfg);
+        remember(&mut reg, ServerType::MlxLm, "model-a", params(&[(CanonicalParam::Temperature, ParamValue::Double(0.3))]));
+        let driver = MockDriver::new_unhealthy(ServerType::MlxLm);
+
+        let (plan, _) = start(&mut reg, id, &driver, None);
+
+        assert!(plan.is_some());
+        let launched = last_launch_params(&driver);
+        assert_eq!(launched.values.get(&CanonicalParam::Temperature), Some(&ParamValue::Double(0.3)));
+        assert_eq!(launched.values.get(&CanonicalParam::MaxTokens), Some(&ParamValue::Int(512)));
+        assert_eq!(launched.values.get(&CanonicalParam::ContextLength), Some(&ParamValue::Int(4096)));
+    }
+
+    #[test]
+    fn mlx_lm_restart_switch_launches_with_the_new_models_effective_params() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(mlx_config("model-a"));
+        reg.set_phase(id, InstancePhase::Running).unwrap();
+        remember(&mut reg, ServerType::MlxLm, "model-b", params(&[(CanonicalParam::Temperature, ParamValue::Double(0.2))]));
+        let driver = MockDriver::new_restart(ServerType::MlxLm);
+
+        let (plan, _) = switch_model(&mut reg, id, "model-b", &driver);
+
+        assert!(matches!(plan, SwitchPlan::Restart { .. }));
+        assert_eq!(last_launch_params(&driver).values.get(&CanonicalParam::Temperature), Some(&ParamValue::Double(0.2)));
+    }
+
+    #[test]
+    fn after_a_successful_start_the_editor_shows_what_was_saved() {
+        let mut reg = make_registry();
+        let id = reg.add_instance(mlx_config("model-a"));
+        remember(&mut reg, ServerType::MlxLm, "model-a", params(&[(CanonicalParam::Temperature, ParamValue::Double(0.3))]));
+        let driver = MockDriver::new_unhealthy(ServerType::MlxLm);
+        let saved = ParamValues {
+            system_prompt: Some("be brief".into()),
+            ..params(&[(CanonicalParam::Temperature, ParamValue::Double(0.7)), (CanonicalParam::MaxTokens, ParamValue::Int(256))])
+        };
+        crate::set_instance_params(&mut reg, id, saved.clone(), &driver).unwrap();
+
+        start(&mut reg, id, &driver, None);
+        poll_once(&mut reg, id, &driver, true, true, Duration::from_secs(1), PollContext::Startup);
+
+        let shown = effective_params(&reg, id, &driver).unwrap();
+        for (param, value) in &saved.values {
+            assert_eq!(shown.values.get(param), Some(value), "{param:?}");
+        }
+        assert_eq!(shown.system_prompt, saved.system_prompt);
+    }
+
+    #[test]
+    fn after_a_successful_start_model_memory_records_the_effective_params_that_ran() {
+        let mut reg = make_registry();
+        let mut cfg = mlx_config("model-a");
+        cfg.instance_params = params(&[(CanonicalParam::Temperature, ParamValue::Double(0.7))]);
+        let id = reg.add_instance(cfg);
+        remember(&mut reg, ServerType::MlxLm, "model-a", params(&[(CanonicalParam::Temperature, ParamValue::Double(0.3))]));
+        let driver = MockDriver::new_unhealthy(ServerType::MlxLm);
+
+        start(&mut reg, id, &driver, None);
+        let ran = last_launch_params(&driver);
+        poll_once(&mut reg, id, &driver, true, true, Duration::from_secs(1), PollContext::Startup);
+
+        let key = ModelMemoryKey { server_type: ServerType::MlxLm, model_key: "model-a".into() };
+        assert_eq!(reg.get_model_memory(&key).unwrap().last_used_params, ran);
     }
 
     #[test]
