@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use localbar_core::update_check::{check_for_update, is_check_due, UpdateCheckOutcome, LATEST_RELEASE_URL};
+use localbar_core::update_check::{check_for_update, is_check_due, visible_status, UpdateCheckOutcome, LATEST_RELEASE_URL};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::AppState;
@@ -43,9 +43,9 @@ fn run_check_blocking(app: &AppHandle) -> UpdateCheckOutcome {
         eprintln!("[localbar] update check failed");
     } else {
         let state = app.state::<AppState>();
-        let recorded = state.registry.lock().unwrap().record_update_check(now_secs());
-        if let Err(e) = recorded {
-            eprintln!("[localbar] could not record update check time: {e}");
+        let mut reg = state.registry.lock().unwrap();
+        if let Err(e) = reg.record_update_check(now_secs()).and_then(|()| reg.record_update_outcome(&outcome)) {
+            eprintln!("[localbar] could not record update check: {e}");
         }
     }
     outcome
@@ -80,7 +80,8 @@ async fn run_scheduled_checks(app: AppHandle) {
 }
 
 pub fn start(app: &tauri::App) {
-    app.manage(UpdateStatus::default());
+    let restored = app.state::<AppState>().registry.lock().unwrap().restored_update_outcome(&app_version(app.handle()));
+    app.manage(UpdateStatus(Mutex::new(restored)));
     tauri::async_runtime::spawn(run_scheduled_checks(app.handle().clone()));
 }
 
@@ -91,10 +92,8 @@ pub fn get_app_version(app: AppHandle) -> String {
 
 #[tauri::command]
 pub fn get_update_status(state: State<'_, AppState>, status: State<'_, UpdateStatus>) -> Option<UpdateCheckOutcome> {
-    if !state.registry.lock().unwrap().get_app_settings().check_for_updates {
-        return None;
-    }
-    status.0.lock().unwrap().clone()
+    let enabled = state.registry.lock().unwrap().get_app_settings().check_for_updates;
+    visible_status(enabled, status.0.lock().unwrap().clone())
 }
 
 #[tauri::command]

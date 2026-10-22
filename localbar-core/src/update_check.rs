@@ -78,6 +78,23 @@ pub fn check_for_update(current: &str, fetch: impl FnOnce() -> Result<String, St
     }
 }
 
+pub fn restore_outcome(saved: Option<UpdateCheckOutcome>, current: &str) -> Option<UpdateCheckOutcome> {
+    match saved {
+        Some(UpdateCheckOutcome::Available { version, url }) if is_newer(&version, current) => {
+            Some(UpdateCheckOutcome::Available { version, url })
+        }
+        _ => None,
+    }
+}
+
+pub fn should_save_outcome(outcome: &UpdateCheckOutcome) -> bool {
+    !matches!(outcome, UpdateCheckOutcome::Failed)
+}
+
+pub fn visible_status(checks_enabled: bool, status: Option<UpdateCheckOutcome>) -> Option<UpdateCheckOutcome> {
+    if checks_enabled { status } else { None }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +201,48 @@ mod tests {
     fn an_unparseable_tag_reports_failed_rather_than_up_to_date() {
         let json = r#"{"tag_name":"nightly","html_url":"https://example.com"}"#;
         assert_eq!(check_for_update("0.3.2", || Ok(json.to_owned())), UpdateCheckOutcome::Failed);
+    }
+
+    fn available(version: &str) -> UpdateCheckOutcome {
+        UpdateCheckOutcome::Available { version: version.into(), url: format!("https://example.com/v{version}") }
+    }
+
+    #[test]
+    fn a_saved_available_outcome_newer_than_the_running_version_is_restored() {
+        assert_eq!(restore_outcome(Some(available("0.3.3")), "0.3.2"), Some(available("0.3.3")));
+    }
+
+    #[test]
+    fn a_saved_available_outcome_equal_to_the_running_version_is_not_shown() {
+        assert_eq!(restore_outcome(Some(available("0.3.3")), "0.3.3"), None);
+    }
+
+    #[test]
+    fn a_saved_available_outcome_older_than_the_running_version_is_not_shown() {
+        assert_eq!(restore_outcome(Some(available("0.3.3")), "0.4.0"), None);
+    }
+
+    #[test]
+    fn a_saved_up_to_date_or_failed_outcome_is_not_shown() {
+        assert_eq!(restore_outcome(Some(UpdateCheckOutcome::UpToDate), "0.3.2"), None);
+        assert_eq!(restore_outcome(Some(UpdateCheckOutcome::Failed), "0.3.2"), None);
+    }
+
+    #[test]
+    fn nothing_saved_shows_nothing() {
+        assert_eq!(restore_outcome(None, "0.3.2"), None);
+    }
+
+    #[test]
+    fn only_a_completed_check_is_worth_saving() {
+        assert!(should_save_outcome(&UpdateCheckOutcome::UpToDate));
+        assert!(should_save_outcome(&available("0.3.3")));
+        assert!(!should_save_outcome(&UpdateCheckOutcome::Failed));
+    }
+
+    #[test]
+    fn unticking_the_setting_hides_a_restored_notice() {
+        assert_eq!(visible_status(false, Some(available("0.3.3"))), None);
+        assert_eq!(visible_status(true, Some(available("0.3.3"))), Some(available("0.3.3")));
     }
 }

@@ -4,6 +4,7 @@ use std::time::Instant;
 use uuid::Uuid;
 
 use crate::persistence::Persistence;
+use crate::update_check::{restore_outcome, should_save_outcome, UpdateCheckOutcome};
 use crate::types::{AppSettings, DiscoveryConfig, InstancePhase, ModelMemory, ModelMemoryKey, NamedProfile, ParamValues, ServerInstanceConfig, ServerType};
 
 pub struct InstanceRecord {
@@ -176,6 +177,17 @@ impl InstanceRegistry {
 
     pub fn record_update_check(&mut self, secs: i64) -> Result<(), String> {
         self.persistence.save_last_update_check(secs)
+    }
+
+    pub fn record_update_outcome(&mut self, outcome: &UpdateCheckOutcome) -> Result<(), String> {
+        if !should_save_outcome(outcome) {
+            return Ok(());
+        }
+        self.persistence.save_last_update_outcome(outcome)
+    }
+
+    pub fn restored_update_outcome(&self, current_version: &str) -> Option<UpdateCheckOutcome> {
+        restore_outcome(self.persistence.load_last_update_outcome().ok().flatten(), current_version)
     }
 
     pub fn instance_count(&self) -> usize {
@@ -381,5 +393,39 @@ mod tests {
         reg.load().unwrap();
 
         assert_eq!(reg.get_phase(id), Some(&InstancePhase::Stopped));
+    }
+
+    fn available_outcome() -> UpdateCheckOutcome {
+        UpdateCheckOutcome::Available { version: "0.3.3".into(), url: "https://example.com/v0.3.3".into() }
+    }
+
+    #[test]
+    fn a_recorded_available_outcome_is_restored_by_a_registry_on_the_same_storage() {
+        let mut reg = make_registry();
+        reg.record_update_outcome(&available_outcome()).unwrap();
+        assert_eq!(reg.restored_update_outcome("0.3.2"), Some(available_outcome()));
+    }
+
+    #[test]
+    fn a_recorded_available_outcome_is_not_restored_once_the_running_version_catches_up() {
+        let mut reg = make_registry();
+        reg.record_update_outcome(&available_outcome()).unwrap();
+        assert_eq!(reg.restored_update_outcome("0.3.3"), None);
+    }
+
+    #[test]
+    fn a_failed_check_does_not_overwrite_the_saved_available_outcome() {
+        let mut reg = make_registry();
+        reg.record_update_outcome(&available_outcome()).unwrap();
+        reg.record_update_outcome(&UpdateCheckOutcome::Failed).unwrap();
+        assert_eq!(reg.restored_update_outcome("0.3.2"), Some(available_outcome()));
+    }
+
+    #[test]
+    fn an_up_to_date_check_replaces_the_saved_available_outcome() {
+        let mut reg = make_registry();
+        reg.record_update_outcome(&available_outcome()).unwrap();
+        reg.record_update_outcome(&UpdateCheckOutcome::UpToDate).unwrap();
+        assert_eq!(reg.restored_update_outcome("0.3.2"), None);
     }
 }

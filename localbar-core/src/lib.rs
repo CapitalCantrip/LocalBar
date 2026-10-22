@@ -192,6 +192,12 @@ mod tests {
         fn load_last_update_check(&self) -> Result<Option<i64>, String> {
             self.0.lock().unwrap().load_last_update_check()
         }
+        fn save_last_update_outcome(&mut self, outcome: &crate::update_check::UpdateCheckOutcome) -> Result<(), String> {
+            self.0.lock().unwrap().save_last_update_outcome(outcome)
+        }
+        fn load_last_update_outcome(&self) -> Result<Option<crate::update_check::UpdateCheckOutcome>, String> {
+            self.0.lock().unwrap().load_last_update_outcome()
+        }
     }
 
     fn make_registry() -> InstanceRegistry {
