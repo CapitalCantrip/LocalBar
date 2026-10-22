@@ -15,9 +15,7 @@ mod tool_install;
 mod update;
 
 use localbar_core::driver::{HealthStatus, ModelMetadata, ServerDriver};
-use localbar_core::drivers::external::ExternalDriver;
-use localbar_core::drivers::mlx_lm::MLXLMDriver;
-use localbar_core::drivers::ollama::{self, OllamaDriver};
+use localbar_core::drivers::{self, external::ExternalDriver, ollama::{self, OllamaDriver}};
 use localbar_core::lifecycle::{self, displayed_pid, LifecycleEvent, StopKill, PollContext, PollOutcome, SwitchPlan};
 use localbar_core::net::port_is_open;
 use localbar_core::persistence::FilePersistence;
@@ -122,35 +120,26 @@ impl AppState {
 }
 
 fn driver_for(config: &ServerInstanceConfig, discovery: &DiscoveryConfig) -> Box<dyn ServerDriver> {
-    match config.server_type {
-        ServerType::Ollama => Box::new(
-            OllamaDriver::new(ollama::explicit_models_dir(&explicit_ollama_candidates(config, discovery)))
-                .with_resolver(exec_path::resolver()),
-        ),
-        ServerType::MlxLm => {
-            let paths = discovery.resolved_mlx_paths(config.model_search_path_override.as_deref());
-            Box::new(MLXLMDriver::new(paths))
-        }
-        ServerType::External => Box::new(ExternalDriver),
-    }
+    drivers::for_discovery(config, discovery, exec_path::resolver())
 }
 
-fn explicit_ollama_candidates<'a>(
-    config: &'a ServerInstanceConfig,
-    discovery: &'a DiscoveryConfig,
-) -> ollama::ModelsDirCandidates<'a> {
-    ollama::ModelsDirCandidates {
-        instance_override: config.model_search_path_override.as_deref(),
-        discovery_setting: discovery.ollama_models_dir.as_deref(),
-        ..Default::default()
-    }
+fn registry_driver(reg: &InstanceRegistry, config: &ServerInstanceConfig) -> Box<dyn ServerDriver> {
+    drivers::for_instance(reg, config, exec_path::resolver())
+}
+
+fn instance_driver(app: &AppHandle, id: Uuid) -> Option<(ServerInstanceConfig, Box<dyn ServerDriver>)> {
+    let state = app.state::<AppState>();
+    let reg = state.registry.lock().unwrap();
+    let config = reg.get_config(id)?.clone();
+    let driver = registry_driver(&reg, &config);
+    Some((config, driver))
 }
 
 fn resolve_ollama_models_dir(
     config: &ServerInstanceConfig,
     discovery: &DiscoveryConfig,
 ) -> Option<ollama::ResolvedModelsDir> {
-    let explicit = explicit_ollama_candidates(config, discovery);
+    let explicit = drivers::explicit_ollama_candidates(config, discovery);
     if let Some(dir) = ollama::explicit_models_dir(&explicit) {
         return Some(dir);
     }
@@ -385,15 +374,15 @@ fn discovery_config(app: &AppHandle) -> DiscoveryConfig {
     app.state::<AppState>().registry.lock().unwrap().get_discovery_config().clone()
 }
 
-fn delete_managed_config_if_present(config: Option<&ServerInstanceConfig>) {
+fn delete_managed_config_if_present(config: Option<&ServerInstanceConfig>, discovery: &DiscoveryConfig) {
     let Some(cfg) = config else { return };
     let Some(tag) = &cfg.managed_model_tag else { return };
-    driver_for(cfg, &DiscoveryConfig::default()).delete_managed_config(cfg, tag).ok();
+    driver_for(cfg, discovery).delete_managed_config(cfg, tag).ok();
 }
 
 fn check_health_once(app: &AppHandle, id: Uuid) -> bool {
-    let Some(config) = clone_config(app, id) else { return false };
-    driver_for(&config, &DiscoveryConfig::default()).health_check(&config) == HealthStatus::Healthy
+    let Some((config, driver)) = instance_driver(app, id) else { return false };
+    driver.health_check(&config) == HealthStatus::Healthy
 }
 
 fn process_is_alive(app: &AppHandle, id: Uuid) -> bool {
@@ -451,8 +440,8 @@ async fn switch_model_restart(
     old_key: Option<String>,
 ) -> Result<(), String> {
     let child = app.state::<AppState>().processes.lock().unwrap().remove(&id);
-    let grace = clone_config(app, id)
-        .map(|c| driver_for(&c, &DiscoveryConfig::default()).stop(&c).grace_period_secs)
+    let grace = instance_driver(app, id)
+        .map(|(c, driver)| driver.stop(&c).grace_period_secs)
         .unwrap_or(0.0);
     if let Some(child) = child {
         tauri::async_runtime::spawn_blocking(move || graceful_kill(child, grace))
@@ -779,17 +768,17 @@ async fn adopt_as_external_instance(
 fn remove_instance(state: State<'_, AppState>, app: AppHandle, id: String) -> Result<(), String> {
     let uuid = parse_uuid(&id)?;
     let child = state.processes.lock().unwrap().remove(&uuid);
-    let (grace, config_snap) = {
+    let (grace, config_snap, discovery) = {
         let reg = state.registry.lock().unwrap();
         let grace = reg.get_config(uuid)
-            .map(|c| driver_for(c, &DiscoveryConfig::default()).stop(c).grace_period_secs)
+            .map(|c| registry_driver(&reg, c).stop(c).grace_period_secs)
             .unwrap_or(0.0);
-        (grace, reg.get_config(uuid).cloned())
+        (grace, reg.get_config(uuid).cloned(), reg.get_discovery_config().clone())
     };
     if let Some(child) = child {
         graceful_kill(child, grace);
     }
-    delete_managed_config_if_present(config_snap.as_ref());
+    delete_managed_config_if_present(config_snap.as_ref(), &discovery);
     let mut reg = state.registry.lock().unwrap();
     reg.remove_instance(uuid)?;
     reg.save()?;
@@ -997,8 +986,8 @@ async fn stop_instance(state: State<'_, AppState>, app: AppHandle, id: String) -
     app.emit("phase-changed", &id).ok();
 
     let child = take_child(&state, uuid);
-    let grace = clone_config(&app, uuid)
-        .map(|c| driver_for(&c, &DiscoveryConfig::default()).stop(&c).grace_period_secs)
+    let grace = instance_driver(&app, uuid)
+        .map(|(c, driver)| driver.stop(&c).grace_period_secs)
         .unwrap_or(0.0);
 
     if let Err(e) = do_stop(&app, uuid, child, grace).await {
@@ -1077,7 +1066,7 @@ fn update_instance_params(
     let uuid = parse_uuid(&id)?;
     let mut reg = state.registry.lock().unwrap();
     let config = reg.get_config(uuid).cloned().ok_or("instance not found")?;
-    let driver = driver_for(&config, &DiscoveryConfig::default());
+    let driver = registry_driver(&reg, &config);
     set_instance_params(&mut reg, uuid, params, &*driver)
 }
 
@@ -1091,7 +1080,7 @@ fn set_active_profile_cmd(
     let pid = profile_id.as_deref().map(parse_uuid).transpose()?;
     let mut reg = state.registry.lock().unwrap();
     let config = reg.get_config(uuid).cloned().ok_or("instance not found")?;
-    let driver = driver_for(&config, &DiscoveryConfig::default());
+    let driver = registry_driver(&reg, &config);
     set_active_profile(&mut reg, uuid, pid, &*driver)
 }
 
@@ -1262,7 +1251,7 @@ fn get_resolved_params(state: State<'_, AppState>, id: String) -> Result<ParamVa
         model_key: config.selected_model_key.clone().unwrap_or_default(),
     };
     let memory = reg.get_model_memory(&mem_key);
-    let schema = driver_for(config, &DiscoveryConfig::default()).param_schema();
+    let schema = registry_driver(&reg, config).param_schema();
     Ok(ParamValues::resolve(profile, memory, &schema).0)
 }
 
@@ -1293,10 +1282,11 @@ fn param_schema_entry(d: &localbar_core::types::ParamDescriptor) -> Option<Param
 }
 
 #[tauri::command]
-fn get_param_schema(server_type: String) -> Result<Vec<ParamSchemaEntry>, String> {
+fn get_param_schema(state: State<'_, AppState>, server_type: String) -> Result<Vec<ParamSchemaEntry>, String> {
     let stype = parse_server_type(&server_type)?;
     let probe = ServerInstanceConfig::new("probe", stype, 0, "");
-    Ok(driver_for(&probe, &DiscoveryConfig::default()).param_schema().iter().filter_map(param_schema_entry).collect())
+    let reg = state.registry.lock().unwrap();
+    Ok(registry_driver(&reg, &probe).param_schema().iter().filter_map(param_schema_entry).collect())
 }
 
 #[tauri::command]
@@ -1363,8 +1353,8 @@ fn quit_candidates(state: &AppState) -> Vec<QuitCandidate> {
 }
 
 fn grace_for(app: &AppHandle, id: Uuid) -> f64 {
-    clone_config(app, id)
-        .map(|c| driver_for(&c, &DiscoveryConfig::default()).stop(&c).grace_period_secs)
+    instance_driver(app, id)
+        .map(|(c, driver)| driver.stop(&c).grace_period_secs)
         .unwrap_or(0.0)
 }
 
