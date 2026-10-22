@@ -13,6 +13,7 @@ use crate::types::{
 const OLLAMA_EXECUTABLE: &str = "ollama";
 const OLLAMA_SERVE_SUBCOMMAND: &str = "serve";
 pub const OLLAMA_MODELS_ENV_VAR: &str = "OLLAMA_MODELS";
+pub const OLLAMA_HOST_ENV_VAR: &str = "OLLAMA_HOST";
 const OLLAMA_HOME_DIR_NAME: &str = ".ollama";
 const OLLAMA_MODELS_DIR_NAME: &str = "models";
 const MANIFESTS_DIR_NAME: &str = "manifests";
@@ -38,12 +39,16 @@ impl OllamaDriver {
     }
 
     fn cli_command(&self, config: &ServerInstanceConfig) -> Result<std::process::Command, String> {
-        let Some(resolver) = &self.resolver else {
-            return Ok(std::process::Command::new(&config.executable_path));
+        let mut cmd = match &self.resolver {
+            None => std::process::Command::new(&config.executable_path),
+            Some(resolver) => {
+                let resolved = resolver(&config.executable_path).map_err(|e| e.message())?;
+                let mut cmd = std::process::Command::new(resolved.program);
+                cmd.env(PATH_ENV_VAR, resolved.path_env);
+                cmd
+            }
         };
-        let resolved = resolver(&config.executable_path).map_err(|e| e.message())?;
-        let mut cmd = std::process::Command::new(resolved.program);
-        cmd.env(PATH_ENV_VAR, resolved.path_env);
+        cmd.env(OLLAMA_HOST_ENV_VAR, host_address(&config.host, config.port));
         Ok(cmd)
     }
 
@@ -65,8 +70,12 @@ pub fn list_models_with_fallback(
     list_models_from_manifests(dir).map_err(|_| OLLAMA_UNREACHABLE.to_string())
 }
 
+fn host_address(host: &str, port: u16) -> String {
+    format!("{host}:{port}")
+}
+
 pub fn launch_environment(host: &str, port: u16, models_dir: Option<&ResolvedModelsDir>) -> Vec<(String, String)> {
-    let mut environment = vec![("OLLAMA_HOST".to_string(), format!("{host}:{port}"))];
+    let mut environment = vec![(OLLAMA_HOST_ENV_VAR.to_string(), host_address(host, port))];
     if let Some(dir) = models_dir.filter(|d| d.source.is_explicit()) {
         environment.push((OLLAMA_MODELS_ENV_VAR.to_string(), dir.path.to_string_lossy().into_owned()));
     }
@@ -798,6 +807,20 @@ mod manifest_tests {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    fn command_env(cmd: &std::process::Command, key: &str) -> Option<String> {
+        cmd.get_envs()
+            .find(|(k, _)| *k == key)
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+    }
+
+    #[test]
+    fn cli_commands_target_the_instance_host_and_port() {
+        let mut config = ServerInstanceConfig::new("o", ServerType::Ollama, 11500, "ollama");
+        config.host = "10.0.0.5".into();
+        let cmd = OllamaDriver::default().cli_command(&config).unwrap();
+        assert_eq!(command_env(&cmd, OLLAMA_HOST_ENV_VAR).as_deref(), Some("10.0.0.5:11500"));
+    }
 
     #[test]
     fn recognises_ollama_serve_processes() {
