@@ -3,6 +3,7 @@
 
 pub mod driver;
 pub mod drivers;
+pub mod effective_params;
 pub mod executable;
 pub mod launcher;
 pub mod lifecycle;
@@ -19,7 +20,8 @@ use uuid::Uuid;
 
 use driver::ServerDriver;
 use registry::InstanceRegistry;
-use types::{ModelMemory, ModelMemoryKey, ParamValues, ServerInstanceConfig, ServerType};
+use effective_params::effective_params;
+use types::{InstancePhase, ModelMemory, ModelMemoryKey, ParamValues, ParamsSaved, ServerInstanceConfig, ServerType};
 
 pub fn adopt_external_as_new_instance(
     registry: &mut InstanceRegistry,
@@ -53,12 +55,8 @@ fn ensure_managed_model(
         .ok_or_else(|| format!("ensure_managed_model: no instance {id}"))?
         .clone();
     let Some(model_key) = config.selected_model_key.clone() else { return Ok(()); };
-    let profile = registry.get_active_profile_params(id).cloned();
-    let mem_key = ModelMemoryKey { server_type: config.server_type, model_key: model_key.clone() };
-    let memory = registry.get_model_memory(&mem_key).cloned();
-    let schema = driver.param_schema();
-    let resolved = ParamValues::resolve(profile.as_ref(), memory.as_ref(), &schema);
-    let Some(content) = driver.generate_managed_config(&model_key, &resolved.0, &config)
+    let params = effective_params(registry, id, driver)?;
+    let Some(content) = driver.generate_managed_config(&model_key, &params, &config)
         else { return Ok(()); };
     let Some(tag) = driver.managed_config_tag(&model_key, id) else { return Ok(()); };
     driver.apply_managed_config(&config, &tag, &content)?;
@@ -81,9 +79,16 @@ pub fn set_instance_params(
     id: Uuid,
     params: ParamValues,
     driver: &dyn ServerDriver,
-) -> Result<(), String> {
+) -> Result<ParamsSaved, String> {
     registry.update_config(id, |c| c.instance_params = params)?;
-    ensure_managed_model(registry, id, driver)
+    ensure_managed_model(registry, id, driver)?;
+    let config = registry.get_config(id).ok_or_else(|| format!("set_instance_params: no instance {id}"))?;
+    let active = registry.get_phase(id).is_some_and(InstancePhase::is_active);
+    Ok(ParamsSaved { takes_effect_on_next_start: active && reads_params_only_at_launch(config.server_type) })
+}
+
+fn reads_params_only_at_launch(server_type: ServerType) -> bool {
+    server_type == ServerType::MlxLm
 }
 
 pub fn set_active_profile(
@@ -147,7 +152,7 @@ mod tests {
     use crate::testing::MockDriver;
     use crate::types::{
         CanonicalParam, InstanceError, InstanceErrorKind, InstancePhase, ModelMemory, ParamValue,
-        ParamValues, ServerInstanceConfig, ServerType,
+        ParamValues, ParamsSaved, ServerInstanceConfig, ServerType,
     };
     use super::{
         adopt_external_as_new_instance, ensure_managed_model, select_model, set_active_profile,
@@ -202,10 +207,6 @@ mod tests {
         ServerInstanceConfig::new(name, ServerType::MlxLm, 8080, "/usr/bin/mlx")
     }
 
-    fn make_memory(model_key: &str) -> ModelMemory {
-        ModelMemory::new(ServerType::MlxLm, model_key)
-    }
-
     #[test]
     fn phase_transition_happy_path() {
         let mut reg = make_registry();
@@ -256,115 +257,6 @@ mod tests {
         let mut reg = make_registry();
         let unknown = uuid::Uuid::new_v4();
         assert!(reg.set_phase(unknown, InstancePhase::Running).is_err());
-    }
-
-    fn temp_desc() -> crate::types::ParamDescriptor {
-        crate::types::ParamDescriptor {
-            param: CanonicalParam::Temperature,
-            server_flag_name: "--temperature",
-            modelfile_param_name: Some("temperature"),
-            default_value: Some(ParamValue::Double(0.8)),
-        }
-    }
-
-    fn ctx_desc() -> crate::types::ParamDescriptor {
-        crate::types::ParamDescriptor {
-            param: CanonicalParam::ContextLength,
-            server_flag_name: "--ctx-size",
-            modelfile_param_name: Some("num_ctx"),
-            default_value: Some(ParamValue::Int(4096)),
-        }
-    }
-
-    #[test]
-    fn resolve_driver_defaults_only() {
-        let schema = vec![temp_desc(), ctx_desc()];
-        let resolved = ParamValues::resolve(None, None, &schema);
-        assert_eq!(resolved.0.values[&CanonicalParam::Temperature], ParamValue::Double(0.8));
-        assert_eq!(resolved.0.values[&CanonicalParam::ContextLength], ParamValue::Int(4096));
-    }
-
-    #[test]
-    fn resolve_memory_overrides_driver_defaults() {
-        let schema = vec![temp_desc(), ctx_desc()];
-        let mut memory_params = ParamValues::default();
-        memory_params.values.insert(CanonicalParam::Temperature, ParamValue::Double(0.3));
-        let mut memory = make_memory("m");
-        memory.last_used_params = memory_params;
-
-        let resolved = ParamValues::resolve(None, Some(&memory), &schema);
-        assert_eq!(resolved.0.values[&CanonicalParam::Temperature], ParamValue::Double(0.3));
-        assert_eq!(resolved.0.values[&CanonicalParam::ContextLength], ParamValue::Int(4096));
-    }
-
-    #[test]
-    fn resolve_profile_overrides_memory_and_driver_defaults() {
-        let schema = vec![temp_desc(), ctx_desc()];
-
-        let mut memory_params = ParamValues::default();
-        memory_params.values.insert(CanonicalParam::Temperature, ParamValue::Double(0.3));
-        memory_params.values.insert(CanonicalParam::ContextLength, ParamValue::Int(8192));
-        let mut memory = make_memory("m");
-        memory.last_used_params = memory_params;
-
-        let mut profile_params = ParamValues::default();
-        profile_params.values.insert(CanonicalParam::Temperature, ParamValue::Double(1.0));
-
-        let resolved = ParamValues::resolve(Some(&profile_params), Some(&memory), &schema);
-        assert_eq!(resolved.0.values[&CanonicalParam::Temperature], ParamValue::Double(1.0));
-        assert_eq!(resolved.0.values[&CanonicalParam::ContextLength], ParamValue::Int(8192));
-    }
-
-    #[test]
-    fn resolve_system_prompt_propagates_through_layers() {
-        let profile_params = ParamValues { system_prompt: Some("You are a helpful assistant.".into()), ..Default::default() };
-        let resolved = ParamValues::resolve(Some(&profile_params), None, &[]);
-        assert_eq!(resolved.0.system_prompt.as_deref(), Some("You are a helpful assistant."));
-    }
-
-    #[test]
-    fn resolve_profile_system_prompt_overrides_memory_prompt() {
-        let memory_params = ParamValues { system_prompt: Some("from memory".into()), ..Default::default() };
-        let mut memory = make_memory("m");
-        memory.last_used_params = memory_params;
-
-        let profile_params = ParamValues { system_prompt: Some("from profile".into()), ..Default::default() };
-
-        let resolved = ParamValues::resolve(Some(&profile_params), Some(&memory), &[]);
-        assert_eq!(resolved.0.system_prompt.as_deref(), Some("from profile"));
-    }
-
-    #[test]
-    fn resolve_profile_no_prompt_clears_memory_prompt() {
-        let memory_params = ParamValues { system_prompt: Some("from memory".into()), ..Default::default() };
-        let mut memory = make_memory("m");
-        memory.last_used_params = memory_params;
-
-        let profile_params = ParamValues::default();
-        let resolved = ParamValues::resolve(Some(&profile_params), Some(&memory), &[]);
-        assert_eq!(resolved.0.system_prompt, None);
-    }
-
-    #[test]
-    fn resolve_memory_prompt_only_when_profile_absent() {
-        let memory_params = ParamValues { system_prompt: Some("from memory".into()), ..Default::default() };
-        let mut memory = make_memory("m");
-        memory.last_used_params = memory_params;
-
-        let resolved = ParamValues::resolve(None, Some(&memory), &[]);
-        assert_eq!(resolved.0.system_prompt.as_deref(), Some("from memory"));
-    }
-
-    #[test]
-    fn resolve_system_prompt_variant_in_driver_defaults_is_ignored() {
-        let schema = vec![crate::types::ParamDescriptor {
-            param: CanonicalParam::SystemPrompt,
-            server_flag_name: "--system",
-            modelfile_param_name: None,
-            default_value: Some(ParamValue::String("default system".into())),
-        }];
-        let resolved = ParamValues::resolve(None, None, &schema);
-        assert!(!resolved.0.values.contains_key(&CanonicalParam::SystemPrompt));
     }
 
     #[test]
@@ -585,6 +477,54 @@ mod tests {
 
         assert_eq!(reg.get_config(id).unwrap().instance_params, params);
         assert_eq!(driver.managed_config_calls.lock().unwrap().len(), 1, "managed tag must be re-applied");
+    }
+
+    #[test]
+    fn a_saved_ollama_instance_param_reaches_the_generated_modelfile() {
+        let mut reg = make_registry();
+        let mut cfg = ollama_config("o");
+        cfg.selected_model_key = Some("llama3:8b".into());
+        let id = reg.add_instance(cfg);
+        let driver = MockDriver::new(ServerType::Ollama);
+        let mut params = ParamValues::default();
+        params.values.insert(CanonicalParam::Temperature, ParamValue::Double(0.42));
+
+        set_instance_params(&mut reg, id, params, &driver).unwrap();
+
+        let calls = driver.managed_config_calls.lock().unwrap();
+        let modelfile = &calls.last().expect("a Modelfile must be baked").1;
+        assert!(modelfile.contains("PARAMETER temperature 0.42"), "Modelfile was:\n{modelfile}");
+    }
+
+    fn save_on(server_type: ServerType, phase: InstancePhase) -> ParamsSaved {
+        let mut reg = make_registry();
+        let mut cfg = ServerInstanceConfig::new("i", server_type, 8080, "/usr/bin/server");
+        cfg.selected_model_key = Some("model-a".into());
+        let id = reg.add_instance(cfg);
+        reg.set_phase(id, phase).unwrap();
+        set_instance_params(&mut reg, id, ParamValues::default(), &MockDriver::new(server_type)).unwrap()
+    }
+
+    #[test]
+    fn saving_params_on_an_active_mlx_lm_instance_takes_effect_on_next_start() {
+        for phase in [InstancePhase::Running, InstancePhase::Starting, InstancePhase::SwitchingModel] {
+            assert!(save_on(ServerType::MlxLm, phase.clone()).takes_effect_on_next_start, "{phase:?}");
+        }
+    }
+
+    #[test]
+    fn saving_params_on_an_inactive_mlx_lm_instance_needs_no_restart() {
+        let error = InstancePhase::Error(InstanceError { kind: InstanceErrorKind::LaunchFailed, message: "x".into() });
+        for phase in [InstancePhase::Stopped, InstancePhase::Stopping, error] {
+            assert!(!save_on(ServerType::MlxLm, phase.clone()).takes_effect_on_next_start, "{phase:?}");
+        }
+    }
+
+    #[test]
+    fn saving_params_on_a_running_ollama_or_external_instance_needs_no_restart() {
+        for server_type in [ServerType::Ollama, ServerType::External] {
+            assert!(!save_on(server_type, InstancePhase::Running).takes_effect_on_next_start, "{server_type:?}");
+        }
     }
 
     #[test]

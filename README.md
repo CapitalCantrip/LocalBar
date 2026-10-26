@@ -146,6 +146,7 @@ localbar/
 ├── localbar-core/          # Pure Rust: server drivers, lifecycle, persistence, types
 │   └── src/
 │       ├── drivers/        # mlx-lm, Ollama, external drivers; for_instance builds one from the registry
+│       ├── effective_params.rs # The params an instance runs with: driver defaults, model memory, instance params, profile
 │       └── types.rs        # Canonical types shared across crates
 ├── localbar-tauri/         # Tauri app shell
 │   ├── src/lib.rs          # IPC commands, tray, window management
@@ -183,6 +184,7 @@ localbar/
 | D16 | Server executables found via the login-shell PATH plus common folders, so apps opened from Finder work |
 | D17 | mlx-lm launcher detection and the Install offer |
 | D18 | Version shown in the app; daily, opt-out check for new GitHub releases (notify only) |
+| D19 | Instance params stay per instance; one rule computes the effective params every consumer uses |
 | D-G | Tauri rewrite — Rust core + React frontend, replaces the Swift prototype |
 | D-H | No in-app chat panel — LocalBar is a control plane, not a frontend |
 | D-I | Windows: CLI binary first, GUI later |

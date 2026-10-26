@@ -44,6 +44,12 @@ _Avoid_: setting, option, config field
 **ParamValues**: The full bag of params for an instance at a point in time — a map of CanonicalParam → ParamValue, plus a separate system prompt.
 _Avoid_: parameter set, config snapshot
 
+**Instance params**: The ParamValues the user has saved on one instance. They belong to the instance, not the model, so two instances running the same model can be tuned for different uses.
+_Avoid_: instance settings, saved params
+
+**Effective params**: The ParamValues an instance actually runs with: driver defaults, overlaid by the selected model's ModelMemory, then the instance params, then the Active profile.
+_Avoid_: resolved params, current params
+
 **Profile**: A named, saved snapshot of ParamValues that can be applied to an instance. Profiles are global (not tied to one instance) and optionally scoped to a server type.
 _Avoid_: preset, template, configuration
 
