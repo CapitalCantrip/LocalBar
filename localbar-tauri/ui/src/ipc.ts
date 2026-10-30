@@ -46,6 +46,12 @@ export const ipc = {
   getInstancePid: (id: string): Promise<InstancePidDto | null> =>
     invoke('get_instance_pid', { id }),
 
+  pendingStartupInstances: (): Promise<string[]> =>
+    invoke('pending_startup_instances'),
+
+  skipStartupInstances: (ids: string[]): Promise<void> =>
+    invoke('skip_startup_instances', { ids }),
+
   checkMemoryWarning: (id: string): Promise<string | null> =>
     invoke('check_memory_warning', { id }),
 
