@@ -1,3 +1,4 @@
 #!/bin/sh
 set -e
 scripts/check-no-comments
+cc-check --lang typescript localbar-tauri/ui/src --baseline localbar-tauri/ui/cc-baseline.json

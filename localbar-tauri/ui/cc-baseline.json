@@ -1,0 +1,7 @@
+{
+  "localbar-tauri/ui/src/popover/PopoverApp.tsx::InstanceRow": 13,
+  "localbar-tauri/ui/src/settings/AddModelPicker.tsx::AddModelPicker": 10,
+  "localbar-tauri/ui/src/settings/DetailPanel.tsx::DetailPanel": 21,
+  "localbar-tauri/ui/src/settings/GeneralTab.tsx::checkResultLabel": 13,
+  "localbar-tauri/ui/src/types.ts::phaseLabel": 18
+}
