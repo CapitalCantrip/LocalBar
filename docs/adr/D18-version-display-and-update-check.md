@@ -45,3 +45,9 @@ Comparison is semver-like: an optional `v` prefix, up to three numeric parts (mi
 
 - A newer release is noticed within about a day of publishing, or immediately with **Check now**.
 - If the app is ever signed, the notice could be replaced by Tauri's updater; that would need a new ADR.
+
+## Addendum 2026-10-22 — the outcome survives a restart (#101)
+
+The last completed check's outcome (`UpdateCheckOutcome`, so the version and release URL) is saved in `state.json` as `last_update_outcome`, next to `last_update_check_secs`. A failed check saves nothing, so it never overwrites a known "available" notice; an up-to-date result replaces it. Old state files without the field load as "nothing saved" (`serde(default)`).
+
+At startup the saved outcome seeds the in-memory update status through `update_check::restore_outcome`, which keeps an `Available` outcome only while its version is still newer than the running version. After the user installs that release, the stale notice is therefore dropped. `update_check::visible_status` keeps the opt-out rule in core: with `check_for_updates` off, the notice is hidden even if one was saved.

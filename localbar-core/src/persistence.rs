@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::update_check::UpdateCheckOutcome;
 use crate::types::{AppSettings, DiscoveryConfig, ModelMemory, ModelMemoryKey, NamedProfile, ServerInstanceConfig};
 
 pub trait Persistence: Send + Sync {
@@ -16,6 +17,8 @@ pub trait Persistence: Send + Sync {
     fn load_app_settings(&self) -> Result<AppSettings, String>;
     fn save_last_update_check(&mut self, secs: i64) -> Result<(), String>;
     fn load_last_update_check(&self) -> Result<Option<i64>, String>;
+    fn save_last_update_outcome(&mut self, outcome: &UpdateCheckOutcome) -> Result<(), String>;
+    fn load_last_update_outcome(&self) -> Result<Option<UpdateCheckOutcome>, String>;
 }
 
 #[derive(Debug, Default)]
@@ -26,6 +29,7 @@ pub struct InMemoryPersistence {
     discovery_config: DiscoveryConfig,
     app_settings: AppSettings,
     last_update_check: Option<i64>,
+    last_update_outcome: Option<UpdateCheckOutcome>,
 }
 
 impl Persistence for InMemoryPersistence {
@@ -82,6 +86,15 @@ impl Persistence for InMemoryPersistence {
     fn load_last_update_check(&self) -> Result<Option<i64>, String> {
         Ok(self.last_update_check)
     }
+
+    fn save_last_update_outcome(&mut self, outcome: &UpdateCheckOutcome) -> Result<(), String> {
+        self.last_update_outcome = Some(outcome.clone());
+        Ok(())
+    }
+
+    fn load_last_update_outcome(&self) -> Result<Option<UpdateCheckOutcome>, String> {
+        Ok(self.last_update_outcome.clone())
+    }
 }
 
 pub struct FilePersistence {
@@ -102,6 +115,8 @@ struct StorageFile {
     settings: AppSettings,
     #[serde(default)]
     last_update_check_secs: Option<i64>,
+    #[serde(default)]
+    last_update_outcome: Option<UpdateCheckOutcome>,
 }
 
 impl FilePersistence {
@@ -187,12 +202,23 @@ impl Persistence for FilePersistence {
     fn load_last_update_check(&self) -> Result<Option<i64>, String> {
         Ok(self.read()?.last_update_check_secs)
     }
+
+    fn save_last_update_outcome(&mut self, outcome: &UpdateCheckOutcome) -> Result<(), String> {
+        let mut file = self.read()?;
+        file.last_update_outcome = Some(outcome.clone());
+        self.write(&file)
+    }
+
+    fn load_last_update_outcome(&self) -> Result<Option<UpdateCheckOutcome>, String> {
+        Ok(self.read()?.last_update_outcome)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::{NamedProfile, ParamValues, ServerInstanceConfig, ServerType};
+    use crate::update_check::UpdateCheckOutcome;
     use uuid::Uuid;
 
     fn ollama_config() -> ServerInstanceConfig {
@@ -387,5 +413,33 @@ mod tests {
         p.save_discovery_config(&cfg).unwrap();
         p.save_app_settings(&AppSettings { keep_servers_running_on_quit: true, ..AppSettings::default() }).unwrap();
         assert_eq!(p.load_discovery_config().unwrap(), cfg);
+    }
+
+    #[test]
+    fn file_persistence_last_update_outcome_round_trips_and_preserves_the_check_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = FilePersistence::new(dir.path().join("state.json"));
+        let outcome = UpdateCheckOutcome::Available { version: "0.3.3".into(), url: "https://example.com/v0.3.3".into() };
+        p.save_last_update_check(1_700_000_000).unwrap();
+        p.save_last_update_outcome(&outcome).unwrap();
+        assert_eq!(p.load_last_update_outcome().unwrap(), Some(outcome));
+        assert_eq!(p.load_last_update_check().unwrap(), Some(1_700_000_000));
+    }
+
+    #[test]
+    fn file_persistence_legacy_state_without_a_saved_outcome_loads_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, r#"{"instances":[],"discovery":{},"settings":{},"last_update_check_secs":1700000000}"#).unwrap();
+        let p = FilePersistence::new(path);
+        assert_eq!(p.load_last_update_outcome().unwrap(), None);
+    }
+
+    #[test]
+    fn in_memory_persistence_last_update_outcome_round_trips() {
+        let mut p = InMemoryPersistence::default();
+        assert_eq!(p.load_last_update_outcome().unwrap(), None);
+        p.save_last_update_outcome(&UpdateCheckOutcome::UpToDate).unwrap();
+        assert_eq!(p.load_last_update_outcome().unwrap(), Some(UpdateCheckOutcome::UpToDate));
     }
 }
