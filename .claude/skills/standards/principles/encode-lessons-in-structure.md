@@ -34,4 +34,4 @@ first product: committing every changed file at once kept recurring as a
 written lesson, so it became a hook that refuses the command.
 
 Source: adapted from pstack's *encode-lessons-in-structure* (Lauren Tan, MIT;
-LICENSE-pstack), with the promotion order from ADR-002.
+LICENSE-pstack), with the [promotion order](../references/promotion-path.md) from ADR-002.

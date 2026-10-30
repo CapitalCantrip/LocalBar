@@ -52,6 +52,5 @@ file when its trigger matches; read only the files that apply.
   have passed without a commit.
   [principles/stop-and-report.md](principles/stop-and-report.md)
 
-Why the standards take this shape: `docs/adr/ADR-002-engineering-standards.md`
-in the quality-gates repo. Principles adapted from Lauren Tan's pstack keep its
+Why the standards take this shape: [three layers](references/three-layers.md). Principles adapted from Lauren Tan's pstack keep its
 MIT notice in [LICENSE-pstack](LICENSE-pstack).

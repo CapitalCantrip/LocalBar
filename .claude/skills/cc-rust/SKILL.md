@@ -48,13 +48,12 @@ using `cargo clippy`, and optionally scaffolds the project-level gate.
 
 ## Thresholds
 
-| Cognitive complexity | Action |
-|---|---|
-| ≤ 10 | ok |
-| 11–15 | schedule refactor |
-| > 15 | refactor before next commit |
+| Measure | ok | FAIL |
+|---|---|---|
+| Cognitive complexity | ≤ 10 | > 10 |
+| Function length (executable lines, excluding comments and attributes) | ≤ 25 | > 25 |
 
-Function length > 25 executable lines (excluding comments and attributes): schedule refactor.
+The deny attributes from `setup` make both FAILs break the build.
 
 ## Architectural constraints — apply when writing new Rust in this session
 

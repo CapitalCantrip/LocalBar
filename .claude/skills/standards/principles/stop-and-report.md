@@ -17,4 +17,4 @@ of a working step resets the count; so does the builder's answer.
 
 **Enforced by:** nothing yet; a judgement call.
 
-Source: lessons from use, ADR-002.
+Source: [lessons from use](../references/principles-from-use.md), ADR-002.

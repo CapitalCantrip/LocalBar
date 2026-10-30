@@ -59,6 +59,4 @@ Prefer somewhere that fails when the knowledge stops being true.
 
 ## Installing the commands
 
-```bash
-uv tool install "quality-gates @ git+https://github.com/CapitalCantrip/quality-gates@v0.4.1"
-```
+If `comment-debt` is missing, install with the install line in `/setup-standards`.
