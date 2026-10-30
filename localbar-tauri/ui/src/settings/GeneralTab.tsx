@@ -5,7 +5,7 @@ import { s } from './styles'
 import { UpdateAvailableLink, useVersionInfo } from '../useVersionInfo'
 import type { UpdateCheckOutcome } from '../types'
 
-function checkResultLabel(result: UpdateCheckOutcome): string | null {
+export function checkResultLabel(result: UpdateCheckOutcome): string | null {
   switch (result.type) {
     case 'upToDate': return "You're up to date"
     case 'failed': return "Couldn't check"
