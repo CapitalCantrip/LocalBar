@@ -31,5 +31,5 @@ builder notices, and lead with the one you recommend.
 `CLAUDE.md` lacks the one-line form of this rule. Whether a question follows
 the format is a judgement call.
 
-Source: ADR-002 § Asking the builder. Replaces pstack's *never block on the
+Source: [the asking rule](../references/asking-the-builder.md) in ADR-002. Replaces pstack's *never block on the
 human*, which ADR-002 rejects.

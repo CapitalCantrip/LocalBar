@@ -21,3 +21,7 @@ No code comments. The only exception is `// SAFETY:` on `unsafe` blocks. Record 
 ### Code layout
 
 The Rust core is `localbar-core/`, the Tauri shell is `localbar-tauri/` (Rust in `localbar-tauri/src/`, React UI in `localbar-tauri/ui/src/`); this repo has no `src-tauri/`. Full map: README § Project structure.
+
+### Pull requests
+
+Write every PR body with the `pr` skill: Summary, Evidence, Merge Danger. `.github/pull_request_template.md` holds the same headings.

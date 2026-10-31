@@ -55,6 +55,10 @@ jobs:
         working-directory: localbar-tauri/ui
         run: npm run build
 
+      - name: Frontend tests with coverage
+        working-directory: localbar-tauri/ui
+        run: npm run test:coverage
+
       - name: No code comments
         run: |
           scripts/check-no-comments --self-test
@@ -66,11 +70,16 @@ jobs:
 
       - name: Install quality-gates
         if: runner.os == 'Linux'
-        run: uv tool install "quality-gates @ git+https://github.com/CapitalCantrip/quality-gates@v0.4.1"
+        run: uv tool install "quality-gates @ git+https://github.com/CapitalCantrip/quality-gates@v0.12.0"
 
       - name: Skills, stage guard and asking rule match the pinned quality-gates
         if: runner.os == 'Linux'
         run: qg-skills --check
+
+      - name: Frontend complexity gate
+        if: runner.os == 'Linux'
+        working-directory: localbar-tauri/ui
+        run: cc-check --lang typescript src --baseline cc-baseline.json
 
       - name: cargo clippy (workspace)
         run: cargo clippy --all-targets --workspace -- -D warnings

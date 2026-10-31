@@ -4,7 +4,7 @@ import { type DiscoveredModel } from '../types'
 import { formatModelKey } from '../modelLabel'
 import { s } from './styles'
 
-function fmtBytes(b: number | null): string {
+export function fmtBytes(b: number | null): string {
   if (b === null) return '—'
   if (b >= 1e9) return `${(b / 1e9).toFixed(1)} GB`
   if (b >= 1e6) return `${(b / 1e6).toFixed(0)} MB`

@@ -2,6 +2,14 @@
 
 Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
 
+## In a cloud session
+
+In a Claude Code cloud session GitHub GraphQL is blocked, so `gh issue`, `gh pr` and `gh label` fail with `HTTP 403`. Use the GitHub MCP tools or `gh api` REST calls instead; a local session is unaffected.
+
+- **Issues**: the MCP tools `issue_write`, `issue_read`, `list_issues`, and `sub_issue_write` for sub-issues.
+- **Labels**: `issue_write` refuses a label that does not exist, and MCP cannot create one. Create it with `gh api -X POST repos/<owner>/<repo>/labels -f name=... -f color=ededed`.
+- **Blocking edges**: the REST call under Wayfinding operations works as written.
+
 ## Conventions
 
 - **Create an issue**: `gh issue create --title "..." --body "..."`. Use a heredoc for multi-line bodies.

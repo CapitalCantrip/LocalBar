@@ -19,14 +19,20 @@ export function InlineEdit({ value, onSave, style: extraStyle, inputStyle, place
     try { await onSave(draft.trim()) } finally { setSaving(false) }
   }
 
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => setDraft(e.target.value)
+  const handleBlur = () => void commit()
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') e.currentTarget.blur()
+  }
+
   return (
     <input
       style={{ ...s.input, ...extraStyle, ...inputStyle, opacity: saving ? 0.5 : 1 }}
       value={draft}
       placeholder={placeholder}
-      onChange={e => setDraft(e.target.value)}
-      onBlur={() => void commit()}
-      onKeyDown={e => { if (e.key === 'Enter') { e.currentTarget.blur() } }}
+      onChange={handleChange}
+      onBlur={handleBlur}
+      onKeyDown={handleKeyDown}
     />
   )
 }

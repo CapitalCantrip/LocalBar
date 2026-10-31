@@ -14,10 +14,10 @@ engineering knowledge. Run on a set-up project, every step finds its work
 already in place and changes nothing, so this is also the upgrade after a pin
 bump.
 
-The pin this skill belongs to: `v0.4.1`. Install line, used in step 2:
+The pin this skill belongs to: `v0.12.0`. Install line, used in step 2:
 
 ```bash
-uv tool install "quality-gates @ git+https://github.com/CapitalCantrip/quality-gates@v0.4.1"
+uv tool install --with-executables-from coverage "quality-gates[coverage] @ git+https://github.com/CapitalCantrip/quality-gates@v0.12.0"
 ```
 
 Ask the builder only where a choice is theirs, in the form the `standards`
@@ -35,8 +35,10 @@ or **not done** with the reason. Step 7 reads from it.
 2. If `.claude/agents/` holds `issue-tracker.md`, `triage-labels.md` or
    `domain.md` (Pocock's earlier layout), `git mv` each into `docs/agents/`.
 3. Run `qg-agent-docs --tracker <github|gitlab|local>`. It writes
-   `docs/agents/` from Matt Pocock's setup templates, adds the Agent skills
-   block to `CLAUDE.md`, and never overwrites a file the project edited. Copy
+   `docs/agents/` from Matt Pocock's setup templates, writes
+   `.github/pull_request_template.md` with the `pr` skill's headings, adds the
+   Agent skills block to `CLAUDE.md` (with a *Pull requests* section that
+   sends PR bodies to the `pr` skill), and never overwrites a file the project edited. Copy
    every line of its output into the report, including any template diff, so
    the builder can choose to adopt it.
 4. On GitHub, create each of the five labels in `docs/agents/triage-labels.md`
@@ -66,7 +68,8 @@ glossary and `docs/adr/` exist, no line in `CLAUDE.md` contradicts
 
 Detect the languages: Python (`pyproject.toml`, `setup.py` or `.py` files
 outside `.venv`), Swift (`Package.swift`, an `.xcodeproj` or `.swift` files),
-Rust (`Cargo.toml`). Do every block that applies.
+Rust (`Cargo.toml`), TypeScript or JavaScript (`package.json`, or `.ts`, `.tsx`,
+`.js`, `.jsx`, `.cjs` or `.mjs` files outside `node_modules`). Do every block that applies.
 
 - **All projects:** add the pinned requirement to the project's dev
   dependencies (Python), or to the CI install step (others), replacing any
@@ -76,15 +79,24 @@ Rust (`Cargo.toml`). Do every block that applies.
 - **Python:** `comment-debt`, `cc-check`, `crap`. The `/no-comments` skill
   describes the comment gate.
 - **Swift:** the complexity gate is SwiftLint's `cyclomatic_complexity` block,
-  exactly as `/cc-swift` gives it, in `.swiftlint.yml`. CRAP needs an Xcode
-  `.xcresult`: an Xcode project gets it as `/crap` describes; a SwiftPM-only
-  package cannot yet (quality-gates issue #6), so report CRAP as not done with
-  that reason.
+  exactly as `/cc-swift` gives it, in `.swiftlint.yml`. The CRAP gate is
+  `crap --lang swift`, reading coverage as `/crap` describes: an Xcode project
+  from its `.xcresult` bundle (`--xcresult`), or a SwiftPM package with a test
+  target from the llvm-cov export JSON its tests write (`--llvm-cov-json`). A
+  SwiftPM package with no test target has no CRAP gate; step 3 says how to
+  report that.
 - **Rust:** run the setup steps of `/cc-rust`: `clippy.toml` and the deny
   attributes.
+- **TypeScript / JavaScript:** `cc-check --lang typescript` and
+  `crap --lang typescript`, as `/cc-typescript` and `/crap` describe. CRAP
+  needs Istanbul's `coverage-final.json`: Vitest with `@vitest/coverage-v8`
+  and `--coverage.reporter=json`, or Jest with `--coverageReporters=json`. A
+  project on `node --test` cannot yet (it writes lcov), so report CRAP as not
+  done with that reason.
 
-Done when every detected language has its gates configured and `qg-skills`
-has run.
+Done when every detected language's gates are configured, each CRAP gate step
+2 or 3 says to report as not done is reported not done with its reason, and
+`qg-skills` has run.
 
 ## 3. Baselines
 
@@ -93,27 +105,62 @@ from the repo root and commit the file it writes.
 
 - **Python:** `comment-debt --update`;
   `cc-check <source dirs> --baseline cc-baseline.json --update`; collect
-  coverage (`coverage run -m pytest` or `-m unittest discover`, then
-  `coverage json`) and run
+  coverage (`coverage erase`, then `coverage run -m pytest` or
+  `-m unittest discover`, then `coverage json`) and run
   `crap --lang python <source dirs> --coverage-json coverage.json --baseline crap-baseline.json --update`.
-  Add `coverage.json` and `.coverage` to `.gitignore`.
+  Add `coverage.json` and `.coverage` to `.gitignore`. Run coverage in the
+  environment the tests run in; when the tests start child processes, add
+  `[tool.coverage.run] patch = ["subprocess"]` to `pyproject.toml`. If the
+  update exits 1 listing `UNMEASURED` functions, coverage missed those files:
+  fix the measuring or take them out of the scan, then rerun. Do not report
+  them as debt.
 - **Swift:** run SwiftLint. Each function already over the limit gets
   `// swiftlint:disable:next cyclomatic_complexity` above it; that pragma is its
-  baseline entry. With an `.xcresult`, record `crap --lang swift` with
-  `--baseline crap-baseline.json --update`.
+  baseline entry. Then record CRAP from the project's coverage. In a SwiftPM
+  package with a test target, run `swift test --enable-code-coverage`, then
+  `crap --lang swift Sources/ --llvm-cov-json "$(swift test --show-codecov-path)" --baseline crap-baseline.json --update`.
+  In an Xcode project with an `.xcresult`, run
+  `crap --lang swift <source dirs> --xcresult <bundle> --baseline crap-baseline.json --update`.
+  Run the tests in the same checkout as `crap`: it matches a report file only at
+  its exact path, so a bundle made in another checkout or container leaves every
+  function unmeasured, and unmeasured functions fail the gate.
+  A SwiftPM package with no test target (no `.testTarget` in its
+  `Package.swift`) has no coverage to record, so CRAP is not set up for it.
+  Report CRAP as **not done**, with the reason (no test target, so
+  `swift test --enable-code-coverage` reports no tests found) and what it takes
+  (add a test target with tests, then rerun `/setup-standards`).
+- **TypeScript / JavaScript:**
+  `cc-check --lang typescript <source dirs> --baseline cc-baseline.json --update`;
+  collect coverage as in step 2 and run
+  `crap --lang typescript <source dirs> --istanbul-json coverage/coverage-final.json --baseline crap-baseline.json --update`.
+  Add `coverage/` to `.gitignore`. A project on `node --test` gets no CRAP
+  baseline: report CRAP as not done, as step 2 says.
 - **Rust:** run `cargo clippy --all-targets`. Each function it fails gets
   `#[allow(clippy::cognitive_complexity)]` or `#[allow(clippy::too_many_lines)]`;
   that attribute is its baseline entry.
 
+A project in any language with no tests has no coverage for `crap` to read, so
+CRAP is not set up for it. Report CRAP as **not done**, with the reason (no
+tests, so no coverage) and what it takes (write tests, then rerun
+`/setup-standards`). Its other gates are set up as usual.
+
 Report each baseline with its count: "12 functions over the complexity limit,
-recorded; new ones will fail". Done when the gate passes on today's tree.
+recorded; new ones will fail". Done when each gate passes on today's tree,
+except a CRAP gate step 2 or 3 says to report as not done, which is reported
+not done with its reason.
+
+On an upgrade, a baseline that fails after the bump is re-recorded as the
+release's CHANGELOG entry says under *When you bump the pin*.
 
 ## 4. Hooks
 
 1. `.githooks/pre-commit` runs every fast gate, stopping at the first failure:
    `comment-debt` and `cc-check <source dirs> --baseline cc-baseline.json` for
-   Python; SwiftLint for Swift where installed. Keep any lines the project
-   already had. Make it executable.
+   Python; `cc-check --lang typescript <source dirs> --baseline cc-baseline.json`
+   for TypeScript or JavaScript; `swiftlint` for Swift where installed. Keep any lines the project
+   already had. Make it executable. If the project has a `.venv`, the hook's
+   first line after the shebang is `[ -d .venv/bin ] && PATH="$PWD/.venv/bin:$PATH"`:
+   VS Code and cloud shells run the hook without the venv activated.
 2. Run `git config core.hooksPath .githooks`.
 3. Add a `SessionStart` hook to `.claude/settings.json` that runs
    `git config core.hooksPath .githooks`, so cloud sessions get the hook too.
@@ -133,14 +180,36 @@ Make CI enforce what the hooks enforce, plus the slow gates.
   suite, and the CRAP step from the same file to the CI workflow after the
   tests.
 - **Rust:** a CI step running `cargo clippy --all-targets`.
+- **TypeScript / JavaScript:** the steps in [ci-typescript.md](ci-typescript.md).
 - **Swift:** a CI step running SwiftLint, on a macOS runner. If the project has
-  no macOS CI job, report this as not done and say what it would cost.
+  no macOS CI job, report this as not done and say what it would cost. A
+  SwiftPM package with a test target also gets a CRAP step, which runs on Linux
+  or macOS. Put it on the one the baseline was recorded on, and run both
+  commands in the same job:
+
+  ```bash
+  swift test --enable-code-coverage
+  crap --lang swift Sources/ --llvm-cov-json "$(swift test --show-codecov-path)" --baseline crap-baseline.json
+  ```
+
+  A function under `#if os(macOS)` or `canImport(UIKit)` has no coverage
+  record on Linux, so it is unmeasured there and fails the gate. A report made
+  in another checkout or container leaves every function unmeasured, because
+  `crap` matches a report file only at its exact path.
+
+  A SwiftPM package with no test target gets no CRAP step: report CRAP as
+  **not done**, as step 3 says.
 - If the project has no CI workflow, add `.github/workflows/tests.yml` that
   installs the project, runs the tests and the steps above, on pull requests
-  and pushes to the default branch.
+  and pushes to the default branch. A SwiftPM package with no test target has
+  no tests to run (`swift test` exits 1 there), so the Swift part of its
+  workflow runs SwiftLint only.
 
-Done when the test suite passes locally with the new tests, and every gate the
-hooks run also runs in CI.
+A project with no tests gets no CRAP step: report CRAP as **not done**, as
+step 3 says.
+
+Done when the test suite, where the project has one, passes locally with the
+new tests, and every gate the hooks run also runs in CI.
 
 ## 6. The asking rule
 
