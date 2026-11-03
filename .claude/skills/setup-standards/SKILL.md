@@ -14,10 +14,10 @@ engineering knowledge. Run on a set-up project, every step finds its work
 already in place and changes nothing, so this is also the upgrade after a pin
 bump.
 
-The pin this skill belongs to: `v0.12.0`. Install line, used in step 2:
+The pin this skill belongs to: `v0.13.0`. Install line, used in step 2:
 
 ```bash
-uv tool install --with-executables-from coverage "quality-gates[coverage] @ git+https://github.com/CapitalCantrip/quality-gates@v0.12.0"
+uv tool install --with-executables-from coverage "quality-gates[coverage] @ git+https://github.com/CapitalCantrip/quality-gates@v0.13.0"
 ```
 
 Ask the builder only where a choice is theirs, in the form the `standards`
@@ -26,6 +26,10 @@ default in the report.
 
 Keep a running list as you go: for each step, **done**, **already in place**,
 or **not done** with the reason. Step 7 reads from it.
+
+When the builder asks what a component does, run `qg explain <name>`, read the
+explainer it prints, and say what it means for this project. Never write an
+explanation fresh.
 
 ## 1. Agent docs and the glossary
 
@@ -64,16 +68,40 @@ glossary and `docs/adr/` exist, no line in `CLAUDE.md` contradicts
 `docs/agents/`, and every line in `CLAUDE.md` that names a file in
 `docs/agents/` also says what that file holds.
 
-## 2. Gates for each language
+## 2. Languages and components
 
-Detect the languages: Python (`pyproject.toml`, `setup.py` or `.py` files
-outside `.venv`), Swift (`Package.swift`, an `.xcodeproj` or `.swift` files),
-Rust (`Cargo.toml`), TypeScript or JavaScript (`package.json`, or `.ts`, `.tsx`,
-`.js`, `.jsx`, `.cjs` or `.mjs` files outside `node_modules`). Do every block that applies.
+1. Add the pinned requirement to the project's dev dependencies (Python), or
+   to the CI install step (others), replacing any older `quality-gates` pin,
+   and install it.
+2. Run `qg setup`. It writes nothing. It proposes the languages, from project
+   markers and from the files git would commit, test folders included and
+   fixture folders left out (shell
+   counts by suffix or by a shell first line such as `#!/bin/sh`), and one
+   row per component: its description, its cost (commit delay, CI time,
+   outside tools) and a tick on the recommended set. With no choice file
+   `quality-gates.json` yet, what is installed is **chosen**. Any other
+   component that applies and that the file does not list is **offered**,
+   ticked, even when `qg-skills` already copied its skill: it is recorded
+   only when `--choose` or `--decline` names it.
+3. Show the builder that table as it stands, and ask them to say "go" or name
+   changes. Under the table, end with one line: *Ask me about any row, or run
+   `qg explain <name>`.*
+4. "Go" accepts every ticked row: add `--choose <id>` for each **offered** row
+   the builder did not turn down. Turn each change into a flag on `qg setup`:
+   `--add-language <name>` (a
+   language may be added before it has code), `--remove-language <name>`,
+   `--choose <id>`, `--decline <id>`. When it refuses (the core, a gate the
+   project has, or a language that still has code), tell the builder plainly:
+   switching those off waits on recorded reasons, and nothing was changed.
+5. Run `qg setup --go` with the same flags. It writes `quality-gates.json`
+   only, and moves the `--exclude` prefixes of the `comment-debt` commands in
+   the hook and CI into the file; leave those flags where they are. Commit the
+   file.
 
-- **All projects:** add the pinned requirement to the project's dev
-  dependencies (Python), or to the CI install step (others), replacing any
-  older `quality-gates` pin. Run `qg-skills`: it copies the skills and the
+From here on, do only the blocks for the languages the file records, and only
+for chosen components.
+
+- **All projects:** run `qg-skills`: it copies the skills and the
   stage guard into `.claude/`, registers the guard in `.claude/settings.json`,
   and adds the asking-rule line to `CLAUDE.md`.
 - **Python:** `comment-debt`, `cc-check`, `crap`. The `/no-comments` skill
@@ -94,9 +122,10 @@ Rust (`Cargo.toml`), TypeScript or JavaScript (`package.json`, or `.ts`, `.tsx`,
   project on `node --test` cannot yet (it writes lcov), so report CRAP as not
   done with that reason.
 
-Done when every detected language's gates are configured, each CRAP gate step
-2 or 3 says to report as not done is reported not done with its reason, and
-`qg-skills` has run.
+Done when `quality-gates.json` records the builder's answer, every recorded
+language's chosen gates are configured, each CRAP gate step 2 or 3 says to
+report as not done is reported not done with its reason, and `qg-skills` has
+run.
 
 ## 3. Baselines
 
@@ -228,7 +257,18 @@ step above (and per language in steps 2, 3 and 5): **done**, **already in
 place**, or **not done** with the reason and what it would take. Below it, list
 each choice you made on the builder's behalf, each `CLAUDE.md` line you
 replaced (before and after), and each template change `qg-agent-docs` showed.
+
+Then two blocks:
+
+- **Your components:** from `qg status`, which components are on, which are
+  off, which were offered and declined, and any language added by hand before
+  it had code. If `qg status` warns about code in a language the file does not
+  record, say so here.
+- **Next:** at most three actions for the builder, most useful first, each in
+  one line they can act on, then the line *Ask me about any row, or run
+  `qg explain <name>`.*
+
 Then commit the changes, staging files by name.
 
-Done when every step in this skill has a row, and every row says what the
-builder would notice.
+Done when every step in this skill has a row, the report has *Your components*
+and *Next*, and every row says what the builder would notice.

@@ -21,7 +21,7 @@ Runs `cc-check --lang typescript` against `.ts`, `.tsx`, `.js`, `.jsx`, `.cjs` a
 
 ## Steps
 
-1. Identify the source directories. The tool skips the folders on the [skip list](references/skip-list.md) and follows symlinked folders by the [symlink rule](references/symlinked-folders.md). It names each skipped folder it found on a last `Skipped N folder(s):` line; if that line names a folder holding real source, report it. A folder marked `(already scanned)` was scanned once and is not lost source.
+1. Identify the source directories. The tool looks only at the [files in scope](references/files-in-scope.md), the files git would commit less the choice file's exclusions, and follows symlinked folders by the [symlink rule](references/symlinked-folders.md). If source you expected is missing, check `.gitignore` and `exclude` in `quality-gates.json`. A last `Skipped N folder(s):` line names folders marked `(already scanned)`: each was scanned once and is not lost source.
 2. Run:
    ```bash
    cc-check --lang typescript <dirs> --threshold 8
