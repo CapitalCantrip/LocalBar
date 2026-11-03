@@ -1,0 +1,26 @@
+{
+  "format_version": 1,
+  "languages": [
+    "rust",
+    "typescript"
+  ],
+  "exclude": [
+    "scripts/fixtures/"
+  ],
+  "components": {
+    "chosen": [
+      "complexity-rust",
+      "complexity-typescript",
+      "design-helpers",
+      "session-helpers"
+    ],
+    "declined": []
+  },
+  "commit_time_limit_seconds": 2,
+  "settings": {
+    "no-comments": {
+      "exclude": [],
+      "conventions": []
+    }
+  }
+}

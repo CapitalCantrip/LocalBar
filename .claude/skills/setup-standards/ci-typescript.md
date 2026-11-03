@@ -8,7 +8,7 @@ quality-gates is a Python package, so the job needs Python as well as Node.
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install "quality-gates @ git+https://github.com/CapitalCantrip/quality-gates@v0.12.0"
+      - run: pip install "quality-gates @ git+https://github.com/CapitalCantrip/quality-gates@v0.13.0"
       - run: cc-check --lang typescript src --baseline cc-baseline.json
       - run: npx vitest run --coverage --coverage.reporter=json
       - run: crap --lang typescript src --istanbul-json coverage/coverage-final.json --baseline crap-baseline.json
