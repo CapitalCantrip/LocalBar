@@ -199,14 +199,14 @@ localbar/
 |---|---|
 | macOS 14+ (Apple Silicon and Intel) | ✅ Main platform. Universal DMG, unsigned (see [Installation](#installation), #93) |
 | Linux (x86-64 and ARM64) | 🧪 `.deb`, `.rpm` and `.AppImage` are built with every release but haven't been tested by hand yet (#27) |
-| Windows | 🔜 Command-line version first, app later ([D-I](docs/adr/D-I-windows-cli-first.md)) |
+| Windows | ⏸ Parked ([D-I](docs/adr/D-I-windows-cli-first.md)) |
 
 **Working:**
 - Start, stop, restart and switch models on mlx-lm and Ollama servers
 - Finds `uv`, `uvx`, `mlx_lm.server` or Python on its own, even when opened from Finder. If none is found, offers **Choose…** and **Install…**
 - Shows progress while it searches for mlx-lm, with **Skip**
 - Adopts servers that are already running, detects port conflicts, and offers Adopt/Retry
-- Optionally keeps servers running when LocalBar quits, and restores them on the next launch
+- Optionally keeps servers running when LocalBar quits, and restores them on the next launch. Asks which to start when several would launch at once
 - Lists Ollama models even when the Ollama app isn't running. Model folders can be set globally or per server
 - Each server type shows only the parameters it supports. Parameters are remembered per model
 - Several servers at once, with a memory warning before starting another
@@ -214,11 +214,17 @@ localbar/
 - Shows the app version and checks GitHub once a day for new releases (can be turned off)
 
 **Planned:**
-- Asking which servers to restore when several would start at once (#15)
-- Named profiles (save and switch parameter presets)
-- Context window usage display
+- A command line (`localbar start`, `stop`, `status`, `logs`) so scripts and agents can drive it
+- Server logs you can open when a start fails
+- Extra launch flags per server
 - llama.cpp driver
 - Signed and notarised macOS build (#93)
+
+**Parked for now:**
+- Named profiles (save and switch parameter presets)
+- Context window usage display
+- Hand-testing the Linux app (#27)
+- Windows ([D-I](docs/adr/D-I-windows-cli-first.md))
 
 ---
 
